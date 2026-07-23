@@ -1,0 +1,251 @@
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
+import { createHmac } from 'crypto';
+import { PrismaService } from '../prisma/prisma.service';
+
+type InitializeEscrowInput = {
+  shipmentId?: string;
+  amount?: number;
+  currency?: string;
+  customerEmail?: string;
+};
+
+@Injectable()
+export class PaymentProviderService {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  status() {
+    const provider = this.config.get<string>('PAYMENT_PROVIDER') ?? 'mock';
+    const hasPaystackKey = Boolean(this.config.get<string>('PAYSTACK_SECRET_KEY'));
+    const hasStripeKey = Boolean(this.config.get<string>('STRIPE_SECRET_KEY'));
+
+    return {
+      provider,
+      mode: hasPaystackKey || hasStripeKey ? 'configured' : 'mock',
+      escrowEnabled: true,
+      realChargeEnabled: hasPaystackKey || hasStripeKey,
+      requiredEnv: provider === 'stripe' ? ['STRIPE_SECRET_KEY'] : ['PAYSTACK_SECRET_KEY'],
+    };
+  }
+
+  async initializeEscrow(input: InitializeEscrowInput) {
+    const shipmentId = input.shipmentId ?? `preview-shipment-${Date.now()}`;
+    const amount = input.amount ?? 0;
+    const currency = input.currency ?? 'NGN';
+    const providerReference = `tracko_escrow_${Date.now()}`;
+    const status = this.status();
+
+    try {
+      await this.prisma.$queryRawUnsafe(
+        `insert into "Escrow" ("shipmentId", "amount", "currency", "status")
+         values ($1, $2, $3, 'PENDING'::"EscrowStatus")
+         on conflict ("shipmentId")
+         do update set "amount" = excluded."amount", "currency" = excluded."currency", "updatedAt" = current_timestamp`,
+        shipmentId,
+        amount,
+        currency,
+      );
+    } catch {
+      // Keep preview usable until Supabase migrations are applied.
+    }
+
+    if (status.provider === 'paystack' && status.realChargeEnabled) {
+      return this.initializePaystackEscrow({
+        shipmentId,
+        amount,
+        currency,
+        customerEmail: input.customerEmail,
+        providerReference,
+      });
+    }
+
+    return {
+      provider: status.provider,
+      mode: status.mode,
+      shipmentId,
+      amount,
+      currency,
+      providerReference,
+      authorizationUrl: null,
+      message:
+        status.mode === 'mock'
+          ? 'Mock escrow initialized. Add payment provider keys before charging real money.'
+          : 'Provider credentials found. Connect the provider SDK/API in this service before live charges.',
+    };
+  }
+
+  async recordWebhook(provider: string, event: string, body: unknown, signature?: string) {
+    const verified =
+      provider === 'paystack'
+        ? this.verifyPaystackSignature(body, signature)
+        : this.status().mode === 'mock';
+    const payment = this.extractPaymentEvent(body);
+    let escrowUpdated = false;
+
+    if (verified && provider === 'paystack' && payment.shipmentId && payment.success) {
+      try {
+        await this.prisma.$queryRawUnsafe(
+          `update "Escrow"
+           set "status" = 'FUNDED'::"EscrowStatus",
+               "amount" = coalesce($2, "amount"),
+               "currency" = coalesce($3, "currency"),
+               "updatedAt" = current_timestamp
+           where "shipmentId" = $1`,
+          payment.shipmentId,
+          payment.amount,
+          payment.currency,
+        );
+        await this.prisma.shipment.update({
+          where: { id: payment.shipmentId },
+          data: {
+            status: 'ESCROW_FUNDED',
+            timeline: {
+              create: {
+                status: 'ESCROW_FUNDED',
+                note: `Escrow funded by ${provider}.`,
+              },
+            },
+          },
+        });
+        escrowUpdated = true;
+      } catch {
+        escrowUpdated = false;
+      }
+    }
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'PAYMENT_WEBHOOK_RECEIVED',
+          entity: 'PaymentProvider',
+          entityId: payment.shipmentId,
+          metadata: this.toJson({ provider, event, body, verified, payment, escrowUpdated }),
+        },
+      });
+    } catch {
+      // Preview fallback below.
+    }
+
+    return {
+      received: true,
+      provider,
+      event,
+      verified,
+      escrowUpdated,
+      processedAt: new Date().toISOString(),
+    };
+  }
+
+  private async initializePaystackEscrow(input: {
+    shipmentId: string;
+    amount: number;
+    currency: string;
+    customerEmail?: string;
+    providerReference: string;
+  }) {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey) return this.mockProviderResponse(input, 'Paystack key is missing.');
+
+    const response = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: input.customerEmail ?? this.config.get<string>('PAYMENT_FALLBACK_EMAIL') ?? 'payments@tracko.local',
+        amount: input.amount,
+        currency: input.currency,
+        reference: input.providerReference,
+        callback_url: this.config.get<string>('PAYMENT_CALLBACK_URL') || undefined,
+        metadata: {
+          shipmentId: input.shipmentId,
+          purpose: 'shipment_escrow',
+        },
+      }),
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { authorization_url?: string; reference?: string; access_code?: string };
+    };
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'PAYSTACK_ESCROW_INITIALIZED',
+          entity: 'Escrow',
+          entityId: input.shipmentId,
+          metadata: this.toJson({ ok: response.ok, payload }),
+        },
+      });
+    } catch {
+      // Preview audit fallback.
+    }
+
+    if (!response.ok || !payload.status) {
+      return this.mockProviderResponse(input, payload.message ?? 'Paystack payment initialization failed.');
+    }
+
+    return {
+      provider: 'paystack',
+      mode: 'configured',
+      shipmentId: input.shipmentId,
+      amount: input.amount,
+      currency: input.currency,
+      providerReference: payload.data?.reference ?? input.providerReference,
+      authorizationUrl: payload.data?.authorization_url ?? null,
+      accessCode: payload.data?.access_code,
+      message: 'Paystack escrow payment initialized. Redirect the customer to authorizationUrl.',
+    };
+  }
+
+  private mockProviderResponse(input: { shipmentId: string; amount: number; currency: string; providerReference: string }, message: string) {
+    return {
+      provider: this.status().provider,
+      mode: this.status().mode,
+      shipmentId: input.shipmentId,
+      amount: input.amount,
+      currency: input.currency,
+      providerReference: input.providerReference,
+      authorizationUrl: null,
+      message,
+    };
+  }
+
+  private verifyPaystackSignature(body: unknown, signature?: string) {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey || !signature) return false;
+    const digest = createHmac('sha512', secretKey).update(JSON.stringify(body ?? {})).digest('hex');
+    return digest === signature;
+  }
+
+  private extractPaymentEvent(body: unknown) {
+    const payload = (body ?? {}) as {
+      event?: string;
+      data?: {
+        status?: string;
+        reference?: string;
+        amount?: number;
+        currency?: string;
+        metadata?: { shipmentId?: string; purpose?: string };
+      };
+    };
+    return {
+      success: payload.event === 'charge.success' || payload.data?.status === 'success',
+      reference: payload.data?.reference,
+      amount: typeof payload.data?.amount === 'number' ? payload.data.amount : undefined,
+      currency: payload.data?.currency,
+      shipmentId: payload.data?.metadata?.shipmentId,
+    };
+  }
+
+  private toJson(value: unknown): Prisma.InputJsonValue {
+    return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "name": "tracko-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tracko logistics backend API",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "scripts": {
+    "start": "node dist/main.js",
+    "start:nest": "nest start",
+    "start:dev": "node -r ts-node/register/transpile-only -r tsconfig-paths/register src/main.ts",
+    "start:prod": "node dist/main.js",
+    "postinstall": "prisma generate",
+    "deploy:check": "npm run verify && npm run build",
+    "smoke:workflow": "node scripts/smoke-workflow.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run prisma:validate",
+    "lint": "eslint \"src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"prisma/**/*.prisma\"",
+    "prisma:validate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma validate",
+    "prisma:generate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma generate",
+    "prisma:migrate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma migrate dev",
+    "prisma:studio": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma studio",
+    "db:seed": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& ts-node prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.4.15",
+    "@nestjs/config": "^3.3.0",
+    "@nestjs/core": "^10.4.15",
+    "@nestjs/jwt": "^10.2.0",
+    "@nestjs/passport": "^10.0.3",
+    "@nestjs/platform-express": "^10.4.15",
+    "@prisma/client": "^6.2.1",
+    "bcryptjs": "^2.4.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^10.4.8",
+    "@nestjs/schematics": "^10.2.3",
+    "@nestjs/testing": "^10.4.15",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "@types/passport-jwt": "^4.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.19.0",
+    "@typescript-eslint/parser": "^8.19.0",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "prisma": "^6.2.1",
+    "source-map-support": "^0.5.21",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.2"
+  }
+}

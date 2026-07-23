@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: tracko-api
+    env: node
+    plan: free
+    buildCommand: npm install --no-audit --no-fund && npm run prisma:generate && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false

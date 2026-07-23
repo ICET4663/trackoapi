@@ -1,0 +1,645 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  DRIVER
+  TRUCK_OWNER
+  DISPATCHER
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  IN_REVIEW
+  ACTION_NEEDED
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum ShipmentStatus {
+  DRAFT
+  QUOTED
+  PENDING_PAYMENT
+  ESCROW_FUNDED
+  DRIVER_ASSIGNED
+  DRIVER_EN_ROUTE
+  ARRIVED_PICKUP
+  PICKED_UP
+  IN_TRANSIT
+  ARRIVED_DESTINATION
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+enum AssignmentStatus {
+  OFFERED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum OtpPurpose {
+  REGISTER
+  PASSWORD_RESET
+}
+
+enum MessageKind {
+  TEXT
+  VOICE
+  ATTACHMENT
+  LOCATION
+  SYSTEM
+}
+
+enum DeliveryStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum PaymentMethodType {
+  CARD
+  BANK_TRANSFER
+}
+
+enum DriverDocumentState {
+  VERIFIED
+  EXPIRING
+  MISSING
+}
+
+enum KycSubmissionStatus {
+  PENDING
+  CORRECTION_REQUIRED
+  APPROVED
+  REJECTED
+}
+
+enum MediaKind {
+  CARGO_PHOTO
+  POD_PHOTO
+  DOCUMENT
+  VOICE_NOTE
+}
+
+enum EscrowStatus {
+  PENDING
+  FUNDED
+  HELD
+  RELEASE_READY
+  RELEASED
+  DISPUTED
+  REFUNDED
+}
+
+enum DisputeStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum ProofStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum NotificationTone {
+  INFO
+  SUCCESS
+  WARNING
+  DANGER
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  email              String             @unique
+  phone              String             @unique
+  passwordHash       String
+  role               UserRole
+  availableRoles     UserRole[]         @default([])
+  verificationStatus VerificationStatus @default(PENDING)
+  isActive           Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  profile       Profile?
+  refreshTokens RefreshToken[]
+  otpCodes      OtpCode[]
+  vehicles      Vehicle[]       @relation("OwnerVehicles")
+  driverVehicles Vehicle[]      @relation("AssignedDriverVehicles")
+  customerShipments Shipment[]  @relation("CustomerShipments")
+  driverAssignments DriverAssignment[]
+  messages      Message[]
+  auditLogs     AuditLog[]
+  savedAddresses SavedAddress[]
+  paymentMethods PaymentMethod[]
+  billingCharges BillingCharge[]
+  bankAccount   BankAccount?
+  driverDocuments DriverDocument[]
+  safetySettings SafetySettings?
+  notificationPreferences NotificationPreference[]
+  kycSubmissions KycSubmission[]
+  mediaAssets MediaAsset[]
+  pushTokens PushToken[]
+  disputes Dispute[]
+  supportTickets SupportTicket[]
+  locationPings ShipmentLocationPing[]
+  deliveryProofs DeliveryProof[]
+  notifications Notification[]
+}
+
+model Profile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  fullName  String
+  address   String?
+  city      String?
+  state     String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model OtpCode {
+  id        String     @id @default(cuid())
+  userId    String?
+  email     String?
+  phone     String?
+  codeHash  String
+  purpose   OtpPurpose
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime   @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([phone])
+}
+
+model Vehicle {
+  id                String    @id @default(cuid())
+  ownerId           String
+  assignedDriverId  String?
+  plateNumber       String    @unique
+  type              String
+  capacityKg        Int?
+  registrationState String?
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  owner          User @relation("OwnerVehicles", fields: [ownerId], references: [id])
+  assignedDriver User? @relation("AssignedDriverVehicles", fields: [assignedDriverId], references: [id])
+  assignments    DriverAssignment[]
+}
+
+model Shipment {
+  id                    String         @id @default(cuid())
+  reference             String         @unique
+  customerId            String
+  status                ShipmentStatus @default(DRAFT)
+  pickupLabel           String
+  pickupAddress         String
+  pickupLatitude        Float?
+  pickupLongitude       Float?
+  destinationLabel      String
+  destinationAddress    String
+  destinationLatitude   Float?
+  destinationLongitude  Float?
+  cargoDescription      String
+  cargoWeightKg         Float?
+  cargoValueKobo        Int?
+  quotedPriceKobo       Int?
+  distanceKm            Float?
+  durationMinutes       Int?
+  pickupContactPhone    String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  customer    User @relation("CustomerShipments", fields: [customerId], references: [id])
+  assignments DriverAssignment[]
+  timeline    ShipmentTimeline[]
+  mediaAssets MediaAsset[]
+  escrow      Escrow?
+  disputes    Dispute[]
+  supportTickets SupportTicket[]
+  locationPings ShipmentLocationPing[]
+  deliveryProofs DeliveryProof[]
+}
+
+model DriverAssignment {
+  id         String           @id @default(cuid())
+  shipmentId String
+  driverId   String
+  vehicleId  String?
+  status     AssignmentStatus @default(OFFERED)
+  offeredAt  DateTime         @default(now())
+  acceptedAt DateTime?
+  rejectedAt DateTime?
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  driver   User     @relation(fields: [driverId], references: [id])
+  vehicle  Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  @@index([shipmentId])
+  @@index([driverId])
+}
+
+model ShipmentTimeline {
+  id         String         @id @default(cuid())
+  shipmentId String
+  status     ShipmentStatus
+  note       String?
+  createdAt  DateTime       @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId])
+}
+
+model KycDocument {
+  id            String             @id @default(cuid())
+  userId        String
+  type          String
+  fileUrl       String
+  status        VerificationStatus @default(IN_REVIEW)
+  reviewerNotes String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+}
+
+model KycSubmission {
+  id             String              @id @default(cuid())
+  userId         String
+  role           UserRole
+  status         KycSubmissionStatus @default(PENDING)
+  idType         String
+  idNumber       String
+  bvn            String?
+  licenceNumber  String?
+  licenceExpiry  DateTime?
+  note           String?
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  submittedAt    DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents KycSubmissionDocument[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model KycSubmissionDocument {
+  id           String   @id @default(cuid())
+  submissionId String
+  type         String
+  label        String
+  url          String
+  mediaId      String?
+  createdAt    DateTime @default(now())
+
+  submission KycSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+}
+
+model SavedAddress {
+  id              String   @id @default(cuid())
+  userId          String
+  label           String
+  line            String
+  city            String
+  address         String?
+  icon            String?
+  isDefaultPickup Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PaymentMethod {
+  id           String            @id @default(cuid())
+  userId       String
+  brand        String
+  maskedNumber String
+  detail       String?
+  type         PaymentMethodType
+  isDefault    Boolean           @default(false)
+  expiry       String?
+  holderName   String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  billingCharges BillingCharge[]
+
+  @@index([userId])
+}
+
+model BillingCharge {
+  id              String   @id @default(cuid())
+  userId          String
+  paymentMethodId String?
+  ref             String
+  dateLabel       String
+  amount          String
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentMethod PaymentMethod? @relation(fields: [paymentMethodId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([paymentMethodId])
+}
+
+model BankAccount {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  bankName       String
+  maskedNumber   String
+  holderName     String
+  verified       Boolean  @default(false)
+  payoutSchedule String
+  pendingPayout  String   @default("N0")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DriverDocument {
+  id        String              @id @default(cuid())
+  userId    String
+  title     String
+  meta      String
+  state     DriverDocumentState @default(MISSING)
+  issued    DateTime?
+  expires   DateTime?
+  number    String?
+  fileUrl   String?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model SafetySettings {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  shareLiveTripLocation Boolean  @default(true)
+  nightDrivingCheckIns  Boolean  @default(true)
+  emergencyContact      String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  role      UserRole
+  key       String
+  value     Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role, key])
+  @@index([userId])
+}
+
+model MediaAsset {
+  id              String    @id @default(cuid())
+  userId          String?
+  shipmentId      String?
+  conversationId  String?
+  kind            MediaKind
+  url             String?
+  storageKey      String?
+  label           String
+  transcript      String?
+  durationSeconds Int?
+  mimeType        String?
+  createdAt       DateTime  @default(now())
+
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([shipmentId])
+  @@index([conversationId])
+}
+
+model Escrow {
+  id                         String       @id @default(cuid())
+  shipmentId                 String       @unique
+  amount                     Int
+  currency                   String       @default("NGN")
+  status                     EscrowStatus @default(PENDING)
+  arrivalConfirmed           Boolean      @default(false)
+  proofOfDeliveryUploaded    Boolean      @default(false)
+  customerDeliveryConfirmed  Boolean      @default(false)
+  disputeWindowClear         Boolean      @default(false)
+  platformApproved           Boolean      @default(false)
+  createdAt                  DateTime     @default(now())
+  updatedAt                  DateTime     @updatedAt
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+}
+
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String
+  platform  String?
+  deviceId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, token])
+  @@index([userId])
+}
+
+model ShipmentLocationPing {
+  id         String   @id @default(cuid())
+  shipmentId String
+  driverId   String?
+  latitude   Float
+  longitude  Float
+  heading    Float?
+  speedKph   Float?
+  note       String?
+  createdAt  DateTime @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  driver   User?    @relation(fields: [driverId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([driverId])
+}
+
+model DeliveryProof {
+  id          String      @id @default(cuid())
+  shipmentId  String
+  driverId    String?
+  photoUrl    String?
+  signatureUrl String?
+  recipientName String?
+  note        String?
+  status      ProofStatus @default(SUBMITTED)
+  submittedAt DateTime    @default(now())
+  reviewedAt  DateTime?
+  reviewedBy  String?
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  driver   User?    @relation(fields: [driverId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([driverId])
+}
+
+model Dispute {
+  id          String        @id @default(cuid())
+  shipmentId  String?
+  userId      String?
+  reason      String
+  description String?
+  priority    String        @default("MEDIUM")
+  status      DisputeStatus @default(OPEN)
+  resolution  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  resolvedAt  DateTime?
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([userId])
+  @@index([status])
+}
+
+model SupportTicket {
+  id         String              @id @default(cuid())
+  shipmentId String?
+  userId     String?
+  topic      String
+  channel    String
+  message    String?
+  status     SupportTicketStatus @default(OPEN)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  resolvedAt DateTime?
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([userId])
+  @@index([status])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String?
+  role        UserRole?
+  title       String
+  body        String
+  tone        NotificationTone @default(INFO)
+  entity      String?
+  entityId    String?
+  actionUrl   String?
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([role])
+  @@index([readAt])
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  subject   String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderId       String
+  kind           MessageKind @default(TEXT)
+  body           String?
+  attachmentUrl  String?
+  transcript     String?
+  durationSeconds Int?
+  deliveryStatus DeliveryStatus @default(SENT)
+  readAt         DateTime?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+}

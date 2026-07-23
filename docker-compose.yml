@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: tracko-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tracko
+      POSTGRES_USER: tracko
+      POSTGRES_PASSWORD: tracko_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - tracko-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  tracko-postgres-data:
