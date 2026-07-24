@@ -20,6 +20,7 @@ export async function createTrackoApp() {
     'http://192.168.100.7:8082',
   ];
   const allowedOrigins = new Set([...configuredOrigins, ...devOrigins]);
+  const allowVercelPreviews = config.get<string>('ALLOW_VERCEL_PREVIEWS') === 'true';
 
   app.setGlobalPrefix('v1');
   app.use((_request: Request, response: Response, next: NextFunction) => {
@@ -31,7 +32,9 @@ export async function createTrackoApp() {
   });
   app.enableCors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.has(origin)) {
+      const isVercelPreview = allowVercelPreviews && Boolean(origin?.endsWith('.vercel.app'));
+
+      if (!origin || allowedOrigins.has(origin) || isVercelPreview) {
         callback(null, true);
         return;
       }
