@@ -14,6 +14,8 @@
     "start:prod": "node dist/main.js",
     "postinstall": "prisma generate",
     "deploy:check": "npm run verify && npm run build",
+    "smoke:auth": "node scripts/smoke-auth.js",
+    "smoke:kyc": "node scripts/smoke-kyc.js",
     "smoke:workflow": "node scripts/smoke-workflow.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
