@@ -8,7 +8,10 @@ import { DeploymentConfigService } from './config/deployment-config.service';
 export async function createTrackoApp() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
-  app.get(DeploymentConfigService).assertRequired();
+  const readiness = app.get(DeploymentConfigService).summary();
+  if (!readiness.deployable) {
+    console.warn(`Tracko API started with missing environment variables: ${readiness.required.missing.join(', ')}`);
+  }
 
   const configuredOrigins =
     config.get<string>('CORS_ORIGIN')?.split(',').map((origin) => origin.trim()).filter(Boolean) ?? [];
