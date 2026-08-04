@@ -22,17 +22,24 @@ export class KycController {
   }
 
   @Get('admin/verifications')
-  queue() {
+  async queue(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.kycService.queue();
   }
 
   @Get('admin/verifications/:userId')
-  review(@Param('userId') userId: string) {
+  async review(@Param('userId') userId: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.kycService.review(userId);
   }
 
   @Post('admin/verifications/:userId')
-  decide(@Param('userId') userId: string, @Body() body: { action?: 'APPROVE' | 'REQUEST_CORRECTION' | 'REJECT'; note?: string }) {
-    return this.kycService.decide(userId, body);
+  async decide(
+    @Param('userId') userId: string,
+    @Body() body: { action?: 'APPROVE' | 'REQUEST_CORRECTION' | 'REJECT'; note?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const reviewer = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.kycService.decide(userId, body, reviewer.sub);
   }
 }

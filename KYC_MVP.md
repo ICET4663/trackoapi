@@ -53,6 +53,7 @@ For deployed backend:
 
 ```powershell
 $env:API_BASE_URL="https://trackoapi.vercel.app"
+$env:ADMIN_ACCESS_TOKEN="paste-real-admin-or-dispatcher-access-token-here"
 npm run smoke:kyc
 ```
 
@@ -60,11 +61,14 @@ If real email OTP is active and the script asks for an OTP, copy the code from t
 
 ```powershell
 $env:API_BASE_URL="https://trackoapi.vercel.app"
+$env:ADMIN_ACCESS_TOKEN="paste-real-admin-or-dispatcher-access-token-here"
 $env:KYC_SMOKE_OTP="123456"
 npm run smoke:kyc
 ```
 
 The smoke test creates a customer, submits KYC, opens the admin queue, approves the submission, and confirms the user status.
+
+Admin review endpoints now require a real admin or dispatcher login token in production. Local preview mode can still use the preview admin token for fast testing.
 
 ## MVP Boundary
 

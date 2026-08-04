@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { UserRole, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -15,25 +16,34 @@ const PREVIEW_USERS: Record<string, { id: string; email: string; role: UserRole 
 @Injectable()
 export class RequestUserService {
   constructor(
+    private readonly config: ConfigService,
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
   ) {}
 
   async fromAuthorizationHeader(header?: string, fallbackRole: UserRole = 'CUSTOMER'): Promise<AuthUser> {
     const token = this.extractToken(header);
-    if (!token) return this.previewUser(fallbackRole);
+    if (!token) return this.previewOrThrow(fallbackRole);
 
     const preview = PREVIEW_USERS[token];
-    if (preview) return this.previewUser(preview.role, preview.email, preview.id);
+    if (preview && this.previewAuthEnabled()) return this.previewUser(preview.role, preview.email, preview.id);
 
     try {
       const payload = await this.jwt.verifyAsync<AuthUser>(token);
       if (payload?.sub && payload?.role) return payload;
     } catch {
-      return this.previewUser(fallbackRole);
+      return this.previewOrThrow(fallbackRole);
     }
 
-    return this.previewUser(fallbackRole);
+    return this.previewOrThrow(fallbackRole);
+  }
+
+  async requireRole(header: string | undefined, roles: UserRole[]): Promise<AuthUser> {
+    const user = await this.fromAuthorizationHeader(header, roles[0] ?? 'CUSTOMER');
+    if (!roles.includes(user.role)) {
+      throw new ForbiddenException('This account does not have access to this action.');
+    }
+    return user;
   }
 
   private extractToken(header?: string) {
@@ -72,5 +82,14 @@ export class RequestUserService {
     if (role === 'DISPATCHER') return 'dispatcher@tracko.ng';
     if (role === 'ADMIN') return 'admin@tracko.ng';
     return 'customer@tracko.ng';
+  }
+
+  private previewOrThrow(role: UserRole) {
+    if (this.previewAuthEnabled()) return this.previewUser(role);
+    throw new UnauthorizedException('A valid login session is required.');
+  }
+
+  private previewAuthEnabled() {
+    return this.config.get<string>('ENABLE_PREVIEW_AUTH') === 'true' || this.config.get<string>('NODE_ENV') !== 'production';
   }
 }

@@ -1,315 +1,417 @@
-import { Injectable } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { randomUUID } from 'crypto';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { UserRole, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 type KycAction = 'APPROVE' | 'REQUEST_CORRECTION' | 'REJECT';
-type KycSubmissionRow = {
+type KycSubmissionStatus = 'PENDING' | 'CORRECTION_REQUIRED' | 'APPROVED' | 'REJECTED';
+
+type KycSubmitInput = {
+  role?: unknown;
+  idType?: unknown;
+  idNumber?: unknown;
+  bvn?: unknown;
+  licenceNumber?: unknown;
+  licenceExpiry?: unknown;
+  note?: unknown;
+  documents?: unknown;
+};
+
+type KycRow = {
   id: string;
   userId: string;
-  role: string;
-  status: string;
+  role: UserRole;
+  status: KycSubmissionStatus;
   idType: string;
   idNumber: string;
-  bvn?: string;
-  licenceNumber?: string;
-  licenceExpiry?: Date;
-  note?: string;
-  submittedAt: Date;
-  updatedAt: Date;
-  reviewedAt?: Date;
-  reviewedBy?: string;
-  fullName?: string;
+  bvn: string | null;
+  licenceNumber: string | null;
+  licenceExpiry: Date | string | null;
+  note: string | null;
+  reviewedAt: Date | string | null;
+  reviewedBy: string | null;
+  submittedAt: Date | string;
+  updatedAt: Date | string;
   email?: string;
   phone?: string;
-  verificationStatus?: string;
+  fullName?: string | null;
+  verificationStatus?: VerificationStatus;
+  documentCount?: number | bigint;
 };
-type KycDocumentRow = { type: string; label: string; url: string; mediaId?: string };
 
-const now = () => new Date().toISOString();
+type KycDocumentRow = {
+  id: string;
+  type: string;
+  label: string;
+  url: string;
+  mediaId: string | null;
+};
 
 @Injectable()
 export class KycService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  async myKyc(userId = 'preview-customer') {
+  async myKyc(userId: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<KycSubmissionRow[]>(
-        `select ks.*, p."fullName", u."email", u."phone", u."verificationStatus"::text as "verificationStatus"
-         from "KycSubmission" ks
-         join "User" u on u."id" = ks."userId"
-         left join "Profile" p on p."userId" = u."id"
-         where ks."userId" = $1
-         order by ks."submittedAt" desc
-         limit 1`,
-        userId,
-      );
-      if (rows[0]) {
+      const [submission] = await this.submissionsForUser(userId);
+      if (submission) {
         return {
-          verificationStatus: rows[0].verificationStatus ?? 'PENDING',
-          submission: await this.toSubmission(rows[0]),
+          verificationStatus: submission.verificationStatus ?? 'PENDING',
+          submission: await this.toSubmission(submission),
         };
       }
-    } catch {
-      // Preview fallback below.
-    }
 
-    return {
-      verificationStatus: 'PENDING',
-      submission: this.previewSubmission(),
-    };
-  }
-
-  async submit(input: Record<string, unknown>, userId = 'preview-customer', role: UserRole = 'CUSTOMER') {
-    try {
-      const rows = await this.prisma.$queryRawUnsafe<KycSubmissionRow[]>(
-        `insert into "KycSubmission" ("userId", "role", "status", "idType", "idNumber", "bvn", "licenceNumber", "licenceExpiry", "note")
-         values (
-           $1,
-           cast($2 as "UserRole"),
-           'PENDING'::"KycSubmissionStatus",
-           $3,
-           $4,
-           $5,
-           $6,
-           case when $7::text is null or $7::text = '' then null else $7::timestamp end,
-           'KYC submitted from app.'
-         )
-         returning *`,
+      const [user] = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: VerificationStatus }>>(
+        'select "verificationStatus" from "User" where "id" = $1 limit 1',
         userId,
-        String(input.role ?? role),
-        String(input.idType ?? 'NIN'),
-        String(input.idNumber ?? '00000000000'),
-        input.bvn ? String(input.bvn) : null,
-        input.licenceNumber ? String(input.licenceNumber) : null,
-        input.licenceExpiry ? String(input.licenceExpiry) : null,
       );
 
-      const submission = rows[0];
-      if (submission && Array.isArray(input.documents)) {
-        for (const document of input.documents as Record<string, unknown>[]) {
-          await this.prisma.$executeRawUnsafe(
-            `insert into "KycSubmissionDocument" ("submissionId", "type", "label", "url", "mediaId")
-             values ($1, $2, $3, $4, $5)`,
-            submission.id,
-            String(document.type ?? 'ID_FRONT'),
-            String(document.label ?? 'KYC document'),
-            String(document.url ?? document.mediaId ?? 'preview://document'),
-            document.mediaId ? String(document.mediaId) : null,
-          );
-        }
-        return this.toSubmission(submission);
-      }
-    } catch {
-      // Preview fallback below.
+      return {
+        verificationStatus: user?.verificationStatus ?? 'PENDING',
+        submission: null,
+      };
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return { verificationStatus: 'IN_REVIEW', submission: this.previewSubmission(userId, 'CUSTOMER') };
     }
+  }
 
-    return this.previewSubmission({
-      idType: String(input.idType ?? 'NIN'),
-      idNumber: String(input.idNumber ?? '00000000000'),
-      bvn: input.bvn ? String(input.bvn) : undefined,
-      licenceNumber: input.licenceNumber ? String(input.licenceNumber) : undefined,
-      licenceExpiry: input.licenceExpiry ? String(input.licenceExpiry) : undefined,
-      documents: Array.isArray(input.documents) ? input.documents : [],
-      status: 'PENDING',
-      note: 'Preview KYC submission received.',
-    });
+  async submit(input: KycSubmitInput, userId: string, userRole: UserRole) {
+    try {
+      const role = this.allowedSubmissionRole(input.role, userRole);
+      const idType = this.requiredText(input.idType, 'ID type is required.');
+      const idNumber = this.requiredText(input.idNumber, 'ID number is required.');
+      const submissionId = this.id('kyc');
+      const documents = this.documentInputs(input.documents);
+
+      await this.prisma.$executeRawUnsafe(
+        `insert into "KycSubmission" (
+          "id", "userId", "role", "status", "idType", "idNumber", "bvn",
+          "licenceNumber", "licenceExpiry", "note", "submittedAt", "updatedAt"
+        ) values (
+          $1, $2, $3::"UserRole", 'PENDING'::"KycSubmissionStatus", $4, $5, $6,
+          $7, $8, $9, current_timestamp, current_timestamp
+        )`,
+        submissionId,
+        userId,
+        role,
+        idType,
+        idNumber,
+        this.optionalText(input.bvn),
+        this.optionalText(input.licenceNumber),
+        this.optionalDate(input.licenceExpiry),
+        this.optionalText(input.note),
+      );
+
+      for (const document of documents) {
+        await this.prisma.$executeRawUnsafe(
+          `insert into "KycSubmissionDocument" ("id", "submissionId", "type", "label", "url", "mediaId", "createdAt")
+           values ($1, $2, $3, $4, $5, $6, current_timestamp)`,
+          this.id('doc'),
+          submissionId,
+          document.type,
+          document.label,
+          document.url,
+          document.mediaId,
+        );
+      }
+
+      await this.prisma.$executeRawUnsafe(
+        `update "User" set "verificationStatus" = 'IN_REVIEW'::"VerificationStatus", "updatedAt" = current_timestamp where "id" = $1`,
+        userId,
+      );
+
+      const [submission] = await this.submissionsForUser(userId);
+      return submission ? this.toSubmission(submission) : this.previewSubmission(userId, role);
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return this.previewSubmission(userId, this.previewRole(input.role));
+    }
   }
 
   async queue() {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<KycSubmissionRow[]>(
-        `select ks.*, p."fullName", u."email"
-         from "KycSubmission" ks
-         join "User" u on u."id" = ks."userId"
-         left join "Profile" p on p."userId" = u."id"
-         order by ks."submittedAt" desc
-         limit 100`,
+      const submissions = await this.prisma.$queryRawUnsafe<KycRow[]>(
+        `select
+          ks."id", ks."userId", ks."role", ks."status", ks."idType", ks."idNumber", ks."bvn",
+          ks."licenceNumber", ks."licenceExpiry", ks."note", ks."reviewedAt", ks."reviewedBy",
+          ks."submittedAt", ks."updatedAt", u."email", u."phone", u."verificationStatus",
+          p."fullName", count(ksd."id") as "documentCount"
+        from "KycSubmission" ks
+        join "User" u on u."id" = ks."userId"
+        left join "Profile" p on p."userId" = u."id"
+        left join "KycSubmissionDocument" ksd on ksd."submissionId" = ks."id"
+        group by ks."id", u."email", u."phone", u."verificationStatus", p."fullName"
+        order by ks."submittedAt" desc
+        limit 100`,
       );
-      if (rows.length) {
-        return rows.map((row) => ({
-          userId: row.userId,
-          fullName: row.fullName ?? 'Tracko user',
-          email: row.email,
-          role: row.role,
-          status: row.status,
-          idType: row.idType,
-          documentCount: 0,
-          submittedAt: row.submittedAt.toISOString(),
-          updatedAt: row.updatedAt.toISOString(),
-        }));
-      }
-    } catch {
-      // Preview fallback below.
-    }
 
-    const submission = this.previewSubmission();
-    return [
-      {
-        userId: submission.userId,
-        fullName: 'Tracko Preview User',
-        email: 'customer@tracko.ng',
-        role: submission.role,
-        status: submission.status,
-        idType: submission.idType,
-        documentCount: submission.documents.length,
-        submittedAt: submission.submittedAt,
-        updatedAt: submission.updatedAt,
-      },
-    ];
+      return Promise.all(
+        submissions.map(async (submission) => ({
+          ...(await this.toSubmission(submission)),
+          documentCount: Number(submission.documentCount ?? 0),
+        })),
+      );
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return [this.previewSubmission('preview-customer', 'CUSTOMER')];
+    }
   }
 
   async review(userId: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<KycSubmissionRow[]>(
-        `select ks.*, p."fullName", u."email", u."phone", u."verificationStatus"::text as "verificationStatus"
-         from "KycSubmission" ks
-         join "User" u on u."id" = ks."userId"
-         left join "Profile" p on p."userId" = u."id"
-         where ks."userId" = $1
-         order by ks."submittedAt" desc
-         limit 1`,
-        userId,
-      );
-      if (rows[0]) {
-        return {
-          submission: await this.toSubmission(rows[0]),
-          user: {
-            id: rows[0].userId,
-            fullName: rows[0].fullName ?? 'Tracko user',
-            email: rows[0].email,
-            phone: rows[0].phone,
-            role: rows[0].role,
-            verificationStatus: rows[0].verificationStatus ?? 'PENDING',
-          },
-        };
+      const [submission] = await this.submissionsForUser(userId);
+      if (!submission) {
+        throw new BadRequestException('No KYC submission found for this user.');
       }
-    } catch {
-      // Preview fallback below.
-    }
 
-    return {
-      submission: this.previewSubmission({ userId }),
-      user: {
-        id: userId,
-        fullName: 'Tracko Preview User',
-        email: 'customer@tracko.ng',
-        phone: '+234 800 000 0000',
-        role: 'CUSTOMER',
-        verificationStatus: 'PENDING',
-      },
-    };
+      return {
+        submission: await this.toSubmission(submission),
+        user: {
+          id: submission.userId,
+          email: submission.email,
+          phone: submission.phone,
+          role: submission.role,
+          fullName: submission.fullName ?? submission.email ?? 'Tracko user',
+          verificationStatus: submission.verificationStatus ?? 'PENDING',
+        },
+      };
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return {
+        submission: this.previewSubmission(userId, 'CUSTOMER'),
+        user: {
+          id: userId,
+          email: 'customer@tracko.ng',
+          phone: '+2348012345678',
+          role: 'CUSTOMER',
+          fullName: 'Preview Customer',
+          verificationStatus: 'IN_REVIEW',
+        },
+      };
+    }
   }
 
-  async decide(userId: string, body: { action?: KycAction; note?: string }) {
-    const status =
-      body.action === 'APPROVE' ? 'APPROVED' : body.action === 'REJECT' ? 'REJECTED' : 'CORRECTION_REQUIRED';
-
+  async decide(userId: string, body: { action?: KycAction; note?: string }, reviewerId = 'system') {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<KycSubmissionRow[]>(
-        `update "KycSubmission"
-         set "status" = cast($1 as "KycSubmissionStatus"),
-             "note" = $2,
-             "reviewedAt" = current_timestamp,
-             "reviewedBy" = 'preview-admin',
-             "updatedAt" = current_timestamp
-         where "userId" = $3
-         returning *`,
-        status,
-        body.note ?? 'Decision recorded.',
+      const action = body.action;
+      if (!action || !['APPROVE', 'REQUEST_CORRECTION', 'REJECT'].includes(action)) {
+        throw new BadRequestException('A valid KYC decision is required.');
+      }
+
+      const [latest] = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
+        'select "id" from "KycSubmission" where "userId" = $1 order by "submittedAt" desc limit 1',
         userId,
       );
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: {
-          verificationStatus:
-            body.action === 'APPROVE'
-              ? 'VERIFIED'
-              : body.action === 'REJECT'
-                ? 'REJECTED'
-                : 'ACTION_NEEDED',
-        },
-      });
-      if (rows[0]) return this.toSubmission(rows[0]);
-    } catch {
-      // Preview fallback below.
-    }
 
-    return this.previewSubmission({
-      userId,
-      status,
-      note: body.note ?? 'Preview decision recorded.',
-      reviewedAt: now(),
-      reviewedBy: 'preview-admin',
-    });
+      if (!latest) {
+        throw new BadRequestException('No KYC submission found for this user.');
+      }
+
+      const status = this.statusForAction(action);
+      const verificationStatus = this.verificationForAction(action);
+
+      await this.prisma.$executeRawUnsafe(
+        `update "KycSubmission"
+         set "status" = $1::"KycSubmissionStatus", "note" = $2, "reviewedAt" = current_timestamp,
+             "reviewedBy" = $3, "updatedAt" = current_timestamp
+         where "id" = $4`,
+        status,
+        this.optionalText(body.note),
+        reviewerId,
+        latest.id,
+      );
+
+      await this.prisma.$executeRawUnsafe(
+        `update "User" set "verificationStatus" = $1::"VerificationStatus", "updatedAt" = current_timestamp where "id" = $2`,
+        verificationStatus,
+        userId,
+      );
+
+      const [submission] = await this.submissionsForUser(userId);
+      if (!submission) {
+        throw new BadRequestException('No KYC submission found for this user.');
+      }
+      return this.toSubmission(submission);
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return {
+        ...this.previewSubmission(userId, 'CUSTOMER'),
+        status: this.statusForAction(body.action ?? 'REQUEST_CORRECTION'),
+        note: body.note ?? null,
+      };
+    }
   }
 
-  private async toSubmission(row: KycSubmissionRow) {
-    let documents: KycDocumentRow[] = [];
-    try {
-      documents = await this.prisma.$queryRawUnsafe<KycDocumentRow[]>(
-        'select "type", "label", "url", "mediaId" from "KycSubmissionDocument" where "submissionId" = $1 order by "createdAt" asc',
-        row.id,
-      );
-    } catch {
-      documents = [];
-    }
+  private submissionsForUser(userId: string) {
+    return this.prisma.$queryRawUnsafe<KycRow[]>(
+      `select
+        ks."id", ks."userId", ks."role", ks."status", ks."idType", ks."idNumber", ks."bvn",
+        ks."licenceNumber", ks."licenceExpiry", ks."note", ks."reviewedAt", ks."reviewedBy",
+        ks."submittedAt", ks."updatedAt", u."email", u."phone", u."verificationStatus", p."fullName"
+      from "KycSubmission" ks
+      join "User" u on u."id" = ks."userId"
+      left join "Profile" p on p."userId" = u."id"
+      where ks."userId" = $1
+      order by ks."submittedAt" desc
+      limit 1`,
+      userId,
+    );
+  }
 
+  private async documentsForSubmission(submissionId: string) {
+    return this.prisma.$queryRawUnsafe<KycDocumentRow[]>(
+      `select "id", "type", "label", "url", "mediaId"
+       from "KycSubmissionDocument"
+       where "submissionId" = $1
+       order by "createdAt" asc`,
+      submissionId,
+    );
+  }
+
+  private async toSubmission(submission: KycRow) {
+    const documents = await this.documentsForSubmission(submission.id);
     return {
-      id: row.id,
-      userId: row.userId,
-      role: row.role,
-      status: row.status,
-      idType: row.idType,
-      idNumber: row.idNumber,
-      bvn: row.bvn,
-      licenceNumber: row.licenceNumber,
-      licenceExpiry: row.licenceExpiry?.toISOString?.(),
+      id: submission.id,
+      userId: submission.userId,
+      role: submission.role,
+      status: submission.status,
+      idType: submission.idType,
+      idNumber: submission.idNumber,
+      bvn: submission.bvn,
+      licenceNumber: submission.licenceNumber,
+      licenceExpiry: this.isoDate(submission.licenceExpiry),
+      note: submission.note,
+      submittedAt: this.isoDate(submission.submittedAt),
+      updatedAt: this.isoDate(submission.updatedAt),
+      reviewedAt: this.isoDate(submission.reviewedAt),
+      reviewedBy: submission.reviewedBy,
+      fullName: submission.fullName ?? submission.email ?? 'Tracko user',
+      email: submission.email,
+      phone: submission.phone,
+      verificationStatus: submission.verificationStatus ?? 'PENDING',
       documents,
-      note: row.note,
-      submittedAt: row.submittedAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-      reviewedAt: row.reviewedAt?.toISOString?.(),
-      reviewedBy: row.reviewedBy,
-      history: [
-        {
-          action: 'SUBMITTED',
-          note: row.note,
-          actor: row.fullName ?? 'Tracko user',
-          at: row.submittedAt.toISOString(),
-        },
-      ],
     };
   }
 
-  private previewSubmission(overrides: Record<string, unknown> = {}) {
-    const timestamp = now();
-    const documents = (overrides.documents as unknown[]) ?? [
-      { type: 'ID_FRONT', label: 'Government ID', url: 'preview://id-front' },
-      { type: 'SELFIE', label: 'Selfie', url: 'preview://selfie' },
-    ];
+  private documentInputs(documents: unknown) {
+    if (!Array.isArray(documents)) return [];
+    return documents
+      .map((document) => {
+        const item = document as Record<string, unknown>;
+        return {
+          type: this.optionalText(item.type) ?? 'DOCUMENT',
+          label: this.optionalText(item.label) ?? 'KYC document',
+          url: this.optionalText(item.url),
+          mediaId: this.optionalText(item.mediaId),
+        };
+      })
+      .filter((document) => document.url)
+      .map((document) => ({
+        type: document.type,
+        label: document.label,
+        url: document.url as string,
+        mediaId: document.mediaId,
+      }));
+  }
 
+  private allowedSubmissionRole(role: unknown, userRole: UserRole) {
+    const requestedRole = this.previewRole(role);
+    const allowedRoles: UserRole[] = ['CUSTOMER', 'DRIVER', 'TRUCK_OWNER'];
+    if (!allowedRoles.includes(requestedRole)) {
+      throw new BadRequestException('KYC is only available for customer, driver, and truck owner accounts.');
+    }
+    if (requestedRole !== userRole) {
+      throw new BadRequestException('KYC role must match the signed-in account role.');
+    }
+    return requestedRole;
+  }
+
+  private statusForAction(action: KycAction): KycSubmissionStatus {
+    if (action === 'APPROVE') return 'APPROVED';
+    if (action === 'REJECT') return 'REJECTED';
+    return 'CORRECTION_REQUIRED';
+  }
+
+  private verificationForAction(action: KycAction): VerificationStatus {
+    if (action === 'APPROVE') return 'VERIFIED';
+    if (action === 'REJECT') return 'REJECTED';
+    return 'ACTION_NEEDED';
+  }
+
+  private requiredText(value: unknown, message: string) {
+    const text = this.optionalText(value);
+    if (!text) throw new BadRequestException(message);
+    return text;
+  }
+
+  private optionalText(value: unknown) {
+    if (typeof value !== 'string') return null;
+    const text = value.trim();
+    return text.length ? text : null;
+  }
+
+  private optionalDate(value: unknown) {
+    const text = this.optionalText(value);
+    if (!text) return null;
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return null;
+    return date;
+  }
+
+  private isoDate(value: Date | string | null) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString();
+  }
+
+  private previewRole(role: unknown): UserRole {
+    if (role === 'DRIVER') return 'DRIVER';
+    if (role === 'TRUCK_OWNER') return 'TRUCK_OWNER';
+    return 'CUSTOMER';
+  }
+
+  private id(prefix: string) {
+    return `${prefix}_${randomUUID().replace(/-/g, '')}`;
+  }
+
+  private previewEnabled() {
+    return this.config.get<string>('ENABLE_PREVIEW_AUTH') === 'true' || this.config.get<string>('NODE_ENV') !== 'production';
+  }
+
+  private previewSubmission(userId: string, role: UserRole) {
+    const now = new Date().toISOString();
     return {
-      id: String(overrides.id ?? 'kyc-preview'),
-      userId: String(overrides.userId ?? 'preview-customer'),
-      role: String(overrides.role ?? 'CUSTOMER'),
-      status: String(overrides.status ?? 'PENDING'),
-      idType: String(overrides.idType ?? 'NIN'),
-      idNumber: String(overrides.idNumber ?? '00000000000'),
-      bvn: overrides.bvn ? String(overrides.bvn) : undefined,
-      licenceNumber: overrides.licenceNumber ? String(overrides.licenceNumber) : undefined,
-      licenceExpiry: overrides.licenceExpiry ? String(overrides.licenceExpiry) : undefined,
-      documents,
-      note: overrides.note ? String(overrides.note) : 'Preview KYC is awaiting review.',
-      submittedAt: String(overrides.submittedAt ?? timestamp),
-      updatedAt: String(overrides.updatedAt ?? timestamp),
-      reviewedAt: overrides.reviewedAt ? String(overrides.reviewedAt) : undefined,
-      reviewedBy: overrides.reviewedBy ? String(overrides.reviewedBy) : undefined,
-      history: [
+      id: `kyc-${userId}`,
+      userId,
+      role,
+      status: 'PENDING' as KycSubmissionStatus,
+      idType: role === 'DRIVER' ? 'DRIVERS_LICENSE' : 'NIN',
+      idNumber: role === 'DRIVER' ? 'DRV-000000' : '12345678901',
+      bvn: role === 'CUSTOMER' ? '12345678901' : null,
+      licenceNumber: role === 'DRIVER' ? 'DRV-000000' : null,
+      licenceExpiry: null,
+      note: null,
+      submittedAt: now,
+      updatedAt: now,
+      reviewedAt: null,
+      reviewedBy: null,
+      fullName: 'Preview Customer',
+      email: 'customer@tracko.ng',
+      phone: '+2348012345678',
+      verificationStatus: 'IN_REVIEW' as VerificationStatus,
+      documents: [
         {
-          action: 'SUBMITTED',
-          note: 'Preview KYC submission created.',
-          actor: 'Tracko Preview User',
-          at: timestamp,
+          id: 'preview-document',
+          type: 'ID_FRONT',
+          label: 'Government ID',
+          url: 'preview://kyc/id-front',
+          mediaId: null,
         },
       ],
     };

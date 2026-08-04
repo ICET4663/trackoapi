@@ -54,6 +54,8 @@ async function registerCustomer() {
 
 async function main() {
   console.log(`Tracko KYC smoke: ${API_BASE_URL}`);
+  const adminAccessToken = process.env.ADMIN_ACCESS_TOKEN || 'preview-access-token-admin';
+  const adminHeaders = { Authorization: `Bearer ${adminAccessToken}` };
 
   const health = await request('/v1/health');
   console.log('OK health', health.service || 'tracko-api');
@@ -90,17 +92,18 @@ async function main() {
   });
   console.log('OK KYC status', myKyc.submission?.status || myKyc.verificationStatus);
 
-  const queue = await request('/v1/admin/verifications');
+  const queue = await request('/v1/admin/verifications', { headers: adminHeaders });
   const entry = queue.find((item) => item.userId === session.user.id) || queue[0];
   if (!entry) throw new Error('Admin verification queue is empty after KYC submission.');
   console.log('OK admin queue', entry.status, entry.role);
 
-  const review = await request(`/v1/admin/verifications/${encodeURIComponent(entry.userId)}`);
+  const review = await request(`/v1/admin/verifications/${encodeURIComponent(entry.userId)}`, { headers: adminHeaders });
   if (!review.submission?.id) throw new Error('Admin KYC review did not return a submission.');
   console.log('OK admin review', review.user?.email || entry.userId);
 
   const decision = await request(`/v1/admin/verifications/${encodeURIComponent(entry.userId)}`, {
     method: 'POST',
+    headers: adminHeaders,
     body: JSON.stringify({ action: 'APPROVE', note: 'Smoke test approval.' }),
   });
   console.log('OK admin approved', decision.status);
