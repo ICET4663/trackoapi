@@ -154,6 +154,7 @@ export class CommunicationService {
   }
 
   async uploadMedia(input: Record<string, unknown>) {
+    const url = this.mediaUrl(input);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
@@ -183,7 +184,7 @@ export class CommunicationService {
         input.shipmentId ? String(input.shipmentId) : null,
         input.conversationId ? String(input.conversationId) : null,
         String(input.kind ?? 'DOCUMENT'),
-        input.localUri ? String(input.localUri) : input.uri ? String(input.uri) : `local://media/${Date.now()}`,
+        url,
         `preview/${Date.now()}`,
         String(input.label ?? 'Uploaded media'),
         input.transcript ? String(input.transcript) : null,
@@ -204,7 +205,7 @@ export class CommunicationService {
     return {
       id: `media-${Date.now()}`,
       kind: String(input.kind ?? 'DOCUMENT'),
-      url: String(input.localUri ?? input.uri ?? `local://media/${Date.now()}`),
+      url,
       label: String(input.label ?? 'Uploaded media'),
       transcript: input.transcript ? String(input.transcript) : undefined,
       durationSeconds: input.durationSeconds ? Number(input.durationSeconds) : undefined,
@@ -212,6 +213,16 @@ export class CommunicationService {
       storageKey: `preview/${Date.now()}`,
       uploaded: true,
     };
+  }
+
+  private mediaUrl(input: Record<string, unknown>) {
+    if (typeof input.base64 === 'string' && input.base64.trim()) {
+      const mimeType = typeof input.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
+      return `data:${mimeType};base64,${input.base64.trim()}`;
+    }
+    if (typeof input.localUri === 'string' && input.localUri.trim()) return input.localUri.trim();
+    if (typeof input.uri === 'string' && input.uri.trim()) return input.uri.trim();
+    return `local://media/${Date.now()}`;
   }
 
   private toMessageRecord(message: {

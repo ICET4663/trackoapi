@@ -295,6 +295,7 @@ export class KycService {
       phone: submission.phone,
       verificationStatus: submission.verificationStatus ?? 'PENDING',
       documents,
+      history: this.historyForSubmission(submission),
     };
   }
 
@@ -370,6 +371,26 @@ export class KycService {
     return date.toISOString();
   }
 
+  private historyForSubmission(submission: KycRow) {
+    const history = [
+      {
+        action: 'SUBMITTED',
+        actor: submission.email ?? 'Applicant',
+        at: this.isoDate(submission.submittedAt) ?? new Date().toISOString(),
+      },
+    ];
+
+    if (submission.reviewedAt) {
+      history.push({
+        action: submission.status,
+        actor: submission.reviewedBy ?? 'Tracko reviewer',
+        at: this.isoDate(submission.reviewedAt) ?? new Date().toISOString(),
+      });
+    }
+
+    return history;
+  }
+
   private previewRole(role: unknown): UserRole {
     if (role === 'DRIVER') return 'DRIVER';
     if (role === 'TRUCK_OWNER') return 'TRUCK_OWNER';
@@ -412,6 +433,13 @@ export class KycService {
           label: 'Government ID',
           url: 'preview://kyc/id-front',
           mediaId: null,
+        },
+      ],
+      history: [
+        {
+          action: 'SUBMITTED',
+          actor: 'Preview Customer',
+          at: now,
         },
       ],
     };
