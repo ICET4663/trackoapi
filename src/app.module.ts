@@ -4,6 +4,7 @@ import { AuthModule } from './auth/auth.module';
 import { CommunicationModule } from './communication/communication.module';
 import { DeploymentConfigModule } from './config/deployment-config.module';
 import { DataModule } from './data/data.module';
+import { DemoBootstrapController } from './demo-bootstrap.controller';
 import { DemoReadinessController } from './demo-readiness.controller';
 import { HealthController } from './health.controller';
 import { IntegrationsModule } from './integrations/integrations.module';
@@ -37,6 +38,6 @@ import { UsersModule } from './users/users.module';
     TrackingModule,
     CommunicationModule,
   ],
-  controllers: [HealthController, DemoReadinessController],
+  controllers: [HealthController, DemoReadinessController, DemoBootstrapController],
 })
 export class AppModule {}
