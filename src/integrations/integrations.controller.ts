@@ -28,6 +28,11 @@ export class IntegrationsController {
     return this.paymentProvider.initializeEscrow(body);
   }
 
+  @Get('payments/paystack/verify/:reference')
+  verifyPaystackPayment(@Param('reference') reference: string) {
+    return this.paymentProvider.verifyPaystackPayment(reference);
+  }
+
   @Post('payments/webhooks/:provider/:event')
   paymentWebhook(
     @Param('provider') provider: string,

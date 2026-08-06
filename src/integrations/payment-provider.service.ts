@@ -140,6 +140,72 @@ export class PaymentProviderService {
     };
   }
 
+  async verifyPaystackPayment(reference: string) {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey) {
+      return {
+        verified: false,
+        provider: 'paystack',
+        reference,
+        escrowUpdated: false,
+        message: 'Paystack key is missing.',
+      };
+    }
+
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: {
+        status?: string;
+        reference?: string;
+        amount?: number;
+        currency?: string;
+        metadata?: { shipmentId?: string; purpose?: string };
+      };
+    };
+
+    const payment = this.extractPaymentEvent({ event: 'charge.success', data: payload.data });
+    const verified = Boolean(response.ok && payload.status && payload.data?.status === 'success');
+    const escrowUpdated = verified && payment.shipmentId
+      ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack')
+      : false;
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'PAYSTACK_PAYMENT_VERIFIED',
+          entity: 'PaymentProvider',
+          entityId: payment.shipmentId,
+          metadata: this.toJson({ reference, verified, escrowUpdated, payload }),
+        },
+      });
+    } catch {
+      // Payment verification should not fail because audit logging is unavailable.
+    }
+
+    return {
+      verified,
+      provider: 'paystack',
+      reference: payload.data?.reference ?? reference,
+      shipmentId: payment.shipmentId,
+      amount: payment.amount,
+      currency: payment.currency,
+      escrowUpdated,
+      message: verified
+        ? escrowUpdated
+          ? 'Payment verified and escrow marked as funded.'
+          : 'Payment verified, but escrow could not be updated automatically.'
+        : payload.message ?? 'Payment could not be verified.',
+    };
+  }
+
   private async initializePaystackEscrow(input: {
     shipmentId: string;
     amount: number;
@@ -216,6 +282,37 @@ export class PaymentProviderService {
       authorizationUrl: null,
       message,
     };
+  }
+
+  private async markEscrowFunded(shipmentId: string, amount?: number, currency?: string, provider = 'paystack') {
+    try {
+      await this.prisma.$queryRawUnsafe(
+        `update "Escrow"
+         set "status" = 'FUNDED'::"EscrowStatus",
+             "amount" = coalesce($2, "amount"),
+             "currency" = coalesce($3, "currency"),
+             "updatedAt" = current_timestamp
+         where "shipmentId" = $1`,
+        shipmentId,
+        amount,
+        currency,
+      );
+      await this.prisma.shipment.update({
+        where: { id: shipmentId },
+        data: {
+          status: 'ESCROW_FUNDED',
+          timeline: {
+            create: {
+              status: 'ESCROW_FUNDED',
+              note: `Escrow funded by ${provider}.`,
+            },
+          },
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private verifyPaystackSignature(body: unknown, signature?: string) {
