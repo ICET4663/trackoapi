@@ -215,6 +215,22 @@ export class SettingsController {
     return { ...this.settingsService.platformSetting(key), value: body.value ?? this.settingsService.platformSetting(key).value };
   }
 
+  @Get('admin/payout-requests')
+  async payoutRequests(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.adminPayoutRequests();
+  }
+
+  @Post('admin/payout-requests/:id/review')
+  async reviewPayoutRequest(
+    @Param('id') id: string,
+    @Body() body: { decision?: string; note?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.reviewPayoutRequest(id, user.sub, body);
+  }
+
   @Get('admin/audit-logs')
   auditLogs() {
     return this.settingsService.auditLogs();

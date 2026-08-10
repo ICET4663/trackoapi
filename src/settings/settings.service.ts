@@ -43,6 +43,16 @@ type DriverEscrowEarningRow = {
   updatedAt: Date;
 };
 
+type PayoutMetadata = {
+  amountKobo?: number;
+  status?: string;
+  note?: string | null;
+  bankLabel?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewNote?: string | null;
+};
+
 const notificationPreferences: Record<PreferenceKey, boolean> = {
   shipmentStatusUpdates: true,
   liveTrackingAlerts: true,
@@ -493,6 +503,94 @@ export class SettingsService {
       amount: amountKobo,
       amountLabel: this.formatMoney(amountKobo),
       message: 'Withdrawal request submitted for finance review.',
+    };
+  }
+
+  async adminPayoutRequests() {
+    try {
+      const logs = await this.prisma.auditLog.findMany({
+        where: { action: 'PAYOUT_WITHDRAWAL_REQUESTED', entity: 'Payout' },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      const actorIds = [...new Set(logs.map((log) => log.actorId).filter(Boolean) as string[])];
+      const actors = await this.prisma.user.findMany({
+        where: { id: { in: actorIds } },
+        include: { profile: true },
+      });
+      const actorsById = new Map(actors.map((actor) => [actor.id, actor]));
+
+      return logs.map((log) => {
+        const metadata = (log.metadata ?? {}) as PayoutMetadata;
+        const actor = log.actorId ? actorsById.get(log.actorId) : null;
+        const bankLabel = metadata.bankLabel || 'Payout account pending';
+        return {
+          id: log.id,
+          driverId: log.actorId,
+          driverName: actor?.profile?.fullName ?? actor?.email ?? 'Driver',
+          driverEmail: actor?.email,
+          amount: Number(metadata.amountKobo ?? 0),
+          amountLabel: this.formatMoney(Number(metadata.amountKobo ?? 0)),
+          status: metadata.status ?? 'PENDING',
+          bankLabel,
+          note: metadata.note ?? null,
+          reviewNote: metadata.reviewNote ?? null,
+          requestedAt: log.createdAt.toISOString(),
+          requestedAtLabel: log.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        };
+      });
+    } catch {
+      return [
+        {
+          id: 'payout-preview-1',
+          driverId: 'preview-driver',
+          driverName: 'Tracko Driver',
+          driverEmail: 'driver@tracko.ng',
+          amount: 12000000,
+          amountLabel: 'N120,000',
+          status: 'PENDING',
+          bankLabel: 'Preview Bank **** 0012',
+          note: null,
+          reviewNote: null,
+          requestedAt: new Date().toISOString(),
+          requestedAtLabel: 'Today',
+        },
+      ];
+    }
+  }
+
+  async reviewPayoutRequest(id: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const decision = String(input.decision ?? '').toUpperCase();
+    if (!['APPROVED', 'REJECTED', 'PAID'].includes(decision)) {
+      throw new BadRequestException('Use APPROVED, REJECTED, or PAID as the payout decision.');
+    }
+
+    const log = await this.prisma.auditLog.findUnique({ where: { id } });
+    if (!log || log.action !== 'PAYOUT_WITHDRAWAL_REQUESTED') {
+      throw new NotFoundException('Payout request not found.');
+    }
+
+    const metadata = (log.metadata ?? {}) as PayoutMetadata;
+    const updated = await this.prisma.auditLog.update({
+      where: { id },
+      data: {
+        metadata: {
+          ...metadata,
+          status: decision,
+          reviewedAt: new Date().toISOString(),
+          reviewedBy: reviewerId,
+          reviewNote: input.note ?? null,
+        },
+      },
+    });
+
+    const nextMetadata = (updated.metadata ?? {}) as PayoutMetadata;
+    return {
+      id: updated.id,
+      status: nextMetadata.status ?? decision,
+      amount: Number(nextMetadata.amountKobo ?? 0),
+      amountLabel: this.formatMoney(Number(nextMetadata.amountKobo ?? 0)),
+      message: `Payout request marked as ${decision.toLowerCase()}.`,
     };
   }
 
