@@ -40,6 +40,12 @@ export class SettingsController {
     return this.settingsService.updateProfile(user.sub, { avatarUrl: null });
   }
 
+  @Post('account/deletion-request')
+  async requestAccountDeletion(@Body() body: { reason?: string }, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.requestAccountDeletion(user.sub, body);
+  }
+
   @Get('settings/notification-preferences')
   async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);

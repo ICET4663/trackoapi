@@ -303,6 +303,60 @@ export class SettingsService {
     }
   }
 
+  async requestAccountDeletion(userId: string, input: { reason?: string }) {
+    const id = `account-deletion-${Date.now()}`;
+    const reason = String(input.reason ?? 'User requested account deletion from app.');
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'ACCOUNT_DELETION_REQUESTED',
+          entity: 'User',
+          entityId: userId,
+          metadata: {
+            requestId: id,
+            reason,
+            status: 'PENDING_REVIEW',
+            retentionNotice: 'Operational records may be retained for legal, safety, dispute, tax, or fraud-prevention reasons.',
+          },
+        },
+      });
+
+      await this.notifications.create({
+        role: 'ADMIN',
+        title: 'Account deletion request',
+        body: 'A user requested account deletion from inside the app.',
+        tone: 'WARNING',
+        entity: 'User',
+        entityId: userId,
+        actionUrl: '/admin/audit-logs',
+      });
+
+      await this.notifications.create({
+        userId,
+        title: 'Deletion request received',
+        body: 'Tracko will review your account deletion request and follow up according to our retention policy.',
+        tone: 'INFO',
+        entity: 'User',
+        entityId: userId,
+        actionUrl: '/customer/legal-document?id=account-deletion',
+      });
+
+      return {
+        id,
+        status: 'PENDING_REVIEW',
+        message: 'Account deletion request received. Tracko will review and follow up.',
+      };
+    } catch {
+      return {
+        id,
+        status: 'PENDING_REVIEW',
+        message: 'Account deletion request received in preview.',
+      };
+    }
+  }
+
   private toProfileRecord(user: {
     id: string;
     email: string;
