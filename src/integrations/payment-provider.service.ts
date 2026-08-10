@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac } from 'crypto';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type InitializeEscrowInput = {
@@ -16,6 +17,7 @@ export class PaymentProviderService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   status() {
@@ -49,6 +51,18 @@ export class PaymentProviderService {
         amount,
         currency,
       );
+      await this.prisma.shipment.update({
+        where: { id: shipmentId },
+        data: {
+          status: 'PENDING_PAYMENT',
+          timeline: {
+            create: {
+              status: 'PENDING_PAYMENT',
+              note: 'Escrow payment initialized.',
+            },
+          },
+        },
+      }).catch(() => null);
     } catch {
       // Keep preview usable until Supabase migrations are applied.
     }
@@ -98,6 +112,8 @@ export class PaymentProviderService {
           payment.shipmentId,
           payment.amount,
           payment.currency,
+          provider,
+          payment.reference,
         );
         await this.prisma.shipment.update({
           where: { id: payment.shipmentId },
@@ -174,7 +190,7 @@ export class PaymentProviderService {
     const payment = this.extractPaymentEvent({ event: 'charge.success', data: payload.data });
     const verified = Boolean(response.ok && payload.status && payload.data?.status === 'success');
     const escrowUpdated = verified && payment.shipmentId
-      ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack')
+      ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference)
       : false;
 
     try {
@@ -284,7 +300,7 @@ export class PaymentProviderService {
     };
   }
 
-  private async markEscrowFunded(shipmentId: string, amount?: number, currency?: string, provider = 'paystack') {
+  private async markEscrowFunded(shipmentId: string, amount?: number, currency?: string, provider = 'paystack', reference?: string) {
     try {
       await this.prisma.$queryRawUnsafe(
         `update "Escrow"
@@ -309,10 +325,70 @@ export class PaymentProviderService {
           },
         },
       });
+      await this.recordSuccessfulPayment(shipmentId, amount, currency, provider, reference);
       return true;
     } catch {
       return false;
     }
+  }
+
+  private async recordSuccessfulPayment(shipmentId: string, amount?: number, currency = 'NGN', provider = 'paystack', reference?: string) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: { customer: true },
+    }).catch(() => null);
+
+    if (!shipment) return;
+
+    const amountKobo = Number(amount ?? shipment.quotedPriceKobo ?? 0);
+    const ref = reference ?? `${provider}_${shipment.reference}`;
+    const amountLabel = this.formatMoney(amountKobo, currency);
+
+    await this.prisma.$executeRawUnsafe(
+      `insert into "BillingCharge" ("id", "userId", "ref", "dateLabel", "amount")
+       values ($1, $2, $3, $4, $5)
+       on conflict ("id") do nothing`,
+      `bill-${ref}`.slice(0, 120),
+      shipment.customerId,
+      shipment.reference,
+      new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      amountLabel,
+    ).catch(() => null);
+
+    await Promise.all([
+      this.notifications.create({
+        userId: shipment.customerId,
+        title: 'Escrow funded',
+        body: `${amountLabel} has been secured for shipment ${shipment.reference}. Dispatch can now assign a driver.`,
+        tone: 'SUCCESS',
+        entity: 'Shipment',
+        entityId: shipmentId,
+        actionUrl: `/customer/shipment/${shipmentId}`,
+      }),
+      this.notifications.create({
+        role: 'DISPATCHER',
+        title: 'Shipment ready for assignment',
+        body: `${shipment.reference} escrow is funded and ready for driver assignment.`,
+        tone: 'INFO',
+        entity: 'Shipment',
+        entityId: shipmentId,
+        actionUrl: '/dispatcher/assignment',
+      }),
+      this.notifications.create({
+        role: 'ADMIN',
+        title: 'Escrow payment received',
+        body: `${shipment.reference} received ${amountLabel} through ${provider}.`,
+        tone: 'SUCCESS',
+        entity: 'Escrow',
+        entityId: shipmentId,
+        actionUrl: '/admin/finance',
+      }),
+    ]).catch(() => null);
+  }
+
+  private formatMoney(amountKobo?: number, currency = 'NGN') {
+    const amount = Math.round(Number(amountKobo ?? 0) / 100).toLocaleString('en-US');
+    return `${currency === 'NGN' ? 'N' : `${currency} `}${amount}`;
   }
 
   private verifyPaystackSignature(body: unknown, signature?: string) {
