@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac } from 'crypto';
@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 type InitializeEscrowInput = {
   shipmentId?: string;
+  customerId?: string;
   amount?: number;
   currency?: string;
   customerEmail?: string;
@@ -36,8 +37,25 @@ export class PaymentProviderService {
 
   async initializeEscrow(input: InitializeEscrowInput) {
     const shipmentId = input.shipmentId ?? `preview-shipment-${Date.now()}`;
-    const amount = input.amount ?? 0;
     const currency = input.currency ?? 'NGN';
+    const shipment = input.shipmentId
+      ? await this.prisma.shipment.findUnique({
+          where: { id: input.shipmentId },
+          select: { id: true, customerId: true, quotedPriceKobo: true, cargoValueKobo: true },
+        })
+      : null;
+
+    if (input.shipmentId && !shipment) {
+      throw new BadRequestException('Shipment was not found for escrow payment.');
+    }
+    if (shipment && input.customerId && shipment.customerId !== input.customerId) {
+      throw new ForbiddenException('This customer cannot fund escrow for this shipment.');
+    }
+
+    const amount = shipment?.quotedPriceKobo ?? shipment?.cargoValueKobo ?? input.amount ?? 0;
+    if (!amount || amount <= 0) {
+      throw new BadRequestException('A valid escrow amount is required.');
+    }
     const providerReference = `tracko_escrow_${Date.now()}`;
     const status = this.status();
 

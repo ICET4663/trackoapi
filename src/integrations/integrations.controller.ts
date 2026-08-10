@@ -48,9 +48,10 @@ export class IntegrationsController {
     @Body() body: { shipmentId?: string; amount?: number; currency?: string; customerEmail?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    const user = await this.requestUser.requireRole(authorization, ['CUSTOMER']);
     return this.paymentProvider.initializeEscrow({
       ...body,
+      customerId: user.sub,
       customerEmail: user.email,
     });
   }
