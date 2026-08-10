@@ -54,6 +54,21 @@ type PayoutMetadata = {
   reviewNote?: string | null;
 };
 
+type SupportTicketRow = {
+  id: string;
+  shipmentId: string | null;
+  userId: string | null;
+  topic: string;
+  channel: string;
+  message: string | null;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  resolvedAt: Date | null;
+  userName: string | null;
+  userEmail: string | null;
+};
+
 const notificationPreferences: Record<PreferenceKey, boolean> = {
   shipmentStatusUpdates: true,
   liveTrackingAlerts: true,
@@ -452,6 +467,107 @@ export class SettingsService {
         conversationId: 'preview-support-thread',
         ticketId: id,
         status: 'OPEN',
+      };
+    }
+  }
+
+  async supportTickets() {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<SupportTicketRow[]>(
+        `select st."id", st."shipmentId", st."userId", st."topic", st."channel", st."message",
+           st."status"::text as "status", st."createdAt", st."updatedAt", st."resolvedAt",
+           coalesce(p."fullName", u."email") as "userName", u."email" as "userEmail"
+         from "SupportTicket" st
+         left join "User" u on u."id" = st."userId"
+         left join "Profile" p on p."userId" = u."id"
+         order by st."createdAt" desc
+         limit 100`,
+      );
+
+      return rows.map((row) => ({
+        id: row.id,
+        shipmentId: row.shipmentId,
+        userId: row.userId,
+        userName: row.userName ?? 'Tracko user',
+        userEmail: row.userEmail ?? undefined,
+        topic: row.topic,
+        channel: row.channel,
+        message: row.message,
+        status: row.status,
+        createdAt: row.createdAt.toISOString(),
+        createdAtLabel: row.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        updatedAt: row.updatedAt.toISOString(),
+        resolvedAt: row.resolvedAt?.toISOString(),
+      }));
+    } catch {
+      return [
+        {
+          id: 'support-preview-1',
+          shipmentId: null,
+          userId: 'preview-customer',
+          userName: 'Tracko Customer',
+          userEmail: 'customer@tracko.ng',
+          topic: 'General support',
+          channel: 'CHAT',
+          message: 'Preview support ticket.',
+          status: 'OPEN',
+          createdAt: new Date().toISOString(),
+          createdAtLabel: 'Today',
+          updatedAt: new Date().toISOString(),
+        },
+      ];
+    }
+  }
+
+  async resolveSupportTicket(id: string, actorId: string, input: { resolution?: string }) {
+    const resolution = String(input.resolution ?? 'Resolved by Tracko support.');
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<SupportTicketRow[]>(
+        `update "SupportTicket"
+         set "status" = 'RESOLVED'::"SupportTicketStatus",
+             "resolvedAt" = current_timestamp,
+             "updatedAt" = current_timestamp
+         where "id" = $1
+         returning "id", "shipmentId", "userId", "topic", "channel", "message",
+           "status"::text as "status", "createdAt", "updatedAt", "resolvedAt",
+           null::text as "userName", null::text as "userEmail"`,
+        id,
+      );
+      if (!rows[0]) throw new NotFoundException('Support ticket not found.');
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId,
+          action: 'SUPPORT_TICKET_RESOLVED',
+          entity: 'SupportTicket',
+          entityId: id,
+          metadata: { resolution },
+        },
+      }).catch(() => null);
+
+      if (rows[0].userId) {
+        await this.notifications.create({
+          userId: rows[0].userId,
+          title: 'Support ticket resolved',
+          body: resolution,
+          tone: 'SUCCESS',
+          entity: 'SupportTicket',
+          entityId: id,
+          actionUrl: '/customer/support',
+        });
+      }
+
+      return {
+        id,
+        status: 'RESOLVED',
+        message: 'Support ticket resolved.',
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      return {
+        id,
+        status: 'RESOLVED',
+        message: 'Support ticket resolved in preview.',
       };
     }
   }

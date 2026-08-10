@@ -82,6 +82,22 @@ export class SettingsController {
     return { sent: true };
   }
 
+  @Get('support/tickets')
+  async supportTickets(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.supportTickets();
+  }
+
+  @Post('support/tickets/:id/resolve')
+  async resolveSupportTicket(
+    @Param('id') id: string,
+    @Body() body: { resolution?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.resolveSupportTicket(id, user.sub, body);
+  }
+
   @Get('legal-documents')
   legalDocuments() {
     return this.settingsService.legalDocumentSummaries();
