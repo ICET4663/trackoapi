@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
+import { RequestUserService } from '../common/request-user.service';
 import { KycProviderService } from './kyc-provider.service';
 import { MapsProviderService } from './maps-provider.service';
 import { PaymentProviderService } from './payment-provider.service';
@@ -9,6 +10,7 @@ export class IntegrationsController {
     private readonly kycProvider: KycProviderService,
     private readonly mapsProvider: MapsProviderService,
     private readonly paymentProvider: PaymentProviderService,
+    private readonly requestUser: RequestUserService,
   ) {}
 
   @Get('integrations/status')
@@ -42,8 +44,15 @@ export class IntegrationsController {
   }
 
   @Post('payments/escrow/initialize')
-  initializeEscrow(@Body() body: { shipmentId?: string; amount?: number; currency?: string; customerEmail?: string }) {
-    return this.paymentProvider.initializeEscrow(body);
+  async initializeEscrow(
+    @Body() body: { shipmentId?: string; amount?: number; currency?: string; customerEmail?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.paymentProvider.initializeEscrow({
+      ...body,
+      customerEmail: user.email,
+    });
   }
 
   @Get('payments/paystack/verify/:reference')
