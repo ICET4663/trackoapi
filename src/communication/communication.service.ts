@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -12,6 +13,7 @@ const PREVIEW_TRANSCRIPT =
 @Injectable()
 export class CommunicationService {
   constructor(
+    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -154,13 +156,14 @@ export class CommunicationService {
   }
 
   async uploadMedia(input: Record<string, unknown>, userId = 'preview-customer') {
-    const url = this.mediaUrl(input);
+    const media = await this.prepareMedia(input, userId);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
           id: string;
           kind: string;
           url?: string;
+          storageKey?: string;
           label: string;
           transcript?: string;
           durationSeconds?: number;
@@ -180,16 +183,16 @@ export class CommunicationService {
            $8,
            $9
          )
-         returning "id", "kind"::text as "kind", "url", "label", "transcript", "durationSeconds", "createdAt"`,
+         returning "id", "kind"::text as "kind", "url", "storageKey", "label", "transcript", "durationSeconds", "createdAt"`,
         input.shipmentId ? String(input.shipmentId) : null,
         input.conversationId ? String(input.conversationId) : null,
         String(input.kind ?? 'DOCUMENT'),
-        url,
-        `preview/${Date.now()}`,
+        media.url,
+        media.storageKey,
         String(input.label ?? 'Uploaded media'),
         input.transcript ? String(input.transcript) : null,
         input.durationSeconds ? Number(input.durationSeconds) : null,
-        input.mimeType ? String(input.mimeType) : null,
+        media.mimeType,
         userId.startsWith('preview-') ? null : userId,
       );
       if (rows[0]) {
@@ -206,13 +209,51 @@ export class CommunicationService {
     return {
       id: `media-${Date.now()}`,
       kind: String(input.kind ?? 'DOCUMENT'),
-      url,
+      url: media.url,
       label: String(input.label ?? 'Uploaded media'),
       transcript: input.transcript ? String(input.transcript) : undefined,
       durationSeconds: input.durationSeconds ? Number(input.durationSeconds) : undefined,
       createdAt: new Date().toISOString(),
-      storageKey: `preview/${Date.now()}`,
+      storageKey: media.storageKey,
       uploaded: true,
+    };
+  }
+
+  private async prepareMedia(input: Record<string, unknown>, userId: string) {
+    const mimeType = typeof input.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
+    const base64 = typeof input.base64 === 'string' && input.base64.trim() ? input.base64.trim() : null;
+    const storage = this.storageConfig();
+
+    if (base64 && storage) {
+      try {
+        const storageKey = this.storageKey(input, userId, mimeType);
+        const response = await fetch(`${storage.url}/storage/v1/object/${storage.bucket}/${storageKey}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${storage.serviceRoleKey}`,
+            apikey: storage.serviceRoleKey,
+            'Content-Type': mimeType,
+            'x-upsert': 'false',
+          },
+          body: Buffer.from(base64, 'base64'),
+        });
+
+        if (!response.ok) throw new Error(`Supabase storage upload failed with ${response.status}`);
+
+        return {
+          url: `${storage.url}/storage/v1/object/public/${storage.bucket}/${storageKey}`,
+          storageKey,
+          mimeType,
+        };
+      } catch {
+        // Keep demo uploads working even if storage is not configured correctly yet.
+      }
+    }
+
+    return {
+      url: this.mediaUrl(input),
+      storageKey: `preview/${Date.now()}`,
+      mimeType,
     };
   }
 
@@ -224,6 +265,30 @@ export class CommunicationService {
     if (typeof input.localUri === 'string' && input.localUri.trim()) return input.localUri.trim();
     if (typeof input.uri === 'string' && input.uri.trim()) return input.uri.trim();
     return `local://media/${Date.now()}`;
+  }
+
+  private storageConfig() {
+    const url = this.config.get<string>('SUPABASE_URL') ?? this.config.get<string>('EXPO_PUBLIC_SUPABASE_URL') ?? this.config.get<string>('NEXT_PUBLIC_SUPABASE_URL');
+    const serviceRoleKey = this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY');
+    const bucket = this.config.get<string>('SUPABASE_STORAGE_BUCKET') ?? 'tracko-media';
+    if (!url || !serviceRoleKey) return null;
+    return { url: url.replace(/\/$/, ''), serviceRoleKey, bucket };
+  }
+
+  private storageKey(input: Record<string, unknown>, userId: string, mimeType: string) {
+    const kind = String(input.kind ?? 'DOCUMENT').toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const owner = userId.startsWith('preview-') ? 'preview' : userId.replace(/[^a-zA-Z0-9_-]/g, '');
+    return `${kind}/${owner}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${this.extensionForMime(mimeType)}`;
+  }
+
+  private extensionForMime(mimeType: string) {
+    if (mimeType.includes('png')) return 'png';
+    if (mimeType.includes('webp')) return 'webp';
+    if (mimeType.includes('pdf')) return 'pdf';
+    if (mimeType.includes('mpeg')) return 'mp3';
+    if (mimeType.includes('wav')) return 'wav';
+    if (mimeType.includes('mp4')) return 'mp4';
+    return 'jpg';
   }
 
   private toMessageRecord(message: {
