@@ -21,6 +21,18 @@ export class OperationsController {
     return this.operations.assignmentQueue(user);
   }
 
+  @Get('workflow-readiness')
+  async workflowReadiness(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    return this.operations.workflowReadiness(user);
+  }
+
+  @Get('escrow-ledger')
+  async escrowLedger(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'ADMIN');
+    return this.operations.escrowLedger(user);
+  }
+
   @Post('shipments/:id/progress')
   async progressShipment(
     @Param('id') id: string,

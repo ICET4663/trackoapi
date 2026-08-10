@@ -31,6 +31,23 @@ type AssignmentQueueShipmentRow = {
   createdAt: Date | string;
 };
 
+type EscrowLedgerRow = {
+  id: string;
+  shipmentId: string;
+  reference: string;
+  route: string;
+  cargo: string;
+  amount: number;
+  currency: string;
+  status: string;
+  arrivalConfirmed: boolean;
+  proofOfDeliveryUploaded: boolean;
+  customerDeliveryConfirmed: boolean;
+  disputeWindowClear: boolean;
+  platformApproved: boolean;
+  updatedAt: Date | string;
+};
+
 @Injectable()
 export class OperationsService {
   constructor(
@@ -182,6 +199,188 @@ export class OperationsService {
             phone: '+234 800 000 0001',
             verificationStatus: 'VERIFIED',
             vehicles: [{ id: 'preview-vehicle', plateNumber: 'LAG-204-TK', type: 'Flatbed truck', capacityKg: 12000 }],
+          },
+        ],
+      };
+    }
+  }
+
+  async workflowReadiness(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+
+    try {
+      const [
+        pendingKyc,
+        verifiedDrivers,
+        fundedUnassignedEscrows,
+        offeredAssignments,
+        acceptedAssignments,
+        releaseReadyEscrows,
+        openDisputes,
+        openSupportTickets,
+      ] = await Promise.all([
+        this.prisma.user.count({
+          where: { verificationStatus: { in: ['PENDING', 'IN_REVIEW', 'ACTION_NEEDED'] } },
+        }),
+        this.prisma.user.count({
+          where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
+        }),
+        this.countRaw(
+          `select count(*)::int as count
+           from "Escrow" e
+           where e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
+             and not exists (
+               select 1 from "DriverAssignment" da
+               where da."shipmentId" = e."shipmentId"
+                 and da."status" in ('OFFERED'::"AssignmentStatus", 'ACCEPTED'::"AssignmentStatus")
+             )`,
+        ),
+        this.prisma.driverAssignment.count({ where: { status: 'OFFERED' } }),
+        this.prisma.driverAssignment.count({ where: { status: 'ACCEPTED' } }),
+        this.countRaw(`select count(*)::int as count from "Escrow" where "status" = 'RELEASE_READY'::"EscrowStatus"`),
+        this.countRaw(
+          `select count(*)::int as count
+           from "Dispute"
+           where "status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")`,
+        ),
+        this.countRaw(
+          `select count(*)::int as count
+           from "SupportTicket"
+           where "status" in ('OPEN'::"SupportTicketStatus", 'IN_PROGRESS'::"SupportTicketStatus")`,
+        ),
+      ]);
+
+      const nextActions = [
+        {
+          key: 'kyc-review',
+          label: 'Review pending KYC',
+          count: pendingKyc,
+          priority: pendingKyc > 0 ? 'HIGH' : 'LOW',
+          route: '/admin/verifications',
+        },
+        {
+          key: 'assign-funded-shipments',
+          label: 'Assign funded shipments',
+          count: fundedUnassignedEscrows,
+          priority: fundedUnassignedEscrows > 0 ? 'HIGH' : 'LOW',
+          route: '/dispatcher/assignment',
+        },
+        {
+          key: 'driver-offers',
+          label: 'Follow up driver offers',
+          count: offeredAssignments,
+          priority: offeredAssignments > 0 ? 'MEDIUM' : 'LOW',
+          route: '/dispatcher/shipments',
+        },
+        {
+          key: 'release-escrow',
+          label: 'Release ready escrow',
+          count: releaseReadyEscrows,
+          priority: releaseReadyEscrows > 0 ? 'HIGH' : 'LOW',
+          route: '/admin/finance',
+        },
+        {
+          key: 'disputes',
+          label: 'Resolve open disputes',
+          count: openDisputes,
+          priority: openDisputes > 0 ? 'HIGH' : 'LOW',
+          route: '/dispatcher/disputes',
+        },
+        {
+          key: 'support',
+          label: 'Handle support tickets',
+          count: openSupportTickets,
+          priority: openSupportTickets > 0 ? 'MEDIUM' : 'LOW',
+          route: '/dispatcher/support',
+        },
+      ];
+
+      return {
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        metrics: {
+          pendingKyc,
+          verifiedDrivers,
+          fundedUnassignedShipments: fundedUnassignedEscrows,
+          offeredAssignments,
+          acceptedAssignments,
+          releaseReadyEscrows,
+          openDisputes,
+          openSupportTickets,
+        },
+        blockers: [
+          ...(verifiedDrivers === 0 ? ['No verified drivers are available for assignment.'] : []),
+          ...(pendingKyc > 0 ? ['Some users still need KYC review before full workflow access.'] : []),
+        ],
+        nextActions,
+      };
+    } catch {
+      return this.previewWorkflowReadiness();
+    }
+  }
+
+  async escrowLedger(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<EscrowLedgerRow[]>(
+        `select
+          e."id", e."shipmentId", s."reference",
+          concat(s."pickupLabel", ' to ', s."destinationLabel") as "route",
+          s."cargoDescription" as "cargo",
+          e."amount", e."currency", e."status"::text as "status",
+          e."arrivalConfirmed", e."proofOfDeliveryUploaded", e."customerDeliveryConfirmed",
+          e."disputeWindowClear", e."platformApproved", e."updatedAt"
+        from "Escrow" e
+        join "Shipment" s on s."id" = e."shipmentId"
+        order by e."updatedAt" desc
+        limit 100`,
+      );
+
+      return {
+        totalHeld: rows
+          .filter((row) => ['FUNDED', 'HELD', 'RELEASE_READY', 'DISPUTED'].includes(row.status))
+          .reduce((sum, row) => sum + Number(row.amount ?? 0), 0),
+        items: rows.map((row) => ({
+          id: row.shipmentId,
+          escrowId: row.id,
+          reference: row.reference,
+          route: row.route,
+          cargo: row.cargo,
+          amount: row.amount,
+          currency: row.currency,
+          status: row.status,
+          updatedAt: this.isoDate(row.updatedAt),
+          releaseChecks: {
+            arrivalConfirmed: row.arrivalConfirmed,
+            proofOfDeliveryUploaded: row.proofOfDeliveryUploaded,
+            customerDeliveryConfirmed: row.customerDeliveryConfirmed,
+            disputeWindowClear: row.disputeWindowClear,
+            platformApproved: row.platformApproved,
+          },
+        })),
+      };
+    } catch {
+      return {
+        totalHeld: 35050000,
+        items: [
+          {
+            id: 'TRK-1024',
+            escrowId: 'escrow-TRK-1024',
+            reference: 'TRK-1024',
+            route: 'Lagos to Abuja',
+            cargo: 'Consumer goods',
+            amount: 35050000,
+            currency: 'NGN',
+            status: 'FUNDED',
+            updatedAt: new Date().toISOString(),
+            releaseChecks: {
+              arrivalConfirmed: true,
+              proofOfDeliveryUploaded: true,
+              customerDeliveryConfirmed: true,
+              disputeWindowClear: false,
+              platformApproved: false,
+            },
           },
         ],
       };
@@ -456,6 +655,11 @@ export class OperationsService {
     });
   }
 
+  private async countRaw(query: string) {
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ count: number | bigint | string }>>(query);
+    return Number(rows[0]?.count ?? 0);
+  }
+
   private toJson(value: unknown): Prisma.InputJsonValue {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
@@ -487,6 +691,40 @@ export class OperationsService {
           vehicleId: 'preview-vehicle',
           status: 'OFFERED',
           offeredAt: new Date().toISOString(),
+        },
+      ],
+    };
+  }
+
+  private previewWorkflowReadiness() {
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      metrics: {
+        pendingKyc: 1,
+        verifiedDrivers: 1,
+        fundedUnassignedShipments: 1,
+        offeredAssignments: 1,
+        acceptedAssignments: 0,
+        releaseReadyEscrows: 0,
+        openDisputes: 0,
+        openSupportTickets: 0,
+      },
+      blockers: [],
+      nextActions: [
+        {
+          key: 'assign-funded-shipments',
+          label: 'Assign funded shipments',
+          count: 1,
+          priority: 'HIGH',
+          route: '/dispatcher/assignment',
+        },
+        {
+          key: 'kyc-review',
+          label: 'Review pending KYC',
+          count: 1,
+          priority: 'HIGH',
+          route: '/admin/verifications',
         },
       ],
     };

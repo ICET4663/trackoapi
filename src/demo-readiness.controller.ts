@@ -46,6 +46,7 @@ export class DemoReadinessController {
         paystackReady: this.integrationMode(deployment.integrations, 'payments') === 'configured',
         endpoints: [
           'POST /v1/payments/escrow/initialize',
+          'GET /v1/payments/paystack/verify/:reference',
           'POST /v1/payments/webhooks/paystack/charge.success',
           'GET /v1/shipments/:id/escrow',
           'POST /v1/shipments/:id/escrow/release',
@@ -69,10 +70,19 @@ export class DemoReadinessController {
         requiredEnv: 'EXPO_PUBLIC_API_BASE_URL=https://YOUR-BACKEND-URL/v1',
         status: 'ready_after_backend_url_is_added_to_frontend_env',
       },
+      operationsWorkflow: {
+        status: 'ready_for_preview',
+        endpoints: [
+          'GET /v1/operations/workflow-readiness',
+          'GET /v1/operations/assignment-queue',
+          'GET /v1/operations/escrow-ledger',
+        ],
+      },
       nextProofToShow: [
         'Open /v1/demo/readiness',
         'Open /v1/health',
         'Open /v1/integrations/status',
+        'Open /v1/operations/workflow-readiness as dispatcher/admin',
         'Request registration OTP from the app',
         'Initialize escrow from a shipment',
       ],
