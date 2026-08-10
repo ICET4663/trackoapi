@@ -103,7 +103,7 @@ export class PaymentProviderService {
     if (verified && provider === 'paystack' && payment.shipmentId && payment.success) {
       try {
         await this.prisma.$queryRawUnsafe(
-          `update "Escrow"
+        `update "Escrow"
            set "status" = 'FUNDED'::"EscrowStatus",
                "amount" = coalesce($2, "amount"),
                "currency" = coalesce($3, "currency"),
@@ -112,8 +112,6 @@ export class PaymentProviderService {
           payment.shipmentId,
           payment.amount,
           payment.currency,
-          provider,
-          payment.reference,
         );
         await this.prisma.shipment.update({
           where: { id: payment.shipmentId },
