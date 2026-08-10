@@ -170,6 +170,23 @@ export class TrackingService {
         },
       });
 
+      await this.prisma.$executeRawUnsafe(
+        `update "Escrow"
+         set "proofOfDeliveryUploaded" = true,
+             "status" = case
+               when "status" in ('DISPUTED'::"EscrowStatus", 'REFUNDED'::"EscrowStatus", 'RELEASED'::"EscrowStatus") then "status"
+               when "arrivalConfirmed" = true
+                and "customerDeliveryConfirmed" = true
+                and "disputeWindowClear" = true
+                and "platformApproved" = true
+               then 'RELEASE_READY'::"EscrowStatus"
+               else "status"
+             end,
+             "updatedAt" = current_timestamp
+         where "shipmentId" = $1`,
+        shipmentId,
+      );
+
       await this.notifications.create({
         userId: shipment.customerId,
         title: 'Proof of delivery submitted',
