@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
@@ -31,6 +31,16 @@ type PaymentMethodRecord = {
   isDefault?: boolean;
   expiry?: string;
   holderName?: string;
+};
+
+type DriverEscrowEarningRow = {
+  shipmentId: string;
+  reference: string;
+  route: string;
+  amount: number;
+  currency: string;
+  status: string;
+  updatedAt: Date;
 };
 
 const notificationPreferences: Record<PreferenceKey, boolean> = {
@@ -343,6 +353,152 @@ export class SettingsService {
       payoutSchedule: 'Weekly',
       pendingPayout: 'N0',
     };
+  }
+
+  async driverEarnings(userId = 'preview-driver') {
+    try {
+      const [releasedRows, pendingRows, bankAccount, withdrawalLogs] = await Promise.all([
+        this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
+          `select s."id" as "shipmentId", s."reference",
+             concat(s."pickupLabel", ' to ', s."destinationLabel") as "route",
+             e."amount", e."currency", e."status"::text as "status", e."updatedAt"
+           from "DriverAssignment" da
+           join "Shipment" s on s."id" = da."shipmentId"
+           join "Escrow" e on e."shipmentId" = s."id"
+           where da."driverId" = $1
+             and da."status" = 'ACCEPTED'
+             and e."status" = 'RELEASED'
+           order by e."updatedAt" desc
+           limit 100`,
+          userId,
+        ),
+        this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
+          `select s."id" as "shipmentId", s."reference",
+             concat(s."pickupLabel", ' to ', s."destinationLabel") as "route",
+             e."amount", e."currency", e."status"::text as "status", e."updatedAt"
+           from "DriverAssignment" da
+           join "Shipment" s on s."id" = da."shipmentId"
+           join "Escrow" e on e."shipmentId" = s."id"
+           where da."driverId" = $1
+             and da."status" = 'ACCEPTED'
+             and e."status" in ('FUNDED', 'HELD', 'RELEASE_READY')
+           order by e."updatedAt" desc
+           limit 100`,
+          userId,
+        ),
+        this.bankAccount(userId),
+        this.prisma.auditLog.findMany({
+          where: { actorId: userId, action: 'PAYOUT_WITHDRAWAL_REQUESTED', entity: 'Payout' },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        }),
+      ]);
+
+      const withdrawals = withdrawalLogs.map((log) => {
+        const metadata = (log.metadata ?? {}) as { amountKobo?: number; status?: string; bankLabel?: string };
+        return {
+          id: log.id,
+          title: 'Withdrawal request',
+          amount: -(Number(metadata.amountKobo ?? 0)),
+          amountLabel: `-${this.formatMoney(Number(metadata.amountKobo ?? 0))}`,
+          status: metadata.status ?? 'PENDING',
+          date: log.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          method: metadata.bankLabel ?? 'Payout account',
+        };
+      });
+
+      const releasedTotal = releasedRows.reduce((sum, row) => sum + Number(row.amount ?? 0), 0);
+      const pendingTotal = pendingRows.reduce((sum, row) => sum + Number(row.amount ?? 0), 0);
+      const withdrawalTotal = withdrawals.reduce((sum, row) => sum + Math.abs(row.amount), 0);
+      const availableBalance = Math.max(0, releasedTotal - withdrawalTotal);
+
+      return {
+        availableBalance,
+        availableBalanceLabel: this.formatMoney(availableBalance),
+        pendingEscrow: pendingTotal,
+        pendingEscrowLabel: this.formatMoney(pendingTotal),
+        releasedTotal,
+        releasedTotalLabel: this.formatMoney(releasedTotal),
+        bankAccount,
+        transactions: [
+          ...releasedRows.map((row) => ({
+            id: `earning-${row.reference}`,
+            title: row.route,
+            amount: Number(row.amount ?? 0),
+            amountLabel: `+${this.formatMoney(row.amount)}`,
+            status: 'RELEASED',
+            date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+            shipmentId: row.reference,
+          })),
+          ...pendingRows.map((row) => ({
+            id: `pending-${row.reference}`,
+            title: row.route,
+            amount: Number(row.amount ?? 0),
+            amountLabel: `+${this.formatMoney(row.amount)}`,
+            status: 'PENDING_ESCROW',
+            date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+            shipmentId: row.reference,
+          })),
+          ...withdrawals,
+        ],
+      };
+    } catch {
+      return {
+        availableBalance: 51240000,
+        availableBalanceLabel: 'N512,400',
+        pendingEscrow: 33000000,
+        pendingEscrowLabel: 'N330,000',
+        releasedTotal: 63240000,
+        releasedTotalLabel: 'N632,400',
+        bankAccount: await this.bankAccount(userId),
+        transactions: [
+          { id: 'earning-preview-1', title: 'Kano to Abuja', amount: 33000000, amountLabel: '+N330,000', status: 'PENDING_ESCROW', date: 'Jun 22', shipmentId: 'TRK-1024' },
+          { id: 'earning-preview-2', title: 'Lagos to Ibadan', amount: 18500000, amountLabel: '+N185,000', status: 'RELEASED', date: 'Jun 18', shipmentId: 'TRK-1008' },
+          { id: 'withdrawal-preview-1', title: 'Withdrawal request', amount: -12000000, amountLabel: '-N120,000', status: 'PENDING', date: 'Jun 15', method: 'Preview Bank' },
+        ],
+      };
+    }
+  }
+
+  async requestDriverWithdrawal(userId: string, input: { amountKobo?: number; amount?: number; note?: string }) {
+    const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
+    if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
+      throw new BadRequestException('Enter a valid withdrawal amount.');
+    }
+
+    const earnings = await this.driverEarnings(userId);
+    if (amountKobo > earnings.availableBalance) {
+      throw new BadRequestException('Withdrawal amount is higher than available balance.');
+    }
+
+    const bank = earnings.bankAccount as { bankName?: string; maskedNumber?: string };
+    const log = await this.prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: 'PAYOUT_WITHDRAWAL_REQUESTED',
+        entity: 'Payout',
+        entityId: `payout-${Date.now()}`,
+        metadata: {
+          amountKobo,
+          status: 'PENDING',
+          note: input.note ?? null,
+          bankLabel: [bank?.bankName, bank?.maskedNumber].filter(Boolean).join(' '),
+        },
+      },
+    });
+
+    return {
+      id: log.id,
+      status: 'PENDING',
+      amount: amountKobo,
+      amountLabel: this.formatMoney(amountKobo),
+      message: 'Withdrawal request submitted for finance review.',
+    };
+  }
+
+  private formatMoney(amountKobo?: number | null) {
+    if (!amountKobo) return 'N0';
+    return `N${Math.round(Number(amountKobo) / 100).toLocaleString('en-US')}`;
   }
 
   async driverDocuments(userId = 'preview-driver') {

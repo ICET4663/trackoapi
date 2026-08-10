@@ -149,6 +149,18 @@ export class SettingsController {
     return this.settingsService.bankAccount(user.sub);
   }
 
+  @Get('driver/earnings')
+  async driverEarnings(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.driverEarnings(user.sub);
+  }
+
+  @Post('driver/withdrawals')
+  async requestDriverWithdrawal(@Body() body: { amountKobo?: number; amount?: number; note?: string }, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.requestDriverWithdrawal(user.sub, body);
+  }
+
   @Post('driver/payout-account/change-request')
   createBankAccountChange() {
     return { message: 'Payout account changes are disabled in preview.' };
