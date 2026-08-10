@@ -45,7 +45,10 @@ export class DataService {
         case 'driver-jobs':
         case 'active-trips':
           return await this.prisma.driverAssignment.findMany({
-            where: { driverId: userId },
+            where: {
+              driverId: userId,
+              status: collection === 'driver-jobs' ? 'OFFERED' : 'ACCEPTED',
+            },
             include: { shipment: true, vehicle: true },
             orderBy: { offeredAt: 'desc' },
           }).then((assignments) => assignments.map((assignment) => ({
