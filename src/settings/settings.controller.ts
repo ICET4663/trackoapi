@@ -232,12 +232,14 @@ export class SettingsController {
   }
 
   @Get('admin/audit-logs')
-  auditLogs() {
-    return this.settingsService.auditLogs();
+  async auditLogs(@Query('category') category?: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.auditLogs(category);
   }
 
   @Get('admin/audit-logs/:id')
-  auditLog(@Param('id') id: string) {
+  async auditLog(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.settingsService.auditLog(id);
   }
 }

@@ -706,15 +706,109 @@ export class SettingsService {
     return this.platformSettings().find((setting) => setting.key === key) ?? this.platformSettings()[0];
   }
 
-  auditLogs() {
-    return [
-      { id: 'audit-1', actor: 'System', action: 'Preview backend started', time: 'Today', icon: 'settings', tone: 'success', category: 'System' },
-      { id: 'audit-2', actor: 'Admin', action: 'Reviewed demo workflow', time: 'Today', icon: 'verified', tone: 'info', category: 'Admin' },
-    ];
+  async auditLogs(category?: string) {
+    try {
+      const logs = await this.prisma.auditLog.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      const actorIds = [...new Set(logs.map((log) => log.actorId).filter(Boolean) as string[])];
+      const actors = await this.prisma.user.findMany({
+        where: { id: { in: actorIds } },
+        include: { profile: true },
+      });
+      const actorsById = new Map(actors.map((actor) => [actor.id, actor]));
+      const records = logs.map((log) => {
+        const actor = log.actorId ? actorsById.get(log.actorId) : null;
+        const recordCategory = this.auditCategory(log.action, log.entity);
+        return {
+          id: log.id,
+          actor: actor?.profile?.fullName ?? actor?.email ?? 'System',
+          action: this.auditActionLabel(log.action),
+          time: this.auditTime(log.createdAt),
+          icon: this.auditIcon(log.action, log.entity),
+          tone: this.auditTone(log.action),
+          category: recordCategory,
+        };
+      });
+
+      if (category && category !== 'All') return records.filter((record) => record.category === category);
+      return records;
+    } catch {
+      return this.previewAuditLogs(category);
+    }
   }
 
-  auditLog(id: string) {
-    const log = this.auditLogs().find((entry) => entry.id === id) ?? this.auditLogs()[0];
-    return { ...log, role: 'ADMIN', target: 'Tracko preview', ip: '127.0.0.1', result: 'Completed' };
+  async auditLog(id: string) {
+    try {
+      const log = await this.prisma.auditLog.findUnique({ where: { id } });
+      if (!log) throw new NotFoundException('Audit entry not found.');
+      const actor = log.actorId
+        ? await this.prisma.user.findUnique({ where: { id: log.actorId }, include: { profile: true } })
+        : null;
+      const metadata = (log.metadata ?? {}) as Record<string, unknown>;
+      return {
+        id: log.id,
+        actor: actor?.profile?.fullName ?? actor?.email ?? 'System',
+        action: this.auditActionLabel(log.action),
+        time: log.createdAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }),
+        icon: this.auditIcon(log.action, log.entity),
+        tone: this.auditTone(log.action),
+        category: this.auditCategory(log.action, log.entity),
+        role: actor?.role ?? 'SYSTEM',
+        target: [log.entity, log.entityId].filter(Boolean).join(' - ') || log.entity,
+        ip: String(metadata.ip ?? metadata.source ?? 'Vercel/Supabase'),
+        result: String(metadata.status ?? metadata.result ?? 'Recorded'),
+      };
+    } catch {
+      const log = this.previewAuditLogs().find((entry) => entry.id === id) ?? this.previewAuditLogs()[0];
+      return { ...log, role: 'ADMIN', target: 'Tracko preview', ip: '127.0.0.1', result: 'Completed' };
+    }
+  }
+
+  private previewAuditLogs(category?: string) {
+    const logs = [
+      { id: 'audit-1', actor: 'System', action: 'Preview backend started', time: 'Today', icon: 'settings', tone: 'success', category: 'System' },
+      { id: 'audit-2', actor: 'Admin', action: 'Reviewed demo workflow', time: 'Today', icon: 'verified', tone: 'info', category: 'Accounts' },
+      { id: 'audit-3', actor: 'Finance', action: 'Payout request recorded', time: 'Today', icon: 'payments', tone: 'warning', category: 'Finance' },
+    ];
+    if (category && category !== 'All') return logs.filter((log) => log.category === category);
+    return logs;
+  }
+
+  private auditActionLabel(action: string) {
+    return action
+      .toLowerCase()
+      .split('_')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
+
+  private auditCategory(action: string, entity: string) {
+    if (/PAYOUT|ESCROW|PAYMENT/i.test(`${action} ${entity}`)) return 'Finance';
+    if (/AUTH|LOGIN|OTP|KYC|USER|ACCOUNT/i.test(`${action} ${entity}`)) return 'Accounts';
+    return 'System';
+  }
+
+  private auditIcon(action: string, entity: string) {
+    if (/PAYOUT|ESCROW|PAYMENT/i.test(`${action} ${entity}`)) return 'payments';
+    if (/KYC|VERIFICATION/i.test(`${action} ${entity}`)) return 'verified-user';
+    if (/AUTH|LOGIN|OTP|USER/i.test(`${action} ${entity}`)) return 'manage-accounts';
+    return 'history';
+  }
+
+  private auditTone(action: string): 'success' | 'error' | 'warning' | 'info' {
+    if (/REJECT|FAIL|ERROR|DISPUTE/i.test(action)) return 'error';
+    if (/REQUEST|PENDING|REVIEW/i.test(action)) return 'warning';
+    if (/APPROVE|PAID|RELEASE|SUCCESS|COMPLETE/i.test(action)) return 'success';
+    return 'info';
+  }
+
+  private auditTime(date: Date) {
+    const minutes = Math.max(1, Math.round((Date.now() - date.getTime()) / 60000));
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
   }
 }
