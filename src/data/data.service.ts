@@ -53,6 +53,7 @@ export class DataService {
             orderBy: { offeredAt: 'desc' },
           }).then((assignments) => assignments.map((assignment) => ({
             id: assignment.id,
+            shipmentDbId: assignment.shipment.id,
             shipmentId: assignment.shipment.reference,
             origin: assignment.shipment.pickupLabel,
             destination: assignment.shipment.destinationLabel,

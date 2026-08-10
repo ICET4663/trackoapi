@@ -27,7 +27,7 @@ export class OperationsController {
     @Body() body: { status?: ShipmentStatus; note?: string; location?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
     return this.operations.progressTrip(id, body, user);
   }
 

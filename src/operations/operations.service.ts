@@ -193,7 +193,7 @@ export class OperationsService {
     body: { status?: ShipmentStatus; note?: string; location?: string },
     actor: OperationActor,
   ) {
-    this.assertCanOperate(actor.role);
+    this.assertCanProgressTrip(actor.role);
     const status = body.status ?? 'IN_TRANSIT';
 
     try {
@@ -419,6 +419,12 @@ export class OperationsService {
   private assertCanOperate(role: UserRole) {
     if (role !== 'ADMIN' && role !== 'DISPATCHER') {
       throw new ForbiddenException('Only operations users can perform this action.');
+    }
+  }
+
+  private assertCanProgressTrip(role: UserRole) {
+    if (role !== 'ADMIN' && role !== 'DISPATCHER' && role !== 'DRIVER') {
+      throw new ForbiddenException('Only operations users and assigned drivers can update trip progress.');
     }
   }
 
