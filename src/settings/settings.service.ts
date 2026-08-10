@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
@@ -72,7 +73,10 @@ const legalDocuments = [
 
 @Injectable()
 export class SettingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   accountOverview(role: Role) {
     const base = {
@@ -497,6 +501,16 @@ export class SettingsService {
       },
     });
 
+    await this.notifications.create({
+      userId,
+      title: 'Withdrawal request submitted',
+      body: `${this.formatMoney(amountKobo)} is pending Tracko finance review.`,
+      tone: 'INFO',
+      entity: 'Payout',
+      entityId: log.id,
+      actionUrl: '/driver/earnings',
+    });
+
     return {
       id: log.id,
       status: 'PENDING',
@@ -585,6 +599,18 @@ export class SettingsService {
     });
 
     const nextMetadata = (updated.metadata ?? {}) as PayoutMetadata;
+    if (updated.actorId) {
+      await this.notifications.create({
+        userId: updated.actorId,
+        title: decision === 'PAID' ? 'Withdrawal paid' : decision === 'APPROVED' ? 'Withdrawal approved' : 'Withdrawal rejected',
+        body: `${this.formatMoney(Number(nextMetadata.amountKobo ?? 0))} payout request was marked ${decision.toLowerCase()}.`,
+        tone: decision === 'REJECTED' ? 'DANGER' : 'SUCCESS',
+        entity: 'Payout',
+        entityId: updated.id,
+        actionUrl: '/driver/earnings',
+      });
+    }
+
     return {
       id: updated.id,
       status: nextMetadata.status ?? decision,
