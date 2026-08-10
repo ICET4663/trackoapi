@@ -11,6 +11,26 @@ type OperationActor = {
 
 const FINAL_SHIPMENT_STATUSES = ['COMPLETED', 'CANCELLED'] as const;
 
+type AssignmentQueueShipmentRow = {
+  id: string;
+  reference: string;
+  pickupLabel: string;
+  destinationLabel: string;
+  cargoDescription: string;
+  status: string;
+  quotedPriceKobo: number | null;
+  escrowId: string | null;
+  escrowStatus: string | null;
+  escrowAmount: number | null;
+  escrowCurrency: string | null;
+  assignmentId: string | null;
+  assignedDriverId: string | null;
+  assignedVehicleId: string | null;
+  assignmentStatus: string | null;
+  assignmentOfferedAt: Date | string | null;
+  createdAt: Date | string;
+};
+
 @Injectable()
 export class OperationsService {
   constructor(
@@ -53,6 +73,118 @@ export class OperationsService {
       };
     } catch {
       return this.previewDashboard();
+    }
+  }
+
+  async assignmentQueue(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+
+    try {
+      const [shipments, drivers] = await Promise.all([
+        this.prisma.$queryRawUnsafe<AssignmentQueueShipmentRow[]>(
+          `select
+            s."id", s."reference", s."pickupLabel", s."destinationLabel", s."cargoDescription",
+            s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
+            e."id" as "escrowId", e."status"::text as "escrowStatus", e."amount" as "escrowAmount",
+            e."currency" as "escrowCurrency",
+            da."id" as "assignmentId", da."driverId" as "assignedDriverId",
+            da."vehicleId" as "assignedVehicleId", da."status"::text as "assignmentStatus",
+            da."offeredAt" as "assignmentOfferedAt"
+          from "Shipment" s
+          join "Escrow" e on e."shipmentId" = s."id"
+          left join lateral (
+            select "id", "driverId", "vehicleId", "status", "offeredAt"
+            from "DriverAssignment"
+            where "shipmentId" = s."id"
+            order by "offeredAt" desc
+            limit 1
+          ) da on true
+          where e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
+            and s."status" in ('ESCROW_FUNDED'::"ShipmentStatus", 'QUOTED'::"ShipmentStatus", 'PENDING_PAYMENT'::"ShipmentStatus")
+          order by s."createdAt" desc
+          limit 50`,
+        ),
+        this.prisma.user.findMany({
+          where: {
+            role: 'DRIVER',
+            isActive: true,
+            verificationStatus: 'VERIFIED',
+          },
+          include: { profile: true, driverVehicles: true },
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+        }),
+      ]);
+
+      return {
+        shipments: shipments.map((shipment) => ({
+          id: shipment.id,
+          reference: shipment.reference,
+          origin: shipment.pickupLabel,
+          destination: shipment.destinationLabel,
+          cargo: shipment.cargoDescription,
+          status: shipment.status,
+          quotedPriceKobo: shipment.quotedPriceKobo,
+          escrow: shipment.escrowId
+            ? {
+                id: shipment.escrowId,
+                status: shipment.escrowStatus,
+                amount: shipment.escrowAmount,
+                currency: shipment.escrowCurrency,
+              }
+            : null,
+          latestAssignment: shipment.assignmentId
+            ? {
+                id: shipment.assignmentId,
+                driverId: shipment.assignedDriverId,
+                vehicleId: shipment.assignedVehicleId,
+                status: shipment.assignmentStatus,
+                offeredAt: this.isoDate(shipment.assignmentOfferedAt),
+              }
+            : null,
+          createdAt: this.isoDate(shipment.createdAt),
+        })),
+        drivers: drivers.map((driver) => ({
+          id: driver.id,
+          fullName: driver.profile?.fullName ?? driver.email,
+          email: driver.email,
+          phone: driver.phone,
+          verificationStatus: driver.verificationStatus,
+          vehicles: driver.driverVehicles.map((vehicle) => ({
+            id: vehicle.id,
+            plateNumber: vehicle.plateNumber,
+            type: vehicle.type,
+            capacityKg: vehicle.capacityKg,
+          })),
+        })),
+      };
+    } catch {
+      return {
+        shipments: [
+          {
+            id: 'TRK-1024',
+            reference: 'TRK-1024',
+            origin: 'Lagos',
+            destination: 'Abuja',
+            cargo: 'Consumer goods',
+            status: 'ESCROW_FUNDED',
+            quotedPriceKobo: 35050000,
+            escrow: { id: 'escrow-TRK-1024', status: 'FUNDED', amount: 35050000, currency: 'NGN' },
+            latestAssignment: null,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        drivers: [
+          {
+            id: 'preview-driver',
+            fullName: 'Tracko Preview Driver',
+            email: 'driver@tracko.ng',
+            phone: '+234 800 000 0001',
+            verificationStatus: 'VERIFIED',
+            vehicles: [{ id: 'preview-vehicle', plateNumber: 'LAG-204-TK', type: 'Flatbed truck', capacityKg: 12000 }],
+          },
+        ],
+      };
     }
   }
 
@@ -297,6 +429,13 @@ export class OperationsService {
     if (status === 'DELIVERED') return 'Delivery completed, awaiting confirmation.';
     if (status === 'COMPLETED') return 'Shipment completed.';
     return 'Shipment status updated.';
+  }
+
+  private isoDate(value: Date | string | null) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return new Date().toISOString();
+    return date.toISOString();
   }
 
   private async audit(actor: OperationActor, action: string, entity: string, entityId: string, metadata: unknown) {

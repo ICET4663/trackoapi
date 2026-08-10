@@ -15,6 +15,12 @@ export class OperationsController {
     return this.operations.dashboard();
   }
 
+  @Get('assignment-queue')
+  async assignmentQueue(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    return this.operations.assignmentQueue(user);
+  }
+
   @Post('shipments/:id/progress')
   async progressShipment(
     @Param('id') id: string,

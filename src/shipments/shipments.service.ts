@@ -301,6 +301,24 @@ export class ShipmentsService {
     const driverId = body.driverId ?? 'preview-driver';
 
     try {
+      const [shipment, escrowRows, driver] = await Promise.all([
+        this.prisma.shipment.findUnique({ where: { id: shipmentId } }),
+        this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
+          'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
+          shipmentId,
+        ),
+        this.prisma.user.findUnique({ where: { id: driverId }, include: { profile: true } }),
+      ]);
+
+      if (!shipment) throw new NotFoundException('Shipment not found.');
+      const escrow = escrowRows[0];
+      if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
+        throw new BadRequestException('Escrow must be funded before assigning a driver.');
+      }
+      if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
+        throw new BadRequestException('Only verified active drivers can receive shipment assignments.');
+      }
+
       const assignment = await this.prisma.driverAssignment.create({
         data: {
           shipmentId,
