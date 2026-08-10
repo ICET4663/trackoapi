@@ -241,7 +241,7 @@ export class PaymentProviderService {
         amount: input.amount,
         currency: input.currency,
         reference: input.providerReference,
-        callback_url: this.config.get<string>('PAYMENT_CALLBACK_URL') || undefined,
+        callback_url: this.paymentCallbackUrl(input.shipmentId, input.providerReference),
         metadata: {
           shipmentId: input.shipmentId,
           purpose: 'shipment_escrow',
@@ -296,6 +296,21 @@ export class PaymentProviderService {
       authorizationUrl: null,
       message,
     };
+  }
+
+  private paymentCallbackUrl(shipmentId: string, reference: string) {
+    const baseUrl = this.config.get<string>('PAYMENT_CALLBACK_URL');
+    if (!baseUrl) return undefined;
+
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set('shipmentId', shipmentId);
+      url.searchParams.set('reference', reference);
+      return url.toString();
+    } catch {
+      const separator = baseUrl.includes('?') ? '&' : '?';
+      return `${baseUrl}${separator}shipmentId=${encodeURIComponent(shipmentId)}&reference=${encodeURIComponent(reference)}`;
+    }
   }
 
   private async markEscrowFunded(shipmentId: string, amount?: number, currency?: string, provider = 'paystack', reference?: string) {
