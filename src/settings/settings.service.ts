@@ -1030,6 +1030,10 @@ export class SettingsService {
     }
 
     const bank = earnings.bankAccount as { bankName?: string; maskedNumber?: string };
+    if (!(earnings.bankAccount as { verified?: boolean }).verified) {
+      throw new BadRequestException('Verify your payout account before requesting withdrawal.');
+    }
+
     const log = await this.prisma.auditLog.create({
       data: {
         actorId: userId,
