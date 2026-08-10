@@ -20,14 +20,25 @@ async function request(path, options = {}) {
 }
 
 async function login(identifier, role) {
-  return request('/v1/auth/login', {
-    method: 'POST',
-    body: {
-      identifier,
-      password: 'password123',
-      role,
-    },
-  });
+  const password = process.env.SMOKE_PASSWORD || process.env.SMOKE_CUSTOMER_PASSWORD || 'password123';
+  try {
+    return await request('/v1/auth/login', {
+      method: 'POST',
+      body: {
+        identifier,
+        password,
+        role,
+      },
+    });
+  } catch (error) {
+    const hint = [
+      'Customer login failed.',
+      'For the deployed API, set SMOKE_CUSTOMER_EMAIL and SMOKE_PASSWORD to a real registered customer account.',
+      'Example:',
+      '$env:API_BASE_URL="https://trackoapi.vercel.app"; $env:SMOKE_CUSTOMER_EMAIL="you@example.com"; $env:SMOKE_PASSWORD="your-password"; npm run smoke:payments',
+    ].join('\n');
+    throw new Error(`${hint}\n${error.message || error}`);
+  }
 }
 
 async function main() {
@@ -39,7 +50,8 @@ async function main() {
   const integrations = await request('/v1/integrations/status');
   console.log('OK payment mode', integrations.payments?.provider, integrations.payments?.mode);
 
-  const customer = await login(process.env.SMOKE_CUSTOMER_EMAIL || 'customer@tracko.ng', 'CUSTOMER');
+  const customerEmail = process.env.SMOKE_CUSTOMER_EMAIL || 'customer@tracko.ng';
+  const customer = await login(customerEmail, 'CUSTOMER');
   console.log('OK customer login', customer.user?.email || 'customer');
 
   const shipment = await request('/v1/shipments', {
