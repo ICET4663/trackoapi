@@ -320,13 +320,52 @@ export class SettingsService {
     };
   }
 
-  notificationPreferences() {
-    return notificationPreferences;
+  async notificationPreferences(userId = 'preview-user', role: Role = 'CUSTOMER') {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<{ key: PreferenceKey; value: boolean }[]>(
+        `select "key", "value"
+         from "NotificationPreference"
+         where "userId" = $1 and "role" = cast($2 as "UserRole")`,
+        userId,
+        role,
+      );
+      return rows.reduce(
+        (preferences, row) => ({ ...preferences, [row.key]: row.value }),
+        { ...notificationPreferences },
+      );
+    } catch {
+      return notificationPreferences;
+    }
   }
 
-  updateNotificationPreference(input: { key?: PreferenceKey; value?: boolean }) {
+  async updateNotificationPreference(userId: string, role: Role, input: { key?: PreferenceKey; value?: boolean }) {
     if (!input.key) return notificationPreferences;
-    return { ...notificationPreferences, [input.key]: Boolean(input.value) };
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `insert into "NotificationPreference" ("userId", "role", "key", "value")
+         values ($1, cast($2 as "UserRole"), $3, $4)
+         on conflict ("userId", "role", "key")
+         do update set "value" = excluded."value", "updatedAt" = current_timestamp`,
+        userId,
+        role,
+        input.key,
+        Boolean(input.value),
+      );
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'NOTIFICATION_PREFERENCE_UPDATED',
+          entity: 'NotificationPreference',
+          entityId: `${role}:${input.key}`,
+          metadata: { role, key: input.key, value: Boolean(input.value) },
+        },
+      }).catch(() => null);
+
+      return this.notificationPreferences(userId, role);
+    } catch {
+      return { ...notificationPreferences, [input.key]: Boolean(input.value) };
+    }
   }
 
   supportIndex() {

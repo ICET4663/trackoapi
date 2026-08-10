@@ -41,13 +41,19 @@ export class SettingsController {
   }
 
   @Get('settings/notification-preferences')
-  notificationPreferences() {
-    return this.settingsService.notificationPreferences();
+  async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);
+    return this.settingsService.notificationPreferences(user.sub, role as UserRole);
   }
 
   @Patch('settings/notification-preferences')
-  updateNotificationPreferences(@Body() body: { key?: never; value?: boolean }) {
-    return this.settingsService.updateNotificationPreference(body);
+  async updateNotificationPreferences(
+    @Body() body: { role?: UserRole; key?: never; value?: boolean },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const role = body.role ?? 'CUSTOMER';
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, role);
+    return this.settingsService.updateNotificationPreference(user.sub, role, body);
   }
 
   @Get('support')
