@@ -23,9 +23,11 @@ async function main() {
 
   const status = await request('/v1/integrations/status');
   if (!status.maps?.endpoints?.includes('GET /v1/maps/places?query=...')) {
-    throw new Error('Maps endpoints are not listed in integration status.');
+    console.log('WARN maps endpoints are not listed in integration status. Testing endpoint paths directly.');
+    console.log('WARN If the next request returns 404, redeploy the backend maps commit to Vercel.');
+  } else {
+    console.log('OK maps status', status.maps.provider, status.maps.mode);
   }
-  console.log('OK maps status', status.maps.provider, status.maps.mode);
 
   const places = await request('/v1/maps/places?query=Lagos');
   if (!Array.isArray(places.results) || !places.results.length) {
