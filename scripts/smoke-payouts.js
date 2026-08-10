@@ -26,14 +26,61 @@ async function request(path, options = {}) {
 }
 
 async function login(identifier, role) {
-  return request('/v1/auth/login', {
-    method: 'POST',
-    body: {
-      identifier,
-      password: process.env.SMOKE_PASSWORD || 'password123',
-      role,
-    },
-  });
+  const password = passwordForRole(role);
+  try {
+    return await request('/v1/auth/login', {
+      method: 'POST',
+      body: {
+        identifier,
+        password,
+        role,
+      },
+    });
+  } catch (error) {
+    throw new Error(
+      `${role} login failed for ${identifier}. Set the real deployed password with ${passwordEnvForRole(role)} or SMOKE_PASSWORD, or pass ${tokenEnvForRole(role)}. ${error.message}`,
+    );
+  }
+}
+
+function passwordForRole(role) {
+  return process.env[passwordEnvForRole(role)] || process.env.SMOKE_PASSWORD || 'password123';
+}
+
+function passwordEnvForRole(role) {
+  return `SMOKE_${role}_PASSWORD`;
+}
+
+function tokenEnvForRole(role) {
+  return `SMOKE_${role}_ACCESS_TOKEN`;
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const [, payload] = token.split('.');
+    if (!payload) return {};
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(Buffer.from(normalized, 'base64').toString('utf8'));
+  } catch {
+    return {};
+  }
+}
+
+async function actor(role, defaultEmail) {
+  const token = process.env[tokenEnvForRole(role)];
+  if (token) {
+    const payload = decodeJwtPayload(token);
+    return {
+      accessToken: token,
+      user: {
+        id: process.env[`SMOKE_${role}_ID`] || payload.sub,
+        email: payload.email || defaultEmail,
+        role,
+      },
+    };
+  }
+
+  return login(process.env[`SMOKE_${role}_EMAIL`] || defaultEmail, role);
 }
 
 async function main() {
@@ -42,10 +89,14 @@ async function main() {
   const health = await request('/v1/health');
   console.log('OK health', health.service || 'tracko-api');
 
-  const customer = await login(process.env.SMOKE_CUSTOMER_EMAIL || 'customer@tracko.ng', 'CUSTOMER');
-  const driver = await login(process.env.SMOKE_DRIVER_EMAIL || 'driver@tracko.ng', 'DRIVER');
-  const admin = await login(process.env.SMOKE_ADMIN_EMAIL || 'admin@tracko.ng', 'ADMIN');
+  const customer = await actor('CUSTOMER', 'customer@tracko.ng');
+  const driver = await actor('DRIVER', 'driver@tracko.ng');
+  const admin = await actor('ADMIN', 'admin@tracko.ng');
   console.log('OK login customer/driver/admin');
+
+  if (!driver.user?.id) {
+    throw new Error('Driver id is required for assignment. Set SMOKE_DRIVER_ID or use a JWT access token that includes sub.');
+  }
 
   const shipment = await request('/v1/shipments', {
     method: 'POST',
@@ -69,7 +120,7 @@ async function main() {
   const assignment = await request(`/v1/shipments/${encodeURIComponent(shipment.id)}/assignments`, {
     method: 'POST',
     accessToken: admin.accessToken,
-    body: { driverId: driver.user?.id },
+    body: { driverId: driver.user.id },
   });
   console.log('OK assignment offered', assignment.id);
 
