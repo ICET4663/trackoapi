@@ -12,7 +12,7 @@
     "start:nest": "nest start",
     "start:dev": "node -r ts-node/register/transpile-only -r tsconfig-paths/register src/main.ts",
     "start:prod": "node dist/main.js",
-    "postinstall": "prisma generate",
+    "postinstall": "node scripts/prisma-generate-binary.js",
     "deploy:check": "npm run verify && npm run build",
     "smoke:auth": "node scripts/smoke-auth.js",
     "smoke:kyc": "node scripts/smoke-kyc.js",
