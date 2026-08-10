@@ -16,23 +16,27 @@ export class SettingsController {
   }
 
   @Get('account/profile')
-  profile() {
-    return this.settingsService.profile();
+  async profile(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.profile(user.sub);
   }
 
   @Patch('account/profile')
-  updateProfile(@Body() body: Record<string, unknown>) {
-    return this.settingsService.updateProfile(body);
+  async updateProfile(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.updateProfile(user.sub, body);
   }
 
   @Patch('account/profile/avatar')
-  updateProfilePicture(@Body() body: Record<string, unknown>) {
-    return this.settingsService.updateProfile({ avatarUrl: body.avatarDataUrl });
+  async updateProfilePicture(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.updateProfile(user.sub, { avatarUrl: body.avatarDataUrl });
   }
 
   @Delete('account/profile/avatar')
-  removeProfilePicture() {
-    return this.settingsService.updateProfile({ avatarUrl: undefined });
+  async removeProfilePicture(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.updateProfile(user.sub, { avatarUrl: null });
   }
 
   @Get('settings/notification-preferences')

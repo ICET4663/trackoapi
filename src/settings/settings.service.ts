@@ -132,18 +132,93 @@ export class SettingsService {
     };
   }
 
-  profile() {
+  async profile(userId = 'preview-user') {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { profile: true },
+      });
+      if (user) return this.toProfileRecord(user);
+    } catch {
+      // Preview fallback below.
+    }
+
+    return this.previewProfile(userId);
+  }
+
+  async updateProfile(userId: string, input: Record<string, unknown>) {
+    try {
+      const current = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { profile: true },
+      });
+      if (!current) return { ...this.previewProfile(userId), ...input };
+
+      const fullName = String(input.fullName ?? current.profile?.fullName ?? current.email).trim();
+      const address = input.address === undefined ? current.profile?.address : input.address ? String(input.address) : null;
+      const avatarUrl = input.avatarUrl === undefined ? current.profile?.avatarUrl : input.avatarUrl ? String(input.avatarUrl) : null;
+
+      await this.prisma.profile.upsert({
+        where: { userId },
+        create: {
+          userId,
+          fullName,
+          address,
+          avatarUrl,
+        },
+        update: {
+          fullName,
+          address,
+          avatarUrl,
+        },
+      });
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'ACCOUNT_PROFILE_UPDATED',
+          entity: 'User',
+          entityId: userId,
+          metadata: { fields: Object.keys(input).filter((key) => key !== 'avatarUrl') },
+        },
+      }).catch(() => null);
+
+      return this.profile(userId);
+    } catch {
+      return { ...this.previewProfile(userId), ...input };
+    }
+  }
+
+  private toProfileRecord(user: {
+    id: string;
+    email: string;
+    phone: string;
+    role: string;
+    verificationStatus: string;
+    profile?: { fullName: string; address: string | null; city: string | null; state: string | null; avatarUrl: string | null } | null;
+  }) {
     return {
-      id: 'preview-user',
+      id: user.id,
+      fullName: user.profile?.fullName ?? user.email,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      verificationStatus: user.verificationStatus,
+      address: user.profile?.address ?? undefined,
+      city: user.profile?.city ?? undefined,
+      state: user.profile?.state ?? undefined,
+      avatarUrl: user.profile?.avatarUrl ?? undefined,
+    };
+  }
+
+  private previewProfile(userId: string) {
+    return {
+      id: userId,
       fullName: 'Tracko Preview User',
       email: 'customer@tracko.ng',
       phone: '+234 800 000 0000',
       verificationStatus: 'VERIFIED',
     };
-  }
-
-  updateProfile(input: Record<string, unknown>) {
-    return { ...this.profile(), ...input };
   }
 
   notificationPreferences() {
