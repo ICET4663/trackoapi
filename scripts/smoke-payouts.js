@@ -28,7 +28,7 @@ async function request(path, options = {}) {
 async function login(identifier, role) {
   const password = passwordForRole(role);
   try {
-    return await request('/v1/auth/login', {
+    const response = await request('/v1/auth/login', {
       method: 'POST',
       body: {
         identifier,
@@ -36,11 +36,38 @@ async function login(identifier, role) {
         role,
       },
     });
+    return normalizeActor(response, role, identifier);
   } catch (error) {
     throw new Error(
       `${role} login failed for ${identifier}. Set the real deployed password with ${passwordEnvForRole(role)} or SMOKE_PASSWORD, or pass ${tokenEnvForRole(role)}. ${error.message}`,
     );
   }
+}
+
+function normalizeActor(response, role, email) {
+  const accessToken =
+    response?.accessToken ||
+    response?.token ||
+    response?.session?.accessToken ||
+    response?.data?.accessToken ||
+    response?.data?.session?.accessToken;
+  const user = response?.user || response?.data?.user || {};
+  const payload = accessToken ? decodeJwtPayload(accessToken) : {};
+
+  if (!accessToken) {
+    throw new Error(`${role} login response did not include an access token. Response keys: ${Object.keys(response || {}).join(', ')}`);
+  }
+
+  return {
+    ...response,
+    accessToken,
+    user: {
+      ...user,
+      id: user.id || payload.sub || process.env[`SMOKE_${role}_ID`],
+      email: user.email || payload.email || email,
+      role: user.role || payload.role || role,
+    },
+  };
 }
 
 function passwordForRole(role) {
@@ -73,7 +100,7 @@ async function actor(role, defaultEmail) {
     return {
       accessToken: token,
       user: {
-        id: process.env[`SMOKE_${role}_ID`] || payload.sub,
+        id: process.env[`SMOKE_${role}_ID`] || payload.sub || payload.id,
         email: payload.email || defaultEmail,
         role,
       },
@@ -91,7 +118,7 @@ async function operationsActor() {
       role,
       accessToken: process.env.SMOKE_OPERATIONS_ACCESS_TOKEN,
       user: {
-        id: process.env.SMOKE_OPERATIONS_ID || payload.sub,
+        id: process.env.SMOKE_OPERATIONS_ID || payload.sub || payload.id,
         email: payload.email || process.env.SMOKE_OPERATIONS_EMAIL || `${role.toLowerCase()}@tracko.ng`,
         role,
       },
@@ -124,6 +151,10 @@ async function main() {
   const driver = await actor('DRIVER', 'driver@tracko.ng');
   const operations = await operationsActor();
   console.log(`OK login customer/driver/${operations.role.toLowerCase()}`);
+
+  for (const [label, account] of [['customer', customer], ['driver', driver], ['operations', operations]]) {
+    if (!account.accessToken) throw new Error(`${label} login did not provide an access token.`);
+  }
 
   if (!driver.user?.id) {
     throw new Error('Driver id is required for assignment. Set SMOKE_DRIVER_ID or use a JWT access token that includes sub.');
