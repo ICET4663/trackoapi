@@ -1199,6 +1199,79 @@ export class SettingsService {
     return documents.find((document: { id: string }) => document.id === id) ?? { id, title: 'Document', meta: 'Preview', state: 'missing' };
   }
 
+  async uploadDriverDocument(
+    userId: string,
+    id: string,
+    input: { fileUrl?: string; url?: string; number?: string; expires?: string; meta?: string },
+  ) {
+    const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
+    if (!fileUrl) throw new BadRequestException('Document file URL is required.');
+
+    const expires = input.expires ? new Date(input.expires) : null;
+    const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
+    const title = id
+      .split(/[-_]/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ') || 'Driver document';
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<
+        { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string }[]
+      >(
+        `insert into "DriverDocument" ("id", "userId", "title", "meta", "state", "expires", "number", "fileUrl")
+         values ($1, $2, $3, $4, 'EXPIRING'::"DriverDocumentState", $5, $6, $7)
+         on conflict ("id") do update
+         set "meta" = excluded."meta",
+             "state" = 'EXPIRING'::"DriverDocumentState",
+             "expires" = excluded."expires",
+             "number" = excluded."number",
+             "fileUrl" = excluded."fileUrl",
+             "updatedAt" = current_timestamp
+         returning "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl"`,
+        id,
+        userId,
+        title,
+        input.meta ?? 'Uploaded - pending review',
+        expiresValue,
+        input.number ?? null,
+        fileUrl,
+      );
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'DRIVER_DOCUMENT_UPLOADED',
+          entity: 'DriverDocument',
+          entityId: id,
+          metadata: { fileUrl, number: input.number ?? null, expires: input.expires ?? null },
+        },
+      }).catch(() => null);
+
+      await this.notifications.create({
+        role: 'ADMIN',
+        title: 'Driver document uploaded',
+        body: `${title} was uploaded and needs review.`,
+        tone: 'WARNING',
+        entity: 'DriverDocument',
+        entityId: id,
+        actionUrl: '/admin/verifications',
+      });
+
+      return {
+        uploaded: true,
+        message: 'Driver document uploaded for review.',
+        document: rows[0] ?? { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'expiring', fileUrl },
+      };
+    } catch {
+      return {
+        uploaded: true,
+        message: 'Driver document uploaded in preview.',
+        document: { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'expiring', fileUrl },
+      };
+    }
+  }
+
   async safetySettings(userId = 'preview-driver') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(

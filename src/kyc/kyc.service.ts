@@ -48,6 +48,13 @@ type KycDocumentRow = {
   mediaId: string | null;
 };
 
+type KycDocumentInput = {
+  type?: unknown;
+  label?: unknown;
+  url?: unknown;
+  mediaId?: unknown;
+};
+
 @Injectable()
 export class KycService {
   constructor(
@@ -130,6 +137,92 @@ export class KycService {
     } catch (error) {
       if (!this.previewEnabled()) throw error;
       return this.previewSubmission(userId, this.previewRole(input.role));
+    }
+  }
+
+  async attachDocument(input: KycDocumentInput, userId: string, userRole: UserRole) {
+    try {
+      if (!['CUSTOMER', 'DRIVER', 'TRUCK_OWNER'].includes(userRole)) {
+        throw new BadRequestException('KYC documents are only available for customer, driver, and truck owner accounts.');
+      }
+
+      const url = this.requiredText(input.url, 'Document URL is required.');
+      const type = this.optionalText(input.type) ?? 'DOCUMENT';
+      const label = this.optionalText(input.label) ?? 'KYC document';
+      const mediaId = this.optionalText(input.mediaId);
+
+      const [latest] = await this.submissionsForUser(userId);
+      const submissionId = latest?.id ?? this.id('kyc');
+
+      if (!latest) {
+        await this.prisma.$executeRawUnsafe(
+          `insert into "KycSubmission" (
+            "id", "userId", "role", "status", "idType", "idNumber", "note", "submittedAt", "updatedAt"
+          ) values (
+            $1, $2, $3::"UserRole", 'PENDING'::"KycSubmissionStatus", 'DOCUMENT_UPLOAD', 'PENDING', 'Document upload started.',
+            current_timestamp, current_timestamp
+          )`,
+          submissionId,
+          userId,
+          userRole,
+        );
+      }
+
+      const documentId = this.id('doc');
+      await this.prisma.$executeRawUnsafe(
+        `insert into "KycSubmissionDocument" ("id", "submissionId", "type", "label", "url", "mediaId", "createdAt")
+         values ($1, $2, $3, $4, $5, $6, current_timestamp)`,
+        documentId,
+        submissionId,
+        type,
+        label,
+        url,
+        mediaId,
+      );
+
+      await this.prisma.$executeRawUnsafe(
+        `update "KycSubmission"
+         set "status" = 'PENDING'::"KycSubmissionStatus", "updatedAt" = current_timestamp
+         where "id" = $1`,
+        submissionId,
+      );
+
+      await this.prisma.$executeRawUnsafe(
+        `update "User"
+         set "verificationStatus" = 'IN_REVIEW'::"VerificationStatus", "updatedAt" = current_timestamp
+         where "id" = $1`,
+        userId,
+      );
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'KYC_DOCUMENT_ATTACHED',
+          entity: 'KycSubmission',
+          entityId: submissionId,
+          metadata: { documentId, type, label, mediaId },
+        },
+      }).catch(() => null);
+
+      const [submission] = await this.submissionsForUser(userId);
+      return {
+        uploaded: true,
+        document: { id: documentId, type, label, url, mediaId },
+        submission: submission ? await this.toSubmission(submission) : this.previewSubmission(userId, userRole),
+      };
+    } catch (error) {
+      if (!this.previewEnabled()) throw error;
+      return {
+        uploaded: true,
+        document: {
+          id: this.id('doc'),
+          type: this.optionalText(input.type) ?? 'DOCUMENT',
+          label: this.optionalText(input.label) ?? 'KYC document',
+          url: this.optionalText(input.url) ?? 'preview://kyc/document',
+          mediaId: this.optionalText(input.mediaId),
+        },
+        submission: this.previewSubmission(userId, userRole),
+      };
     }
   }
 

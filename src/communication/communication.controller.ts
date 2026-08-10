@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { RequestUserService } from '../common/request-user.service';
 import { CommunicationService } from './communication.service';
 import { RegisterPushTokenDto } from './dto/register-push-token.dto';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -8,7 +9,10 @@ import { TypingStatusDto } from './dto/typing-status.dto';
 
 @Controller()
 export class CommunicationController {
-  constructor(private readonly communicationService: CommunicationService) {}
+  constructor(
+    private readonly communicationService: CommunicationService,
+    private readonly requestUser: RequestUserService,
+  ) {}
 
   @Get('conversations')
   listConversations(@Query('role') role: UserRole) {
@@ -41,12 +45,14 @@ export class CommunicationController {
   }
 
   @Post('media/upload')
-  uploadMedia(@Body() body: Record<string, unknown>) {
-    return this.communicationService.uploadMedia(body);
+  async uploadMedia(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.communicationService.uploadMedia(body, user.sub);
   }
 
   @Post('media')
-  uploadMediaAlias(@Body() body: Record<string, unknown>) {
-    return this.communicationService.uploadMedia(body);
+  async uploadMediaAlias(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.communicationService.uploadMedia(body, user.sub);
   }
 }

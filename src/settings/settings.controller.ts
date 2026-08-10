@@ -218,8 +218,13 @@ export class SettingsController {
   }
 
   @Post('driver/documents/:id/upload-request')
-  createDocumentUpload() {
-    return { message: 'Document upload is disabled in preview.' };
+  async createDocumentUpload(
+    @Param('id') id: string,
+    @Body() body: { fileUrl?: string; url?: string; number?: string; expires?: string; meta?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.uploadDriverDocument(user.sub, id, body);
   }
 
   @Get('driver/safety-settings')

@@ -21,6 +21,12 @@ export class KycController {
     return this.kycService.submit(body, user.sub, user.role);
   }
 
+  @Post('kyc/documents')
+  async attachDocument(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.kycService.attachDocument(body, user.sub, user.role);
+  }
+
   @Get('admin/verifications')
   async queue(@Headers('authorization') authorization?: string) {
     await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);

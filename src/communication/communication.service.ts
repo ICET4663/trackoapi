@@ -153,7 +153,7 @@ export class CommunicationService {
     return this.notifications.registerPushToken(userId, token, platform, deviceId);
   }
 
-  async uploadMedia(input: Record<string, unknown>) {
+  async uploadMedia(input: Record<string, unknown>, userId = 'preview-customer') {
     const url = this.mediaUrl(input);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
@@ -169,7 +169,7 @@ export class CommunicationService {
       >(
         `insert into "MediaAsset" ("userId", "shipmentId", "conversationId", "kind", "url", "storageKey", "label", "transcript", "durationSeconds", "mimeType")
          values (
-           coalesce((select "id" from "User" where "email" = 'customer@tracko.ng' limit 1), null),
+           $10,
            $1,
            $2,
            cast($3 as "MediaKind"),
@@ -190,6 +190,7 @@ export class CommunicationService {
         input.transcript ? String(input.transcript) : null,
         input.durationSeconds ? Number(input.durationSeconds) : null,
         input.mimeType ? String(input.mimeType) : null,
+        userId.startsWith('preview-') ? null : userId,
       );
       if (rows[0]) {
         return {
