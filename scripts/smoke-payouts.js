@@ -83,6 +83,37 @@ async function actor(role, defaultEmail) {
   return login(process.env[`SMOKE_${role}_EMAIL`] || defaultEmail, role);
 }
 
+async function operationsActor() {
+  if (process.env.SMOKE_OPERATIONS_ACCESS_TOKEN) {
+    const payload = decodeJwtPayload(process.env.SMOKE_OPERATIONS_ACCESS_TOKEN);
+    const role = process.env.SMOKE_OPERATIONS_ROLE || payload.role || 'DISPATCHER';
+    return {
+      role,
+      accessToken: process.env.SMOKE_OPERATIONS_ACCESS_TOKEN,
+      user: {
+        id: process.env.SMOKE_OPERATIONS_ID || payload.sub,
+        email: payload.email || process.env.SMOKE_OPERATIONS_EMAIL || `${role.toLowerCase()}@tracko.ng`,
+        role,
+      },
+    };
+  }
+
+  const preferredRole = process.env.SMOKE_OPERATIONS_ROLE || 'ADMIN';
+  const candidates = preferredRole === 'DISPATCHER' ? ['DISPATCHER', 'ADMIN'] : ['ADMIN', 'DISPATCHER'];
+  const errors = [];
+
+  for (const role of candidates) {
+    try {
+      const account = await actor(role, role === 'ADMIN' ? 'admin@tracko.ng' : 'dispatcher@tracko.ng');
+      return { ...account, role };
+    } catch (error) {
+      errors.push(error.message);
+    }
+  }
+
+  throw new Error(`Operations login failed. Use admin or dispatcher credentials. ${errors.join(' | ')}`);
+}
+
 async function main() {
   console.log(`Tracko payout smoke: ${baseUrl}`);
 
@@ -91,8 +122,8 @@ async function main() {
 
   const customer = await actor('CUSTOMER', 'customer@tracko.ng');
   const driver = await actor('DRIVER', 'driver@tracko.ng');
-  const admin = await actor('ADMIN', 'admin@tracko.ng');
-  console.log('OK login customer/driver/admin');
+  const operations = await operationsActor();
+  console.log(`OK login customer/driver/${operations.role.toLowerCase()}`);
 
   if (!driver.user?.id) {
     throw new Error('Driver id is required for assignment. Set SMOKE_DRIVER_ID or use a JWT access token that includes sub.');
@@ -119,7 +150,7 @@ async function main() {
 
   const assignment = await request(`/v1/shipments/${encodeURIComponent(shipment.id)}/assignments`, {
     method: 'POST',
-    accessToken: admin.accessToken,
+    accessToken: operations.accessToken,
     body: { driverId: driver.user.id },
   });
   console.log('OK assignment offered', assignment.id);
@@ -157,11 +188,11 @@ async function main() {
 
   await request(`/v1/shipments/${encodeURIComponent(shipment.id)}/escrow/checks/platformApproved`, {
     method: 'POST',
-    accessToken: admin.accessToken,
+    accessToken: operations.accessToken,
   });
   const released = await request(`/v1/shipments/${encodeURIComponent(shipment.id)}/escrow/release`, {
     method: 'POST',
-    accessToken: admin.accessToken,
+    accessToken: operations.accessToken,
     body: { note: 'Smoke test release after delivery proof and customer confirmation.' },
   });
   console.log('OK escrow release', released.status);
@@ -180,19 +211,19 @@ async function main() {
   });
   console.log('OK withdrawal requested', withdrawal.id, withdrawal.amountLabel);
 
-  const payoutRequests = await request('/v1/admin/payout-requests', { accessToken: admin.accessToken });
+  const payoutRequests = await request('/v1/admin/payout-requests', { accessToken: operations.accessToken });
   const payout = payoutRequests.find((item) => item.id === withdrawal.id);
   if (!payout) throw new Error('Withdrawal request was not visible in admin payout requests.');
   console.log('OK admin payout queue', payout.status);
 
   await request(`/v1/admin/payout-requests/${encodeURIComponent(withdrawal.id)}/review`, {
     method: 'POST',
-    accessToken: admin.accessToken,
+    accessToken: operations.accessToken,
     body: { decision: 'APPROVED', note: 'Smoke test approval.' },
   });
   const paid = await request(`/v1/admin/payout-requests/${encodeURIComponent(withdrawal.id)}/review`, {
     method: 'POST',
-    accessToken: admin.accessToken,
+    accessToken: operations.accessToken,
     body: { decision: 'PAID', note: 'Smoke test marked as paid.' },
   });
   console.log('OK payout marked paid', paid.status);
