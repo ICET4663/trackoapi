@@ -20,6 +20,7 @@
     "smoke:mvp": "node scripts/smoke-mvp.js",
     "smoke:operations": "node scripts/smoke-operations.js",
     "smoke:payments": "node scripts/smoke-payments.js",
+    "smoke:payouts": "node scripts/smoke-payouts.js",
     "smoke:workflow": "node scripts/smoke-workflow.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
