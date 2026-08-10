@@ -1,11 +1,13 @@
-import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { KycProviderService } from './kyc-provider.service';
+import { MapsProviderService } from './maps-provider.service';
 import { PaymentProviderService } from './payment-provider.service';
 
 @Controller()
 export class IntegrationsController {
   constructor(
     private readonly kycProvider: KycProviderService,
+    private readonly mapsProvider: MapsProviderService,
     private readonly paymentProvider: PaymentProviderService,
   ) {}
 
@@ -14,13 +16,29 @@ export class IntegrationsController {
     return {
       kyc: this.kycProvider.status(),
       payments: this.paymentProvider.status(),
-      maps: {
-        provider: 'mock',
-        mode: 'mock',
-        realRoutingEnabled: false,
-        requiredEnv: ['GOOGLE_MAPS_API_KEY'],
-      },
+      maps: this.mapsProvider.status(),
     };
+  }
+
+  @Get('maps/places')
+  places(@Query('query') query?: string) {
+    return this.mapsProvider.places(query ?? '');
+  }
+
+  @Get('maps/geocode')
+  geocode(@Query('address') address?: string) {
+    return this.mapsProvider.geocode(address ?? '');
+  }
+
+  @Post('maps/route-estimate')
+  routeEstimate(@Body() body: Record<string, unknown>) {
+    return this.mapsProvider.routeEstimate({
+      originLatitude: Number(body.originLatitude ?? body.originLat),
+      originLongitude: Number(body.originLongitude ?? body.originLng),
+      destinationLatitude: Number(body.destinationLatitude ?? body.destinationLat),
+      destinationLongitude: Number(body.destinationLongitude ?? body.destinationLng),
+      truckType: typeof body.truckType === 'string' ? body.truckType : undefined,
+    });
   }
 
   @Post('payments/escrow/initialize')

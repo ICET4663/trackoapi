@@ -4,11 +4,12 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { IntegrationsController } from './integrations.controller';
 import { KycProviderService } from './kyc-provider.service';
+import { MapsProviderService } from './maps-provider.service';
 import { PaymentProviderService } from './payment-provider.service';
 
 @Module({
   imports: [ConfigModule, PrismaModule, NotificationsModule],
   controllers: [IntegrationsController],
-  providers: [KycProviderService, PaymentProviderService],
+  providers: [KycProviderService, MapsProviderService, PaymentProviderService],
 })
 export class IntegrationsModule {}

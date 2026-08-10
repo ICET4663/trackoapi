@@ -66,6 +66,15 @@ export class DemoReadinessController {
           'POST /v1/kyc/provider/webhooks/:provider/:event',
         ],
       },
+      mapsAddressing: {
+        status: 'ready_for_preview',
+        provider: this.integrationMode(deployment.integrations, 'maps'),
+        endpoints: [
+          'GET /v1/maps/places?query=...',
+          'GET /v1/maps/geocode?address=...',
+          'POST /v1/maps/route-estimate',
+        ],
+      },
       frontendConnection: {
         requiredEnv: 'EXPO_PUBLIC_API_BASE_URL=https://YOUR-BACKEND-URL/v1',
         status: 'ready_after_backend_url_is_added_to_frontend_env',
