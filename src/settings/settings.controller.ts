@@ -84,8 +84,13 @@ export class SettingsController {
   }
 
   @Post('support/emergency-alerts')
-  sendEmergencyAlert() {
-    return { sent: true };
+  async sendEmergencyAlert(
+    @Body() body: { role?: UserRole; message?: string; shipmentId?: string; latitude?: number; longitude?: number },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const role = body.role ?? 'CUSTOMER';
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, role);
+    return this.settingsService.sendEmergencyAlert(user.sub, user.role, body);
   }
 
   @Get('support/tickets')
@@ -230,8 +235,12 @@ export class SettingsController {
   }
 
   @Post('driver/safety-incidents')
-  reportSafetyIncident() {
-    return { reported: true };
+  async reportSafetyIncident(
+    @Body() body: { message?: string; shipmentId?: string; latitude?: number; longitude?: number },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.reportSafetyIncident(user.sub, body);
   }
 
   @Get('admin/platform-settings')
