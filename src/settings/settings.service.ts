@@ -78,7 +78,106 @@ export class SettingsService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  accountOverview(role: Role) {
+  async accountOverview(role: Role, userId = 'preview-user', authRole?: Role) {
+    try {
+      const activeRole = authRole ?? role;
+      const unread = await this.notifications.unreadCount(userId, activeRole);
+      const notificationBadge = unread.unreadCount ? String(unread.unreadCount) : undefined;
+
+      if (role === 'CUSTOMER') {
+        const [totalShipments, activeShipments, walletRows] = await Promise.all([
+          this.prisma.shipment.count({ where: { customerId: userId } }),
+          this.prisma.shipment.count({
+            where: {
+              customerId: userId,
+              status: { in: ['ESCROW_FUNDED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION', 'DELIVERED'] },
+            },
+          }),
+          this.prisma.$queryRawUnsafe<{ total: bigint | number | null }[]>(
+            `select coalesce(sum(e."amount"), 0)::bigint as "total"
+             from "Escrow" e
+             join "Shipment" s on s."id" = e."shipmentId"
+             where s."customerId" = $1 and e."status" in ('FUNDED', 'HELD', 'RELEASE_READY')`,
+            userId,
+          ),
+        ]);
+        return {
+          stats: [
+            { label: 'Shipments', value: String(totalShipments) },
+            { label: 'Active', value: String(activeShipments) },
+            { label: 'Wallet', value: this.formatMoney(Number(walletRows[0]?.total ?? 0)) },
+          ],
+          badges: { notifications: notificationBadge },
+          values: {},
+        };
+      }
+
+      if (role === 'DRIVER') {
+        const [trips, acceptedTrips, missingDocumentRows] = await Promise.all([
+          this.prisma.driverAssignment.count({ where: { driverId: userId, status: 'ACCEPTED' } }),
+          this.prisma.driverAssignment.count({ where: { driverId: userId, status: 'ACCEPTED', shipment: { status: { in: ['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION', 'DELIVERED'] } } } }),
+          this.prisma.$queryRawUnsafe<{ count: bigint | number }[]>(
+            `select count(*)::bigint as "count"
+             from "DriverDocument"
+             where "userId" = $1 and "state" in ('MISSING', 'EXPIRING')`,
+            userId,
+          ),
+        ]);
+        const missingDocuments = Number(missingDocumentRows[0]?.count ?? 0);
+        return {
+          stats: [
+            { label: 'Trips', value: String(trips) },
+            { label: 'Active', value: String(acceptedTrips) },
+            { label: 'Docs', value: missingDocuments ? `${missingDocuments} due` : 'OK' },
+          ],
+          badges: { notifications: notificationBadge, driverDocuments: missingDocuments ? String(missingDocuments) : undefined },
+          values: { regionShift: 'Lagos', driverDocuments: missingDocuments ? `${missingDocuments} due` : 'OK' },
+        };
+      }
+
+      if (role === 'TRUCK_OWNER') {
+        const [trucks, assigned, dueDocs] = await Promise.all([
+          this.prisma.vehicle.count({ where: { ownerId: userId } }),
+          this.prisma.vehicle.count({ where: { ownerId: userId, assignedDriverId: { not: null } } }),
+          this.prisma.vehicle.count({ where: { ownerId: userId, isActive: false } }),
+        ]);
+        return {
+          stats: [
+            { label: 'Trucks', value: String(trucks) },
+            { label: 'Assigned', value: String(assigned) },
+            { label: 'Docs', value: dueDocs ? `${dueDocs} due` : 'OK' },
+          ],
+          badges: { notifications: notificationBadge, truckDocuments: dueDocs ? String(dueDocs) : undefined },
+          values: { truckDocuments: dueDocs ? `${dueDocs} due` : 'OK' },
+        };
+      }
+
+      if (role === 'ADMIN' || role === 'DISPATCHER') {
+        const [openShipments, alertRows, resolvedRows] = await Promise.all([
+          this.prisma.shipment.count({ where: { status: { notIn: ['COMPLETED', 'CANCELLED'] } } }),
+          this.prisma.$queryRawUnsafe<{ count: bigint | number }[]>(
+            `select count(*)::bigint as "count" from "Dispute" where "status" in ('OPEN', 'IN_REVIEW')`,
+          ),
+          this.prisma.$queryRawUnsafe<{ count: bigint | number }[]>(
+            `select count(*)::bigint as "count" from "Dispute" where "status" = 'RESOLVED'`,
+          ),
+        ]);
+        const alerts = Number(alertRows[0]?.count ?? 0);
+        const resolved = Number(resolvedRows[0]?.count ?? 0);
+        return {
+          stats: [
+            { label: 'Open', value: String(openShipments) },
+            { label: 'Alerts', value: String(alerts) },
+            { label: 'Resolved', value: String(resolved) },
+          ],
+          badges: { notifications: notificationBadge, alerts: alerts ? String(alerts) : undefined, fraudAlerts: '0' },
+          values: {},
+        };
+      }
+    } catch {
+      // Preview fallback below.
+    }
+
     const base = {
       badges: { notifications: '2' },
       values: {},

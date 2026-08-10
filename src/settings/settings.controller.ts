@@ -11,8 +11,9 @@ export class SettingsController {
   ) {}
 
   @Get('account/overview')
-  accountOverview(@Query('role') role = 'CUSTOMER') {
-    return this.settingsService.accountOverview(role as 'CUSTOMER');
+  async accountOverview(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);
+    return this.settingsService.accountOverview(role as 'CUSTOMER', user.sub, user.role);
   }
 
   @Get('account/profile')
