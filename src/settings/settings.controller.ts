@@ -72,8 +72,9 @@ export class SettingsController {
   }
 
   @Post('support/contact')
-  createSupportContact(@Body() body: { channel?: string; role?: string }) {
-    return this.settingsService.createSupportContact(body);
+  async createSupportContact(@Body() body: { channel?: string; role?: string; topic?: string; message?: string; shipmentId?: string }, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, (body.role as UserRole) ?? 'CUSTOMER');
+    return this.settingsService.createSupportContact(user.sub, body);
   }
 
   @Post('support/emergency-alerts')

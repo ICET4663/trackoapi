@@ -402,11 +402,58 @@ export class SettingsService {
     };
   }
 
-  createSupportContact(input: { channel?: string; role?: string }) {
-    return {
-      message: `${input.channel ?? 'Support'} request received for ${input.role ?? 'user'} preview.`,
-      conversationId: 'preview-support-thread',
-    };
+  async createSupportContact(userId: string, input: { channel?: string; role?: string; topic?: string; message?: string; shipmentId?: string }) {
+    const channel = String(input.channel ?? 'CHAT').toUpperCase();
+    const topic = String(input.topic ?? input.role ?? 'General support');
+    const message = String(input.message ?? `${channel} support request from ${input.role ?? 'user'}.`);
+    const id = `support-${Date.now()}`;
+
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
+         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus")`,
+        id,
+        input.shipmentId ?? null,
+        userId,
+        topic,
+        channel,
+        message,
+      );
+
+      await this.notifications.create({
+        role: 'ADMIN',
+        title: 'New support request',
+        body: `${topic} request opened through ${channel.toLowerCase()} support.`,
+        tone: 'WARNING',
+        entity: 'SupportTicket',
+        entityId: id,
+        actionUrl: '/admin/support',
+      });
+
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: userId,
+          action: 'SUPPORT_TICKET_CREATED',
+          entity: 'SupportTicket',
+          entityId: id,
+          metadata: { channel, topic, role: input.role ?? null },
+        },
+      }).catch(() => null);
+
+      return {
+        message: 'Support request received. Tracko support will follow up.',
+        conversationId: id,
+        ticketId: id,
+        status: 'OPEN',
+      };
+    } catch {
+      return {
+        message: `${channel} request received for ${input.role ?? 'user'} preview.`,
+        conversationId: 'preview-support-thread',
+        ticketId: id,
+        status: 'OPEN',
+      };
+    }
   }
 
   legalDocumentSummaries() {
