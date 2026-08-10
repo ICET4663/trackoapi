@@ -20,6 +20,16 @@ async function request(path, options = {}) {
 }
 
 async function login(identifier, role) {
+  if (process.env.SMOKE_CUSTOMER_ACCESS_TOKEN) {
+    const me = await request('/v1/auth/me', {
+      accessToken: process.env.SMOKE_CUSTOMER_ACCESS_TOKEN,
+    });
+    return {
+      accessToken: process.env.SMOKE_CUSTOMER_ACCESS_TOKEN,
+      user: me,
+    };
+  }
+
   const password = process.env.SMOKE_PASSWORD || process.env.SMOKE_CUSTOMER_PASSWORD || 'password123';
   try {
     return await request('/v1/auth/login', {
@@ -33,9 +43,11 @@ async function login(identifier, role) {
   } catch (error) {
     const hint = [
       'Customer login failed.',
-      'For the deployed API, set SMOKE_CUSTOMER_EMAIL and SMOKE_PASSWORD to a real registered customer account.',
-      'Example:',
+      'For the deployed API, set SMOKE_CUSTOMER_EMAIL and SMOKE_PASSWORD to a real registered customer account, or set SMOKE_CUSTOMER_ACCESS_TOKEN from a logged-in customer session.',
+      'Password example:',
       '$env:API_BASE_URL="https://trackoapi.vercel.app"; $env:SMOKE_CUSTOMER_EMAIL="you@example.com"; $env:SMOKE_PASSWORD="your-password"; npm run smoke:payments',
+      'Token example:',
+      '$env:API_BASE_URL="https://trackoapi.vercel.app"; $env:SMOKE_CUSTOMER_ACCESS_TOKEN="ey..."; npm run smoke:payments',
     ].join('\n');
     throw new Error(`${hint}\n${error.message || error}`);
   }
