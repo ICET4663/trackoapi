@@ -551,7 +551,7 @@ export class ShipmentsService {
     return this.getEscrow(shipmentId);
   }
 
-  async confirmEscrowCheck(shipmentId: string, check: string) {
+  async confirmEscrowCheck(shipmentId: string, check: string, actorRole: UserRole) {
     const allowedChecks = new Set([
       'arrivalConfirmed',
       'proofOfDeliveryUploaded',
@@ -559,6 +559,8 @@ export class ShipmentsService {
       'disputeWindowClear',
       'platformApproved',
     ]);
+
+    this.assertEscrowCheckRole(check, actorRole);
 
     if (allowedChecks.has(check)) {
       try {
@@ -578,12 +580,24 @@ export class ShipmentsService {
         >(
           `update "Escrow"
            set "${check}" = true,
-               "status" = 'RELEASE_READY'::"EscrowStatus",
+               "status" = case
+                 when "status" = 'DISPUTED'::"EscrowStatus" then "status"
+                 when "status" = 'REFUNDED'::"EscrowStatus" then "status"
+                 when "status" = 'RELEASED'::"EscrowStatus" then "status"
+                 when ("arrivalConfirmed" = true or $2 = 'arrivalConfirmed')
+                  and ("proofOfDeliveryUploaded" = true or $2 = 'proofOfDeliveryUploaded')
+                  and ("customerDeliveryConfirmed" = true or $2 = 'customerDeliveryConfirmed')
+                  and ("disputeWindowClear" = true or $2 = 'disputeWindowClear')
+                  and ("platformApproved" = true or $2 = 'platformApproved')
+                 then 'RELEASE_READY'::"EscrowStatus"
+                 else "status"
+               end,
                "updatedAt" = current_timestamp
            where "shipmentId" = $1
            returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
                      "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
           shipmentId,
+          check,
         );
         if (rows[0]) return this.toEscrowRecord(rows[0]);
       } catch {
@@ -602,6 +616,22 @@ export class ShipmentsService {
         [check]: true,
       },
     };
+  }
+
+  private assertEscrowCheckRole(check: string, actorRole: UserRole) {
+    const roleMap: Record<string, UserRole[]> = {
+      arrivalConfirmed: ['CUSTOMER', 'DRIVER', 'DISPATCHER', 'ADMIN'],
+      proofOfDeliveryUploaded: ['DRIVER', 'DISPATCHER', 'ADMIN'],
+      customerDeliveryConfirmed: ['CUSTOMER', 'DISPATCHER', 'ADMIN'],
+      disputeWindowClear: ['CUSTOMER', 'DISPATCHER', 'ADMIN'],
+      platformApproved: ['DISPATCHER', 'ADMIN'],
+    };
+
+    const roles = roleMap[check];
+    if (!roles) throw new BadRequestException('Unknown escrow release check.');
+    if (!roles.includes(actorRole)) {
+      throw new ForbiddenException('This account cannot complete that escrow release check.');
+    }
   }
 
   private toEscrowRecord(row: {

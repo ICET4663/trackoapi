@@ -78,8 +78,13 @@ export class ShipmentsController {
   }
 
   @Post(':id/escrow/checks/:check')
-  confirmEscrowCheck(@Param('id') id: string, @Param('check') check: string) {
-    return this.shipmentsService.confirmEscrowCheck(id, check);
+  async confirmEscrowCheck(
+    @Param('id') id: string,
+    @Param('check') check: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.shipmentsService.confirmEscrowCheck(id, check, user.role);
   }
 
   @Post(':id/escrow/release')
