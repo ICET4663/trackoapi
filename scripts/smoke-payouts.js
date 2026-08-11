@@ -63,7 +63,7 @@ function normalizeActor(response, role, email) {
     accessToken,
     user: {
       ...user,
-      id: user.id || payload.sub || process.env[`SMOKE_${role}_ID`],
+      id: user.id || payload.sub || payload.id || process.env[`SMOKE_${role}_ID`],
       email: user.email || payload.email || email,
       role: user.role || payload.role || role,
     },
@@ -157,7 +157,15 @@ async function main() {
   }
 
   if (!driver.user?.id) {
-    throw new Error('Driver id is required for assignment. Set SMOKE_DRIVER_ID or use a JWT access token that includes sub.');
+    const availableDrivers = await request('/v1/shipments/dispatch/available-drivers', {
+      accessToken: operations.accessToken,
+    });
+    const matchedDriver = availableDrivers.find((item) => item.email === driver.user?.email) || availableDrivers[0];
+    if (!matchedDriver?.id) {
+      throw new Error('Driver id is required for assignment. Set SMOKE_DRIVER_ID or use a JWT access token that includes sub.');
+    }
+    driver.user.id = matchedDriver.id;
+    console.log('OK driver id discovered', driver.user.id);
   }
 
   const shipment = await request('/v1/shipments', {
