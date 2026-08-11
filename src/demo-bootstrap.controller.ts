@@ -122,32 +122,47 @@ export class DemoBootstrapController {
   }
 
   private async ensureDriverFixtures(driverId: string) {
-    await this.prisma.$executeRaw`
-      insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "pendingPayout")
-      values ('demo-bank-driver', ${driverId}, 'Preview Bank', '**** 0012', 'Tracko Driver', true, 'Weekly', 'N0')
-      on conflict ("id") do update set
-        "userId" = excluded."userId",
-        "bankName" = excluded."bankName",
-        "maskedNumber" = excluded."maskedNumber",
-        "holderName" = excluded."holderName",
-        "verified" = excluded."verified",
-        "payoutSchedule" = excluded."payoutSchedule",
-        "pendingPayout" = excluded."pendingPayout",
-        "updatedAt" = current_timestamp
-    `;
+    await this.prisma.bankAccount.upsert({
+      where: { userId: driverId },
+      update: {
+        bankName: 'Preview Bank',
+        maskedNumber: '**** 0012',
+        holderName: 'Tracko Driver',
+        verified: true,
+        payoutSchedule: 'Weekly',
+        pendingPayout: 'N0',
+      },
+      create: {
+        userId: driverId,
+        bankName: 'Preview Bank',
+        maskedNumber: '**** 0012',
+        holderName: 'Tracko Driver',
+        verified: true,
+        payoutSchedule: 'Weekly',
+        pendingPayout: 'N0',
+      },
+    });
 
-    await this.prisma.$executeRaw`
-      insert into "Vehicle" ("id", "ownerId", "assignedDriverId", "plateNumber", "type", "capacityKg", "registrationState", "isActive")
-      values ('demo-vehicle-driver', ${driverId}, ${driverId}, 'TRK-DRV-01', 'Box truck', 30000, 'Lagos', true)
-      on conflict ("id") do update set
-        "ownerId" = excluded."ownerId",
-        "assignedDriverId" = excluded."assignedDriverId",
-        "plateNumber" = excluded."plateNumber",
-        "type" = excluded."type",
-        "capacityKg" = excluded."capacityKg",
-        "registrationState" = excluded."registrationState",
-        "isActive" = excluded."isActive",
-        "updatedAt" = current_timestamp
-    `;
+    await this.prisma.vehicle.upsert({
+      where: { plateNumber: 'TRK-DRV-01' },
+      update: {
+        ownerId: driverId,
+        assignedDriverId: driverId,
+        type: 'Box truck',
+        capacityKg: 30000,
+        registrationState: 'Lagos',
+        isActive: true,
+      },
+      create: {
+        ownerId: driverId,
+        assignedDriverId: driverId,
+        plateNumber: 'TRK-DRV-01',
+        type: 'Box truck',
+        capacityKg: 30000,
+        registrationState: 'Lagos',
+        isActive: true,
+      },
+    });
   }
 }
+
