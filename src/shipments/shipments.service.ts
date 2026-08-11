@@ -733,10 +733,14 @@ export class ShipmentsService {
   private async createEscrowRecord(shipmentId: string, amount: number) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
-        `insert into "Escrow" ("shipmentId", "amount", "currency", "status")
-         values ($1, $2, 'NGN', 'PENDING'::"EscrowStatus")
-         on conflict ("shipmentId") do nothing
+        `insert into "Escrow" ("id", "shipmentId", "amount", "currency", "status")
+         values ($1, $2, $3, 'NGN', 'PENDING'::"EscrowStatus")
+         on conflict ("shipmentId") do update set
+           "amount" = excluded."amount",
+           "currency" = excluded."currency",
+           "updatedAt" = current_timestamp
          returning "id"`,
+        `escrow-${shipmentId}`,
         shipmentId,
         amount,
       );
@@ -905,3 +909,4 @@ export class ShipmentsService {
     };
   }
 }
+

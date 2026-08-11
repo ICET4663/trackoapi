@@ -61,10 +61,11 @@ export class PaymentProviderService {
 
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "Escrow" ("shipmentId", "amount", "currency", "status")
-         values ($1, $2, $3, 'PENDING'::"EscrowStatus")
+        `insert into "Escrow" ("id", "shipmentId", "amount", "currency", "status")
+         values ($1, $2, $3, $4, 'PENDING'::"EscrowStatus")
          on conflict ("shipmentId")
          do update set "amount" = excluded."amount", "currency" = excluded."currency", "updatedAt" = current_timestamp`,
+        `escrow-${shipmentId}`,
         shipmentId,
         amount,
         currency,
@@ -453,3 +454,4 @@ export class PaymentProviderService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 }
+
