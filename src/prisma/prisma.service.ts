@@ -14,6 +14,10 @@ export class PrismaService implements OnModuleDestroy {
     return this.db.auditLog;
   }
 
+  get bankAccount() {
+    return this.db.bankAccount;
+  }
+
   get conversation() {
     return this.db.conversation;
   }
@@ -66,3 +70,4 @@ export class PrismaService implements OnModuleDestroy {
     await this.client?.$disconnect();
   }
 }
+
