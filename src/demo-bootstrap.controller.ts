@@ -62,17 +62,24 @@ export class DemoBootstrapController {
     ];
 
     const users = [];
+    const errors = [];
     for (const account of accounts) {
-      const user = await this.upsertStaff(account, password);
-      if (account.role === 'DRIVER') await this.ensureDriverFixtures(user.id);
-      users.push(user);
+      try {
+        const user = await this.upsertStaff(account, password);
+        if (account.role === 'DRIVER') await this.ensureDriverFixtures(user.id);
+        users.push(user);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push({ email: account.email, role: account.role, message });
+      }
     }
 
     return {
-      ok: true,
-      message: 'Demo accounts are ready.',
+      ok: errors.length === 0,
+      message: errors.length === 0 ? 'Demo accounts are ready.' : 'Demo bootstrap finished with errors.',
       password,
       users,
+      errors,
       links: {
         customer: 'https://cargo-link-logistics-mm1c.vercel.app/customer',
         driver: 'https://cargo-link-logistics-mm1c.vercel.app/driver',
@@ -165,4 +172,5 @@ export class DemoBootstrapController {
     });
   }
 }
+
 
