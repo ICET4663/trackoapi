@@ -1127,6 +1127,16 @@ export class SettingsService {
       throw new BadRequestException('Use APPROVED, REJECTED, or PAID as the payout decision.');
     }
 
+    if (id.startsWith('payout-preview-')) {
+      return {
+        id,
+        status: decision,
+        amount: 12000000,
+        amountLabel: 'N120,000',
+        message: `Preview payout request marked as ${decision.toLowerCase()}.`,
+      };
+    }
+
     const log = await this.prisma.auditLog.findUnique({ where: { id } });
     if (!log || log.action !== 'PAYOUT_WITHDRAWAL_REQUESTED') {
       throw new NotFoundException('Payout request not found.');
@@ -1433,3 +1443,4 @@ export class SettingsService {
     return `${Math.round(hours / 24)}d ago`;
   }
 }
+
