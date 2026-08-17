@@ -51,6 +51,15 @@ export class PaymentProviderService {
     if (shipment && input.customerId && shipment.customerId !== input.customerId) {
       throw new ForbiddenException('This customer cannot fund escrow for this shipment.');
     }
+    if (input.customerId) {
+      const [customer] = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string }>>(
+        'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
+        input.customerId,
+      );
+      if (customer && !['VERIFIED', 'APPROVED'].includes(customer.verificationStatus)) {
+        throw new BadRequestException('Complete KYC approval before funding escrow.');
+      }
+    }
 
     const amount = shipment?.quotedPriceKobo ?? shipment?.cargoValueKobo ?? input.amount ?? 0;
     if (!amount || amount <= 0) {
