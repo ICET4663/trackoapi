@@ -211,7 +211,8 @@ export class AuthService {
       const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
       if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
 
-      if (dto.role && !user.availableRoles.includes(dto.role)) {
+      const availableRoles = this.rolesForUser(user);
+      if (dto.role && !availableRoles.includes(dto.role)) {
         throw new UnauthorizedException('This account does not have access to the requested role.');
       }
 
@@ -236,7 +237,7 @@ export class AuthService {
       const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
       if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
 
-      return user.availableRoles.length > 0 ? user.availableRoles : [user.role];
+      return this.rolesForUser(user);
     } catch (error) {
       throw error;
     }
@@ -325,9 +326,16 @@ export class AuthService {
     const tokenHash = await this.hashToken(refreshToken);
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await this.prisma.refreshToken.create({
-      data: { userId: user.id, tokenHash, expiresAt },
-    });
+    try {
+      await this.prisma.refreshToken.create({
+        data: { userId: user.id, tokenHash, expiresAt },
+      });
+    } catch (error) {
+      await this.audit('REFRESH_TOKEN_CREATE_FAILED', 'RefreshToken', undefined, {
+        userId: user.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     return {
       accessToken,
@@ -453,9 +461,13 @@ export class AuthService {
       email: user.email,
       phone: user.phone,
       role,
-      availableRoles: user.availableRoles,
+      availableRoles: this.rolesForUser(user),
       verificationStatus: user.verificationStatus,
     };
+  }
+
+  private rolesForUser(user: { role: UserRole; availableRoles?: UserRole[] | null }) {
+    return Array.isArray(user.availableRoles) && user.availableRoles.length > 0 ? user.availableRoles : [user.role];
   }
 
   private getPreviewRole(dto: LoginDto): UserRole | null {
