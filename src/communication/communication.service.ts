@@ -7,8 +7,6 @@ import { SendMessageDto } from './dto/send-message.dto';
 import { TranscribeVoiceDto } from './dto/transcribe-voice.dto';
 import { TypingStatusDto } from './dto/typing-status.dto';
 
-const PREVIEW_TRANSCRIPT =
-  'Hi, just confirming the shipment is loaded and secured. I am leaving the depot now and expect to reach the drop-off in about two hours.';
 
 @Injectable()
 export class CommunicationService {
@@ -146,8 +144,9 @@ export class CommunicationService {
 
   transcribeVoiceNote(dto: TranscribeVoiceDto) {
     return {
-      transcript: PREVIEW_TRANSCRIPT,
+      transcript: '',
       durationSeconds: dto.durationSeconds,
+      unavailableReason: 'Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.',
     };
   }
 
