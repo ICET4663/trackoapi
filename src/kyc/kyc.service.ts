@@ -243,12 +243,41 @@ export class KycService {
         limit 100`,
       );
 
-      return Promise.all(
+      const submissionEntries = await Promise.all(
         submissions.map(async (submission) => ({
           ...(await this.toSubmission(submission)),
           documentCount: Number(submission.documentCount ?? 0),
         })),
       );
+
+      const usersWithSubmissions = new Set(submissionEntries.map((submission) => submission.userId));
+      const pendingUsers = await this.prisma.$queryRawUnsafe<KycRow[]>(
+        `select
+          u."id" as "id", u."id" as "userId", u."role",
+          'PENDING'::"KycSubmissionStatus" as "status",
+          'PROFILE_REVIEW' as "idType", 'PROFILE_ONLY' as "idNumber",
+          null as "bvn", null as "licenceNumber", null as "licenceExpiry",
+          'Profile requires admin review.' as "note",
+          null as "reviewedAt", null as "reviewedBy",
+          u."createdAt" as "submittedAt", u."updatedAt" as "updatedAt",
+          u."email", u."phone", u."verificationStatus", p."fullName",
+          0 as "documentCount"
+        from "User" u
+        left join "Profile" p on p."userId" = u."id"
+        where u."verificationStatus" in ('PENDING'::"VerificationStatus", 'IN_REVIEW'::"VerificationStatus", 'ACTION_NEEDED'::"VerificationStatus")
+          and u."role" in ('CUSTOMER'::"UserRole", 'DRIVER'::"UserRole", 'TRUCK_OWNER'::"UserRole")
+        order by u."updatedAt" desc
+        limit 100`,
+      );
+
+      const profileEntries = pendingUsers
+        .filter((user) => !usersWithSubmissions.has(user.userId))
+        .map((user) => ({
+          ...this.profileReviewSubmission(user),
+          documentCount: 0,
+        }));
+
+      return [...submissionEntries, ...profileEntries];
     } catch (error) {
       if (!this.previewEnabled()) throw error;
       return [this.previewSubmission('preview-customer', 'CUSTOMER')];
@@ -259,6 +288,8 @@ export class KycService {
     try {
       const [submission] = await this.submissionsForUser(userId);
       if (!submission) {
+        const profileReview = await this.profileReviewForUser(userId);
+        if (profileReview) return profileReview;
         throw new BadRequestException('No KYC submission found for this user.');
       }
 
@@ -301,12 +332,22 @@ export class KycService {
         userId,
       );
 
-      if (!latest) {
-        throw new BadRequestException('No KYC submission found for this user.');
-      }
-
       const status = this.statusForAction(action);
       const verificationStatus = this.verificationForAction(action);
+
+      if (!latest) {
+        if (action === 'APPROVE') {
+          throw new BadRequestException('A KYC document submission is required before this user can be approved.');
+        }
+        await this.prisma.$executeRawUnsafe(
+          `update "User" set "verificationStatus" = $1::"VerificationStatus", "updatedAt" = current_timestamp where "id" = $2`,
+          verificationStatus,
+          userId,
+        );
+        const profileReview = await this.profileReviewForUser(userId, status, verificationStatus, this.optionalText(body.note), reviewerId);
+        if (profileReview) return profileReview.submission;
+        throw new BadRequestException('No KYC submission found for this user.');
+      }
 
       await this.prisma.$executeRawUnsafe(
         `update "KycSubmission"
@@ -389,6 +430,99 @@ export class KycService {
       verificationStatus: submission.verificationStatus ?? 'PENDING',
       documents,
       history: this.historyForSubmission(submission),
+    };
+  }
+
+  private async profileReviewForUser(
+    userId: string,
+    status?: KycSubmissionStatus,
+    verificationStatus?: VerificationStatus,
+    note?: string | null,
+    reviewerId?: string,
+  ) {
+    const [user] = await this.prisma.$queryRawUnsafe<KycRow[]>(
+      `select
+        u."id" as "id", u."id" as "userId", u."role",
+        'PENDING'::"KycSubmissionStatus" as "status",
+        'PROFILE_REVIEW' as "idType", 'PROFILE_ONLY' as "idNumber",
+        null as "bvn", null as "licenceNumber", null as "licenceExpiry",
+        'Profile requires admin review.' as "note",
+        null as "reviewedAt", null as "reviewedBy",
+        u."createdAt" as "submittedAt", u."updatedAt" as "updatedAt",
+        u."email", u."phone", u."verificationStatus", p."fullName",
+        0 as "documentCount"
+      from "User" u
+      left join "Profile" p on p."userId" = u."id"
+      where u."id" = $1
+      limit 1`,
+      userId,
+    );
+
+    if (!user) return null;
+    const submission = this.profileReviewSubmission(user, status, verificationStatus, note, reviewerId);
+    return {
+      submission,
+      user: {
+        id: user.userId,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        fullName: user.fullName ?? user.email ?? 'Tracko user',
+        verificationStatus: submission.verificationStatus,
+      },
+    };
+  }
+
+  private profileReviewSubmission(
+    user: KycRow,
+    status?: KycSubmissionStatus,
+    verificationStatus?: VerificationStatus,
+    note?: string | null,
+    reviewerId?: string,
+  ) {
+    const resolvedStatus = status ?? user.status ?? 'PENDING';
+    const resolvedVerificationStatus = verificationStatus ?? user.verificationStatus ?? 'PENDING';
+    const submittedAt = this.isoDate(user.submittedAt) ?? new Date().toISOString();
+    const updatedAt = this.isoDate(user.updatedAt) ?? submittedAt;
+    const reviewedAt = resolvedStatus === 'PENDING' ? null : new Date().toISOString();
+    const resolvedNote = note ?? user.note ?? 'Profile-only account review. No document upload is attached yet.';
+    const history = [
+      {
+        action: 'PROFILE_READY',
+        actor: user.email ?? 'Applicant',
+        at: submittedAt,
+      },
+    ];
+
+    if (reviewedAt) {
+      history.push({
+        action: resolvedStatus,
+        actor: reviewerId ?? 'Tracko reviewer',
+        at: reviewedAt,
+      });
+    }
+
+    return {
+      id: `profile-${user.userId}`,
+      userId: user.userId,
+      role: user.role,
+      status: resolvedStatus,
+      idType: user.idType,
+      idNumber: user.idNumber,
+      bvn: null,
+      licenceNumber: null,
+      licenceExpiry: null,
+      note: resolvedNote,
+      submittedAt,
+      updatedAt,
+      reviewedAt,
+      reviewedBy: reviewedAt ? reviewerId ?? 'Tracko reviewer' : null,
+      fullName: user.fullName ?? user.email ?? 'Tracko user',
+      email: user.email,
+      phone: user.phone,
+      verificationStatus: resolvedVerificationStatus,
+      documents: [],
+      history,
     };
   }
 
