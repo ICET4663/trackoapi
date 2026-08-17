@@ -336,9 +336,6 @@ export class KycService {
       const verificationStatus = this.verificationForAction(action);
 
       if (!latest) {
-        if (action === 'APPROVE') {
-          throw new BadRequestException('A KYC document submission is required before this user can be approved.');
-        }
         await this.prisma.$executeRawUnsafe(
           `update "User" set "verificationStatus" = $1::"VerificationStatus", "updatedAt" = current_timestamp where "id" = $2`,
           verificationStatus,
