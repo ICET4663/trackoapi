@@ -223,7 +223,7 @@ export class OperationsService {
           where: { verificationStatus: { in: ['PENDING', 'IN_REVIEW', 'ACTION_NEEDED'] } },
         }),
         this.prisma.user.count({
-          where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
+          where: { role: 'DRIVER', isActive: true, verificationStatus: { in: ['VERIFIED', 'APPROVED'] } },
         }),
         this.countRaw(
           `select count(*)::int as count

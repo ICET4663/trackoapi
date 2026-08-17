@@ -229,6 +229,7 @@ export class ShipmentsService {
         where: {
           role: 'DRIVER',
           isActive: true,
+          verificationStatus: { in: ['VERIFIED', 'APPROVED'] },
         },
         include: {
           profile: true,
@@ -315,8 +316,8 @@ export class ShipmentsService {
       if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
         throw new BadRequestException('Escrow must be funded before assigning a driver.');
       }
-      if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
-        throw new BadRequestException('Only verified active drivers can receive shipment assignments.');
+      if (!driver || driver.role !== 'DRIVER' || !driver.isActive || !['VERIFIED', 'APPROVED'].includes(driver.verificationStatus)) {
+        throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
       }
 
       const assignment = await this.prisma.driverAssignment.create({
