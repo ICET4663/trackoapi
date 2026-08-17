@@ -1034,6 +1034,14 @@ export class SettingsService {
       throw new BadRequestException('Verify your payout account before requesting withdrawal.');
     }
 
+    const [driver] = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string }>>(
+      'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
+      userId,
+    );
+    if (driver && !['VERIFIED', 'APPROVED'].includes(driver.verificationStatus)) {
+      throw new BadRequestException('Complete KYC approval before requesting driver payout.');
+    }
+
     const log = await this.prisma.auditLog.create({
       data: {
         actorId: userId,
