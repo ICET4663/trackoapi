@@ -357,8 +357,11 @@ export class DataService {
   }
 
   private stageIndex(status: string) {
-    const stages = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION', 'DELIVERED', 'COMPLETED'];
-    return Math.max(0, stages.indexOf(status));
+    if (['ARRIVED_PICKUP'].includes(status)) return 1;
+    if (['PICKED_UP', 'IN_TRANSIT'].includes(status)) return 2;
+    if (['ARRIVED_DESTINATION'].includes(status)) return 3;
+    if (['DELIVERED', 'COMPLETED'].includes(status)) return 4;
+    return 0;
   }
 
   private formatMoney(amountKobo?: number | null) {
