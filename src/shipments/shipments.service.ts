@@ -507,7 +507,9 @@ export class ShipmentsService {
       );
 
       await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
-      return this.toEscrowRecord(rows[0] ?? { ...escrow, status: 'RELEASED' });
+      const releasedEscrow = this.toEscrowRecord(rows[0] ?? { ...escrow, status: 'RELEASED' });
+      await this.notifyAssignedDriverOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
+      return releasedEscrow;
     } catch {
       return this.toEscrowRecord({
         ...escrow,
@@ -683,6 +685,40 @@ export class ShipmentsService {
     );
     if (!rows[0]) throw new NotFoundException('Escrow record not found.');
     return rows[0];
+  }
+
+  private async notifyAssignedDriverOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null }>>(
+        `select da."driverId", s."reference"
+         from "DriverAssignment" da
+         join "Shipment" s on s."id" = da."shipmentId"
+         where da."shipmentId" = $1 and da."status" = 'ACCEPTED'
+         order by da."acceptedAt" desc nulls last, da."offeredAt" desc
+         limit 1`,
+        shipmentId,
+      );
+      const assignment = rows[0];
+      if (!assignment?.driverId) return;
+
+      await this.notifications.create({
+        userId: assignment.driverId,
+        title: 'Escrow released',
+        body: `${this.formatMoney(amount, currency)} for ${assignment.reference ?? shipmentId} is now available for withdrawal.`,
+        tone: 'SUCCESS',
+        entity: 'Escrow',
+        entityId: shipmentId,
+        actionUrl: '/driver/earnings',
+      });
+    } catch {
+      // Escrow release should not fail because notification delivery failed.
+    }
+  }
+
+  private formatMoney(amountKobo?: number | null, currency = 'NGN') {
+    if (!amountKobo) return currency === 'NGN' ? 'N0' : `${currency} 0`;
+    const amount = Math.round(Number(amountKobo) / 100).toLocaleString('en-US');
+    return currency === 'NGN' ? `N${amount}` : `${currency} ${amount}`;
   }
 
   private async updateShipmentTimeline(shipmentId: string, status: ShipmentStatus, note: string) {
