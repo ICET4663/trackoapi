@@ -75,6 +75,12 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
   },
 ];
 
+const ROAD_FACTOR = 1.29;
+const AVERAGE_SPEED_KMH = 58;
+const BASE_FARE_NGN = 45_000;
+const PER_KM_RATE_NGN = 660;
+const REFERENCE_WEIGHT_TONS = 20;
+
 @Injectable()
 export class MapsProviderService {
   constructor(private readonly config: ConfigService) {}
@@ -132,26 +138,53 @@ export class MapsProviderService {
     destinationLatitude?: number;
     destinationLongitude?: number;
     truckType?: string;
+    weightTons?: number;
   }) {
-    const distanceKm = this.distanceKm(
+    const straightKm = this.distanceKm(
       Number(input.originLatitude ?? 6.5244),
       Number(input.originLongitude ?? 3.3792),
       Number(input.destinationLatitude ?? 9.0765),
       Number(input.destinationLongitude ?? 7.3986),
     );
-    const durationMinutes = Math.max(30, Math.round((distanceKm / 55) * 60));
-    const baseKobo = Math.round(distanceKm * 850 * 100);
-    const truckMultiplier = /tipper|flatbed/i.test(input.truckType ?? '') ? 1.15 : 1;
-    const quotedPriceKobo = Math.max(8500000, Math.round(baseKobo * truckMultiplier));
+    const distanceKm = Math.max(1, straightKm * ROAD_FACTOR);
+    const durationMinutes = Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
+    const safeWeight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0
+      ? Number(input.weightTons)
+      : REFERENCE_WEIGHT_TONS;
+    const weightMultiplier = 0.6 + 0.4 * (safeWeight / REFERENCE_WEIGHT_TONS);
+    const truckMultiplier = this.truckMultiplier(input.truckType);
+    const linehaulNgn = distanceKm * PER_KM_RATE_NGN * weightMultiplier * truckMultiplier;
+    const subtotalNgn = BASE_FARE_NGN + linehaulNgn;
+    const escrowFeeNgn = Math.round(subtotalNgn * 0.035);
+    const quotedPriceKobo = Math.max(8500000, Math.round((subtotalNgn + escrowFeeNgn) * 100));
+    const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     return {
       provider: this.status().provider,
-      distanceKm: Number(distanceKm.toFixed(1)),
+      distanceKm: roundedDistanceKm,
       durationMinutes,
       quotedPriceKobo,
       currency: 'NGN',
-      pricingMode: 'estimate',
+      pricingMode: 'coordinate_estimate',
+      pricingBreakdown: {
+        baseFareKobo: BASE_FARE_NGN * 100,
+        linehaulKobo: Math.round(linehaulNgn * 100),
+        escrowFeeKobo: escrowFeeNgn * 100,
+        perKmRateKobo: PER_KM_RATE_NGN * 100,
+        roadFactor: ROAD_FACTOR,
+        averageSpeedKmh: AVERAGE_SPEED_KMH,
+        weightTons: safeWeight,
+        weightMultiplier: Number(weightMultiplier.toFixed(2)),
+        truckMultiplier,
+      },
     };
+  }
+
+  private truckMultiplier(truckType = '') {
+    if (/tanker/i.test(truckType)) return 1.25;
+    if (/tipper|flatbed/i.test(truckType)) return 1.15;
+    if (/box/i.test(truckType)) return 1.08;
+    return 1;
   }
 
   private async googlePlaces(query: string, key: string): Promise<PlaceSuggestion[]> {
