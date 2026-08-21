@@ -304,15 +304,42 @@ export class DataService {
       take: 100,
     });
 
-    return shipments.map((shipment) => ({
-      id: `wallet-${shipment.reference}`,
-      title: `Shipment escrow - ${shipment.reference}`,
-      amount: this.formatMoney(shipment.quotedPriceKobo),
-      type: 'DEBIT',
-      date: shipment.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      status: shipment.status === 'COMPLETED' ? 'RELEASED' : shipment.status === 'CANCELLED' ? 'REFUNDED' : 'HELD',
-      shipmentId: shipment.reference,
-    }));
+    return shipments.map((shipment) => {
+      const status = shipment.status === 'COMPLETED' ? 'RELEASED' : shipment.status === 'CANCELLED' ? 'REFUNDED' : 'HELD';
+      const route = `${shipment.pickupLabel} to ${shipment.destinationLabel}`;
+      const reference = `ESC-${shipment.reference}`;
+
+      return {
+        id: `wallet-${shipment.reference}`,
+        title: `Shipment escrow - ${shipment.reference}`,
+        subtitle: route,
+        amount: this.formatMoney(shipment.quotedPriceKobo),
+        icon: status === 'RELEASED' ? 'south-west' : status === 'REFUNDED' ? 'add' : 'lock',
+        tone: status === 'RELEASED' || status === 'REFUNDED' ? 'in' : 'hold',
+        type: 'DEBIT',
+        date: shipment.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        status,
+        shipmentId: shipment.reference,
+        reference,
+        method: 'Paystack escrow',
+        category: 'Shipment escrow',
+        counterparty: route,
+        timelineNote: this.walletTimelineNote(status),
+        description: this.walletDescription(status, shipment.reference),
+      };
+    });
+  }
+
+  private walletTimelineNote(status: string) {
+    if (status === 'RELEASED') return 'Funds released after delivery confirmation.';
+    if (status === 'REFUNDED') return 'Funds returned after shipment cancellation.';
+    return 'Funds are held in escrow until delivery is confirmed.';
+  }
+
+  private walletDescription(status: string, reference: string) {
+    if (status === 'RELEASED') return `Escrow for ${reference} has been approved and released to payout processing.`;
+    if (status === 'REFUNDED') return `Escrow for ${reference} was cancelled and marked for refund.`;
+    return `Escrow for ${reference} is protected while pickup, delivery proof, and customer confirmation are completed.`;
   }
 
   private async verificationSummary(userId: string) {
