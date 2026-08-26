@@ -194,6 +194,12 @@ export class SettingsController {
     return this.settingsService.driverEarnings(user.sub);
   }
 
+  @Get('driver/rating')
+  async driverRating(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.driverRatingSummary(user.sub);
+  }
+
   @Post('driver/withdrawals')
   async requestDriverWithdrawal(@Body() body: { amountKobo?: number; amount?: number; note?: string }, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');

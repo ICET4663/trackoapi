@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
 import { CommunicationService } from './communication.service';
 import { RegisterPushTokenDto } from './dto/register-push-token.dto';
@@ -14,45 +13,65 @@ export class CommunicationController {
     private readonly requestUser: RequestUserService,
   ) {}
 
+  // NOTE: conversations are not yet scoped to participants at the schema level (no
+  // customerId/driverId/shipmentId on Conversation), so any authenticated user currently
+  // sees every conversation on the platform, not just their own. Deriving the role from
+  // the verified token (instead of a client-supplied ?role= query param) at least stops
+  // someone from viewing conversations *as* a role they don't hold. Proper per-user
+  // scoping needs a schema change - flagged as a follow-up, not fixed here.
   @Get('conversations')
-  listConversations(@Query('role') role: UserRole) {
-    return this.communicationService.listConversations(role);
+  async listConversations(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.listConversations(user.role);
   }
 
   @Get('conversations/:conversationId/messages')
-  listMessages(@Param('conversationId') conversationId: string) {
+  async listMessages(@Param('conversationId') conversationId: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization);
     return this.communicationService.listMessages(conversationId);
   }
 
   @Post('conversations/:conversationId/messages')
-  sendMessage(@Param('conversationId') conversationId: string, @Body() dto: SendMessageDto) {
-    return this.communicationService.sendMessage(conversationId, dto.senderId ?? 'preview-customer', dto);
+  async sendMessage(
+    @Param('conversationId') conversationId: string,
+    @Body() dto: SendMessageDto,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.sendMessage(conversationId, user.sub, dto);
   }
 
   @Post('conversations/:conversationId/typing')
-  updateTypingStatus(@Param('conversationId') conversationId: string, @Body() dto: TypingStatusDto) {
-    return this.communicationService.updateTypingStatus(conversationId, dto.userId ?? 'preview-customer', dto);
+  async updateTypingStatus(
+    @Param('conversationId') conversationId: string,
+    @Body() dto: TypingStatusDto,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.updateTypingStatus(conversationId, user.sub, dto);
   }
 
   @Post('voice/transcriptions')
-  transcribeVoiceNote(@Body() dto: TranscribeVoiceDto) {
+  async transcribeVoiceNote(@Body() dto: TranscribeVoiceDto, @Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization);
     return this.communicationService.transcribeVoiceNote(dto);
   }
 
   @Post('notifications/push-token')
-  registerPushToken(@Body() dto: RegisterPushTokenDto) {
-    return this.communicationService.registerPushToken('preview-customer', dto.token, dto.platform, dto.deviceId);
+  async registerPushToken(@Body() dto: RegisterPushTokenDto, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.registerPushToken(user.sub, dto.token, dto.platform, dto.deviceId);
   }
 
   @Post('media/upload')
   async uploadMedia(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
     return this.communicationService.uploadMedia(body, user.sub);
   }
 
   @Post('media')
   async uploadMediaAlias(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
     return this.communicationService.uploadMedia(body, user.sub);
   }
 }

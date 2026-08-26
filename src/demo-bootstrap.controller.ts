@@ -2,6 +2,7 @@ import { Body, Controller, ForbiddenException, Headers, Post } from '@nestjs/com
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import { Public } from './common/decorators/public.decorator';
 import { PrismaService } from './prisma/prisma.service';
 
 type StaffInput = {
@@ -27,6 +28,7 @@ export class DemoBootstrapController {
   ) {}
 
   @Post('bootstrap-staff')
+  @Public()
   async bootstrapStaff(@Headers('x-bootstrap-secret') secret: string | undefined, @Body() body: StaffInput) {
     const expected = this.config.get<string>('DEMO_BOOTSTRAP_SECRET');
     if (!expected || secret !== expected) {

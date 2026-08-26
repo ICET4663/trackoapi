@@ -6,7 +6,7 @@ import { AppModule } from './app.module';
 import { DeploymentConfigService } from './config/deployment-config.service';
 
 export async function createTrackoApp() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const config = app.get(ConfigService);
   const readiness = app.get(DeploymentConfigService).summary();
   if (!readiness.deployable) {

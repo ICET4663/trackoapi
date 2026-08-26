@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -17,6 +17,7 @@ type AssignmentQueueShipmentRow = {
   pickupLabel: string;
   destinationLabel: string;
   cargoDescription: string;
+  cargoWeightKg: number | null;
   status: string;
   quotedPriceKobo: number | null;
   escrowId: string | null;
@@ -50,6 +51,8 @@ type EscrowLedgerRow = {
 
 @Injectable()
 export class OperationsService {
+  private readonly logger = new Logger(OperationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -88,7 +91,8 @@ export class OperationsService {
           offeredAt: assignment.offeredAt.toISOString(),
         })),
       };
-    } catch {
+    } catch (error) {
+      this.logger.error(`dashboard() failed, serving preview data: ${this.errorMessage(error)}`);
       return this.previewDashboard();
     }
   }
@@ -101,7 +105,7 @@ export class OperationsService {
         this.prisma.$queryRawUnsafe<AssignmentQueueShipmentRow[]>(
           `select
             s."id", s."reference", s."pickupLabel", s."destinationLabel", s."cargoDescription",
-            s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
+            s."cargoWeightKg", s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
             e."id" as "escrowId", e."status"::text as "escrowStatus", e."amount" as "escrowAmount",
             e."currency" as "escrowCurrency",
             da."id" as "assignmentId", da."driverId" as "assignedDriverId",
@@ -118,6 +122,7 @@ export class OperationsService {
           ) da on true
           where e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
             and s."status" in ('ESCROW_FUNDED'::"ShipmentStatus", 'QUOTED'::"ShipmentStatus", 'PENDING_PAYMENT'::"ShipmentStatus")
+            and s."adminApproved" = true
           order by s."createdAt" desc
           limit 50`,
         ),
@@ -140,6 +145,7 @@ export class OperationsService {
           origin: shipment.pickupLabel,
           destination: shipment.destinationLabel,
           cargo: shipment.cargoDescription,
+          cargoWeightKg: shipment.cargoWeightKg,
           status: shipment.status,
           quotedPriceKobo: shipment.quotedPriceKobo,
           escrow: shipment.escrowId
@@ -175,7 +181,8 @@ export class OperationsService {
           })),
         })),
       };
-    } catch {
+    } catch (error) {
+      this.logger.error(`assignmentQueue() failed, serving preview data: ${this.errorMessage(error)}`);
       return {
         shipments: [
           {
@@ -184,6 +191,7 @@ export class OperationsService {
             origin: 'Lagos',
             destination: 'Abuja',
             cargo: 'Consumer goods',
+            cargoWeightKg: 8000,
             status: 'ESCROW_FUNDED',
             quotedPriceKobo: 35050000,
             escrow: { id: 'escrow-TRK-1024', status: 'FUNDED', amount: 35050000, currency: 'NGN' },
@@ -223,12 +231,14 @@ export class OperationsService {
           where: { verificationStatus: { in: ['PENDING', 'IN_REVIEW', 'ACTION_NEEDED'] } },
         }),
         this.prisma.user.count({
-          where: { role: 'DRIVER', isActive: true, verificationStatus: { in: ['VERIFIED', 'APPROVED'] } },
+          where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
         }),
         this.countRaw(
           `select count(*)::int as count
            from "Escrow" e
+           join "Shipment" s on s."id" = e."shipmentId"
            where e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
+             and s."adminApproved" = true
              and not exists (
                select 1 from "DriverAssignment" da
                where da."shipmentId" = e."shipmentId"
@@ -314,7 +324,8 @@ export class OperationsService {
         ],
         nextActions,
       };
-    } catch {
+    } catch (error) {
+      this.logger.error(`workflowReadiness() failed, serving preview data: ${this.errorMessage(error)}`);
       return this.previewWorkflowReadiness();
     }
   }
@@ -360,7 +371,8 @@ export class OperationsService {
           },
         })),
       };
-    } catch {
+    } catch (error) {
+      this.logger.error(`escrowLedger() failed, serving preview data: ${this.errorMessage(error)}`);
       return {
         totalHeld: 35050000,
         items: [
@@ -395,8 +407,11 @@ export class OperationsService {
     this.assertCanProgressTrip(actor.role);
     const status = body.status ?? 'IN_TRANSIT';
 
+    // The status update is the actual point of this call: if it fails, the caller must
+    // see a real error rather than a fabricated "success" that was never persisted.
+    let shipment;
     try {
-      const shipment = await this.prisma.shipment.update({
+      shipment = await this.prisma.shipment.update({
         where: { id: shipmentId },
         data: {
           status,
@@ -409,7 +424,14 @@ export class OperationsService {
         },
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
+    } catch (error) {
+      this.logger.error(`progressTrip(${shipmentId}) failed to persist status ${status}: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not update shipment progress. Please try again.');
+    }
 
+    // Audit logging and the customer notification are supplementary: log and continue
+    // rather than telling the caller the whole update failed when the status did save.
+    try {
       await this.audit(actor, 'SHIPMENT_PROGRESS_UPDATED', 'Shipment', shipmentId, {
         status,
         note: body.note,
@@ -425,40 +447,30 @@ export class OperationsService {
         entityId: shipmentId,
         actionUrl: `/shipments/${shipmentId}`,
       });
-
-      return {
-        id: shipment.id,
-        reference: shipment.reference,
-        status: shipment.status,
-        updatedAt: shipment.updatedAt.toISOString(),
-        timeline: shipment.timeline.map((event) => ({
-          id: event.id,
-          status: event.status,
-          note: event.note,
-          createdAt: event.createdAt.toISOString(),
-        })),
-      };
-    } catch {
-      return {
-        id: shipmentId,
-        status,
-        updatedAt: new Date().toISOString(),
-        timeline: [
-          {
-            id: `timeline-${Date.now()}`,
-            status,
-            note: body.note ?? this.statusNote(status),
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      };
+    } catch (error) {
+      this.logger.error(`progressTrip(${shipmentId}) status saved but audit/notification failed: ${this.errorMessage(error)}`);
     }
+
+    return {
+      id: shipment.id,
+      reference: shipment.reference,
+      status: shipment.status,
+      updatedAt: shipment.updatedAt.toISOString(),
+      timeline: shipment.timeline.map((event) => ({
+        id: event.id,
+        status: event.status,
+        note: event.note,
+        createdAt: event.createdAt.toISOString(),
+      })),
+    };
   }
 
   async createDispute(body: Record<string, unknown>, actor: OperationActor) {
     const id = `DSP-${Date.now()}`;
     const shipmentId = body.shipmentId ? String(body.shipmentId) : undefined;
 
+    // The insert is the actual dispute record: if it fails, the caller must see a real
+    // error rather than a fabricated "OPEN" dispute that was never saved.
     try {
       await this.prisma.$queryRawUnsafe(
         `insert into "Dispute" ("id", "shipmentId", "userId", "reason", "description", "priority", "status")
@@ -470,7 +482,14 @@ export class OperationsService {
         body.description ? String(body.description) : null,
         String(body.priority ?? 'MEDIUM'),
       );
+    } catch (error) {
+      this.logger.error(`createDispute() failed to persist dispute: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not open the dispute. Please try again.');
+    }
 
+    // Audit log, shipment status flip, and the dispatcher notification are supplementary:
+    // log and continue rather than telling the caller the dispute itself failed to save.
+    try {
       await this.audit(actor, 'DISPUTE_CREATED', 'Dispute', id, {
         shipmentId,
         reason: body.reason,
@@ -502,8 +521,8 @@ export class OperationsService {
         entityId: id,
         actionUrl: `/dispatcher/disputes`,
       });
-    } catch {
-      // Preview response below.
+    } catch (error) {
+      this.logger.error(`createDispute(${id}) saved but follow-up steps failed: ${this.errorMessage(error)}`);
     }
 
     return {
@@ -530,7 +549,12 @@ export class OperationsService {
         String(body.resolution ?? 'Resolved by operations.'),
         id,
       );
+    } catch (error) {
+      this.logger.error(`resolveDispute(${id}) failed to persist resolution: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not resolve the dispute. Please try again.');
+    }
 
+    try {
       await this.audit(actor, 'DISPUTE_RESOLVED', 'Dispute', id, {
         resolution: body.resolution,
         shipmentId: body.shipmentId,
@@ -559,8 +583,8 @@ export class OperationsService {
         entity: 'Dispute',
         entityId: id,
       });
-    } catch {
-      // Preview response below.
+    } catch (error) {
+      this.logger.error(`resolveDispute(${id}) resolved but follow-up steps failed: ${this.errorMessage(error)}`);
     }
 
     return {
@@ -574,6 +598,8 @@ export class OperationsService {
   async createSupportTicket(body: Record<string, unknown>, actor: OperationActor) {
     const id = `SUP-${Date.now()}`;
 
+    // The insert is the actual ticket: if it fails, the caller must see a real error
+    // rather than a fabricated "OPEN" ticket that was never saved.
     try {
       await this.prisma.$queryRawUnsafe(
         `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
@@ -585,7 +611,12 @@ export class OperationsService {
         String(body.channel ?? 'CHAT'),
         body.message ? String(body.message) : null,
       );
+    } catch (error) {
+      this.logger.error(`createSupportTicket() failed to persist ticket: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not create the support ticket. Please try again.');
+    }
 
+    try {
       await this.audit(actor, 'SUPPORT_TICKET_CREATED', 'SupportTicket', id, {
         topic: body.topic,
         channel: body.channel,
@@ -602,8 +633,8 @@ export class OperationsService {
         entityId: id,
         actionUrl: `/dispatcher/support`,
       });
-    } catch {
-      // Preview response below.
+    } catch (error) {
+      this.logger.error(`createSupportTicket(${id}) saved but follow-up steps failed: ${this.errorMessage(error)}`);
     }
 
     return {
@@ -653,6 +684,10 @@ export class OperationsService {
         metadata: this.toJson(metadata),
       },
     });
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private async countRaw(query: string) {

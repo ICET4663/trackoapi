@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import type { AuthUser } from '../common/types/auth-user';
 
 type LocationInput = {
   latitude?: number;
@@ -24,7 +25,33 @@ export class TrackingService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async currentLocation(shipmentId: string) {
+  // Authentication alone isn't enough here - a logged-in customer must not be able to
+  // read another customer's live GPS trail or delivery photos just by knowing/guessing a
+  // shipment id. ADMIN/DISPATCHER get operational visibility across all shipments.
+  private async assertShipmentAccess(shipmentId: string, user: AuthUser) {
+    if (user.role === 'ADMIN' || user.role === 'DISPATCHER') return;
+
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { customerId: true },
+    }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment was not found.');
+
+    if (user.role === 'CUSTOMER' && shipment.customerId === user.sub) return;
+
+    if (user.role === 'DRIVER') {
+      const assignment = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, driverId: user.sub, status: 'ACCEPTED' },
+        select: { id: true },
+      }).catch(() => null);
+      if (assignment) return;
+    }
+
+    throw new ForbiddenException('You do not have access to this shipment.');
+  }
+
+  async currentLocation(shipmentId: string, user: AuthUser) {
+    await this.assertShipmentAccess(shipmentId, user);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
@@ -55,7 +82,8 @@ export class TrackingService {
     return this.previewLocation(shipmentId);
   }
 
-  async locationHistory(shipmentId: string) {
+  async locationHistory(shipmentId: string, user: AuthUser) {
+    await this.assertShipmentAccess(shipmentId, user);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
@@ -86,7 +114,11 @@ export class TrackingService {
     return [this.previewLocation(shipmentId)];
   }
 
-  async recordLocation(shipmentId: string, driverId: string, input: LocationInput) {
+  async recordLocation(shipmentId: string, user: AuthUser, input: LocationInput) {
+    // A driver may only post location updates for a shipment they are actually assigned
+    // to - otherwise anyone with a valid driver token could spoof any shipment's route.
+    await this.assertShipmentAccess(shipmentId, user);
+    const driverId = user.sub;
     const latitude = Number(input.latitude ?? 6.5244);
     const longitude = Number(input.longitude ?? 3.3792);
 
@@ -131,7 +163,9 @@ export class TrackingService {
     });
   }
 
-  async submitDeliveryProof(shipmentId: string, driverId: string, input: DeliveryProofInput) {
+  async submitDeliveryProof(shipmentId: string, user: AuthUser, input: DeliveryProofInput) {
+    await this.assertShipmentAccess(shipmentId, user);
+    const driverId = user.sub;
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
@@ -215,7 +249,8 @@ export class TrackingService {
     return this.previewProof(shipmentId, driverId, input);
   }
 
-  async deliveryProofs(shipmentId: string) {
+  async deliveryProofs(shipmentId: string, user: AuthUser) {
+    await this.assertShipmentAccess(shipmentId, user);
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {

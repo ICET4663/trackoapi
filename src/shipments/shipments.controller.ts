@@ -25,8 +25,21 @@ export class ShipmentsController {
   }
 
   @Get('dispatch/available-drivers')
-  availableDrivers() {
+  async availableDrivers(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.shipmentsService.availableDrivers();
+  }
+
+  @Get('pending-review')
+  async pendingReview(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.shipmentsService.pendingReview();
+  }
+
+  @Post(':id/approve')
+  async approveShipment(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.shipmentsService.approveShipment(id, user.sub, user.role);
   }
 
   @Post('assignments/:assignmentId/accept')
@@ -48,17 +61,28 @@ export class ShipmentsController {
   }
 
   @Patch(':id/status')
-  updateStatus(@Param('id') id: string, @Body() dto: UpdateShipmentStatusDto) {
-    return this.shipmentsService.updateStatus(id, dto);
+  async updateStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateShipmentStatusDto,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.shipmentsService.updateStatus(id, user.sub, user.role, dto);
   }
 
   @Post(':id/timeline')
-  addTimelineEvent(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.shipmentsService.addTimelineEvent(id, body);
+  async addTimelineEvent(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.shipmentsService.addTimelineEvent(id, user.sub, user.role, body);
   }
 
   @Get(':id/assignments')
-  listAssignments(@Param('id') id: string) {
+  async listAssignments(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization);
     return this.shipmentsService.listAssignments(id);
   }
 
@@ -73,7 +97,8 @@ export class ShipmentsController {
   }
 
   @Get(':id/escrow')
-  getEscrow(@Param('id') id: string) {
+  async getEscrow(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization);
     return this.shipmentsService.getEscrow(id);
   }
 
@@ -115,5 +140,21 @@ export class ShipmentsController {
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
     return this.shipmentsService.refundEscrow(id, user.role, body.note);
+  }
+
+  @Post(':id/review')
+  async submitReview(
+    @Param('id') id: string,
+    @Body() body: { rating?: number; comment?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['CUSTOMER']);
+    return this.shipmentsService.submitReview(id, user.sub, body);
+  }
+
+  @Get(':id/review')
+  async getReview(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.shipmentsService.getReview(id);
   }
 }

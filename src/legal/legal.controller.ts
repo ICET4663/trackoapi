@@ -1,4 +1,5 @@
 import { Controller, Get, Header } from '@nestjs/common';
+import { Public } from '../common/decorators/public.decorator';
 
 const companyName = 'Tracko Logistics';
 const supportEmail = 'support@tracko.example';
@@ -25,6 +26,7 @@ ${body}
 @Controller('legal')
 export class LegalController {
   @Get('privacy')
+  @Public()
   @Header('Content-Type', 'text/html; charset=utf-8')
   privacy() {
     return htmlPage(
@@ -44,6 +46,7 @@ export class LegalController {
   }
 
   @Get('terms')
+  @Public()
   @Header('Content-Type', 'text/html; charset=utf-8')
   terms() {
     return htmlPage(
@@ -63,6 +66,7 @@ export class LegalController {
   }
 
   @Get('account-deletion')
+  @Public()
   @Header('Content-Type', 'text/html; charset=utf-8')
   accountDeletion() {
     return htmlPage(

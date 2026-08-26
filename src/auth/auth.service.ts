@@ -174,26 +174,17 @@ export class AuthService {
       throw new BadRequestException('This role cannot self-register.');
     }
 
-    try {
-      await this.verifyOtp(dto.email, dto.phone, dto.code, OtpPurpose.REGISTER);
-      const passwordHash = await bcrypt.hash(dto.password, 12);
-      const user = await this.users.create({
-        email: dto.email,
-        phone: dto.phone,
-        fullName: dto.fullName,
-        passwordHash,
-        role: dto.role,
-      });
+    await this.verifyOtp(dto.email, dto.phone, dto.code, OtpPurpose.REGISTER);
+    const passwordHash = await bcrypt.hash(dto.password, 12);
+    const user = await this.users.create({
+      email: dto.email,
+      phone: dto.phone,
+      fullName: dto.fullName,
+      passwordHash,
+      role: dto.role,
+    });
 
-      return this.createSession(user.id);
-    } catch (error) {
-      if (!this.previewAuthEnabled()) throw error;
-      return this.createPreviewSession({
-        identifier: dto.email,
-        password: 'password',
-        role: dto.role,
-      });
-    }
+    return this.createSession(user.id);
   }
 
   async login(dto: LoginDto) {
@@ -201,25 +192,19 @@ export class AuthService {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),
       label: 'Login',
     });
-    const previewSession = this.createPreviewSession(dto);
-    if (previewSession) return previewSession;
 
-    try {
-      const user = await this.users.findByEmailOrPhone(dto.identifier);
-      if (!user || !user.isActive) throw new UnauthorizedException('Invalid login credentials.');
+    const user = await this.users.findByEmailOrPhone(dto.identifier);
+    if (!user || !user.isActive) throw new UnauthorizedException('Invalid login credentials.');
 
-      const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
-      if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
+    const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
 
-      const availableRoles = this.rolesForUser(user);
-      if (dto.role && !availableRoles.includes(dto.role)) {
-        throw new UnauthorizedException('This account does not have access to the requested role.');
-      }
-
-      return this.createSession(user.id, dto.role);
-    } catch (error) {
-      throw error;
+    const availableRoles = this.rolesForUser(user);
+    if (dto.role && !availableRoles.includes(dto.role)) {
+      throw new UnauthorizedException('This account does not have access to the requested role.');
     }
+
+    return this.createSession(user.id, dto.role);
   }
 
   async getLoginPortals(dto: LoginDto) {
@@ -227,20 +212,14 @@ export class AuthService {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),
       label: 'Login',
     });
-    const previewRole = this.getPreviewRole(dto);
-    if (previewRole) return [dto.role ?? previewRole];
 
-    try {
-      const user = await this.users.findByEmailOrPhone(dto.identifier);
-      if (!user || !user.isActive) throw new UnauthorizedException('Invalid login credentials.');
+    const user = await this.users.findByEmailOrPhone(dto.identifier);
+    if (!user || !user.isActive) throw new UnauthorizedException('Invalid login credentials.');
 
-      const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
-      if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
+    const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!passwordOk) throw new UnauthorizedException('Invalid login credentials.');
 
-      return this.rolesForUser(user);
-    } catch (error) {
-      throw error;
-    }
+    return this.rolesForUser(user);
   }
 
   async refresh(refreshToken: string) {
@@ -435,8 +414,11 @@ export class AuthService {
     }
   }
 
+  // Deliberately requires the explicit flag only - never falls back to "NODE_ENV isn't
+  // production", since that would leak real OTP codes (including password-reset codes for
+  // accounts the caller doesn't own) to any environment where NODE_ENV is merely unset.
   private exposeDevOtp() {
-    return this.config.get<string>('EXPOSE_DEV_OTP') === 'true' || this.config.get<string>('NODE_ENV') !== 'production';
+    return this.config.get<string>('EXPOSE_DEV_OTP') === 'true';
   }
 
   private async audit(action: string, entity: string, entityId?: string, metadata?: Record<string, unknown>) {
@@ -468,44 +450,5 @@ export class AuthService {
 
   private rolesForUser(user: { role: UserRole; availableRoles?: UserRole[] | null }) {
     return Array.isArray(user.availableRoles) && user.availableRoles.length > 0 ? user.availableRoles : [user.role];
-  }
-
-  private getPreviewRole(dto: LoginDto): UserRole | null {
-    if (!this.previewAuthEnabled()) return null;
-    if (!['password', 'password123'].includes(dto.password)) return null;
-
-    const identifier = dto.identifier.trim().toLowerCase();
-    if (identifier === 'customer@tracko.ng') return 'CUSTOMER';
-    if (identifier === 'driver@tracko.ng') return 'DRIVER';
-    if (identifier === 'truckowner@tracko.ng') return 'TRUCK_OWNER';
-    if (identifier === 'dispatcher@tracko.ng') return 'DISPATCHER';
-    if (identifier === 'admin@tracko.ng') return 'ADMIN';
-
-    return null;
-  }
-
-  private createPreviewSession(dto: LoginDto) {
-    if (!this.previewAuthEnabled()) return null;
-    const role = dto.role ?? this.getPreviewRole(dto);
-    if (!role || !['password', 'password123'].includes(dto.password)) return null;
-
-    const id = `preview-${role.toLowerCase()}`;
-    return {
-      accessToken: `preview-access-token-${role.toLowerCase()}`,
-      refreshToken: `preview-refresh-token-${role.toLowerCase()}`,
-      user: {
-        id,
-        fullName: `Preview ${role.replace('_', ' ').toLowerCase()}`,
-        email: dto.identifier.trim().toLowerCase(),
-        phone: '0000000000',
-        role,
-        availableRoles: [role],
-        verificationStatus: 'VERIFIED',
-      },
-    };
-  }
-
-  private previewAuthEnabled() {
-    return this.config.get<string>('ENABLE_PREVIEW_AUTH') === 'true' || this.config.get<string>('NODE_ENV') !== 'production';
   }
 }

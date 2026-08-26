@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
 import { AuthModule } from './auth/auth.module';
 import { CommunicationModule } from './communication/communication.module';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
 import { DeploymentConfigModule } from './config/deployment-config.module';
 import { DataModule } from './data/data.module';
 import { DemoBootstrapController } from './demo-bootstrap.controller';
@@ -39,5 +42,9 @@ import { UsersModule } from './users/users.module';
     CommunicationModule,
   ],
   controllers: [HealthController, DemoReadinessController, DemoBootstrapController],
+  providers: [
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+  ],
 })
 export class AppModule {}

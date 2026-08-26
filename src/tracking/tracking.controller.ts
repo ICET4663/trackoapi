@@ -10,13 +10,15 @@ export class TrackingController {
   ) {}
 
   @Get('shipments/:id')
-  currentLocation(@Param('id') id: string) {
-    return this.tracking.currentLocation(id);
+  async currentLocation(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.tracking.currentLocation(id, user);
   }
 
   @Get('shipments/:id/history')
-  locationHistory(@Param('id') id: string) {
-    return this.tracking.locationHistory(id);
+  async locationHistory(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.tracking.locationHistory(id, user);
   }
 
   @Post('shipments/:id/location')
@@ -25,13 +27,14 @@ export class TrackingController {
     @Body() body: { latitude?: number; longitude?: number; heading?: number; speedKph?: number; note?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
-    return this.tracking.recordLocation(id, user.sub, body);
+    const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
+    return this.tracking.recordLocation(id, user, body);
   }
 
   @Get('shipments/:id/proof-of-delivery')
-  deliveryProofs(@Param('id') id: string) {
-    return this.tracking.deliveryProofs(id);
+  async deliveryProofs(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.tracking.deliveryProofs(id, user);
   }
 
   @Post('shipments/:id/proof-of-delivery')
@@ -40,7 +43,7 @@ export class TrackingController {
     @Body() body: { photoUrl?: string; signatureUrl?: string; recipientName?: string; note?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
-    return this.tracking.submitDeliveryProof(id, user.sub, body);
+    const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
+    return this.tracking.submitDeliveryProof(id, user, body);
   }
 }

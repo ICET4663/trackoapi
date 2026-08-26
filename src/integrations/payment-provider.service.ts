@@ -31,6 +31,8 @@ export class PaymentProviderService {
       mode: hasPaystackKey || hasStripeKey ? 'configured' : 'mock',
       escrowEnabled: true,
       realChargeEnabled: hasPaystackKey || hasStripeKey,
+      webhookSignatureVerification: provider === 'paystack' ? 'raw-body-hmac-sha512' : 'provider-dependent',
+      webhookPath: provider === 'paystack' ? '/v1/payments/webhooks/paystack/charge.success' : '/v1/payments/webhooks/:provider/:event',
       requiredEnv: provider === 'stripe' ? ['STRIPE_SECRET_KEY'] : ['PAYSTACK_SECRET_KEY'],
     };
   }
@@ -56,7 +58,7 @@ export class PaymentProviderService {
         'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
         input.customerId,
       );
-      if (customer && !['VERIFIED', 'APPROVED'].includes(customer.verificationStatus)) {
+      if (customer && customer.verificationStatus !== 'VERIFIED') {
         throw new BadRequestException('Complete KYC approval before funding escrow.');
       }
     }
@@ -120,42 +122,31 @@ export class PaymentProviderService {
     };
   }
 
-  async recordWebhook(provider: string, event: string, body: unknown, signature?: string) {
+  async recordWebhook(provider: string, event: string, body: unknown, signature?: string, rawBody?: Buffer | string) {
     const verified =
       provider === 'paystack'
-        ? this.verifyPaystackSignature(body, signature)
+        ? this.verifyPaystackSignature(body, signature, rawBody)
         : this.status().mode === 'mock';
     const payment = this.extractPaymentEvent(body);
     let escrowUpdated = false;
+    // A charge.success event can arrive more than once (Paystack retries on
+    // timeout, and the client-side verify() call can race the webhook). Treat
+    // this as already-processed rather than re-crediting/re-notifying.
+    let alreadyProcessed = false;
 
     if (verified && provider === 'paystack' && payment.shipmentId && payment.success) {
-      try {
-        await this.prisma.$queryRawUnsafe(
-        `update "Escrow"
-           set "status" = 'FUNDED'::"EscrowStatus",
-               "amount" = coalesce($2, "amount"),
-               "currency" = coalesce($3, "currency"),
-               "updatedAt" = current_timestamp
-           where "shipmentId" = $1`,
+      const currentStatus = await this.escrowStatus(payment.shipmentId);
+      if (currentStatus && currentStatus !== 'PENDING') {
+        alreadyProcessed = true;
+        escrowUpdated = true;
+      } else {
+        escrowUpdated = await this.markEscrowFunded(
           payment.shipmentId,
           payment.amount,
           payment.currency,
+          provider,
+          payment.reference,
         );
-        await this.prisma.shipment.update({
-          where: { id: payment.shipmentId },
-          data: {
-            status: 'ESCROW_FUNDED',
-            timeline: {
-              create: {
-                status: 'ESCROW_FUNDED',
-                note: `Escrow funded by ${provider}.`,
-              },
-            },
-          },
-        });
-        escrowUpdated = true;
-      } catch {
-        escrowUpdated = false;
       }
     }
 
@@ -165,7 +156,7 @@ export class PaymentProviderService {
           action: 'PAYMENT_WEBHOOK_RECEIVED',
           entity: 'PaymentProvider',
           entityId: payment.shipmentId,
-          metadata: this.toJson({ provider, event, body, verified, payment, escrowUpdated }),
+          metadata: this.toJson({ provider, event, body, verified, payment, escrowUpdated, alreadyProcessed }),
         },
       });
     } catch {
@@ -178,8 +169,21 @@ export class PaymentProviderService {
       event,
       verified,
       escrowUpdated,
+      alreadyProcessed,
       processedAt: new Date().toISOString(),
     };
+  }
+
+  private async escrowStatus(shipmentId: string): Promise<string | null> {
+    try {
+      const [row] = await this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
+        'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
+        shipmentId,
+      );
+      return row?.status ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async verifyPaystackPayment(reference: string) {
@@ -432,10 +436,11 @@ export class PaymentProviderService {
     return `${currency === 'NGN' ? 'N' : `${currency} `}${amount}`;
   }
 
-  private verifyPaystackSignature(body: unknown, signature?: string) {
+  private verifyPaystackSignature(body: unknown, signature?: string, rawBody?: Buffer | string) {
     const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
     if (!secretKey || !signature) return false;
-    const digest = createHmac('sha512', secretKey).update(JSON.stringify(body ?? {})).digest('hex');
+    const payload = rawBody ?? JSON.stringify(body ?? {});
+    const digest = createHmac('sha512', secretKey).update(payload).digest('hex');
     return digest === signature;
   }
 
@@ -463,4 +468,3 @@ export class PaymentProviderService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 }
-

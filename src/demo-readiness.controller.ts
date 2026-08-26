@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { Public } from './common/decorators/public.decorator';
 import { DeploymentConfigService } from './config/deployment-config.service';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -10,6 +11,7 @@ export class DemoReadinessController {
   ) {}
 
   @Get('readiness')
+  @Public()
   async readiness() {
     const deployment = this.deploymentConfig.summary();
     const database = await this.databaseStatus();
@@ -44,6 +46,8 @@ export class DemoReadinessController {
         status: 'provider_ready',
         provider: this.integrationMode(deployment.integrations, 'payments'),
         paystackReady: this.integrationMode(deployment.integrations, 'payments') === 'configured',
+        paystackWebhookUrl: 'https://YOUR-BACKEND-DOMAIN/v1/payments/webhooks/paystack/charge.success',
+        webhookSecurity: 'Paystack x-paystack-signature is verified against the raw request body.',
         endpoints: [
           'POST /v1/payments/escrow/initialize',
           'GET /v1/payments/paystack/verify/:reference',

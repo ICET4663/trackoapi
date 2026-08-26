@@ -12,5 +12,6 @@ import { PaymentProviderService } from './payment-provider.service';
   imports: [ConfigModule, PrismaModule, NotificationsModule, RequestUserModule],
   controllers: [IntegrationsController],
   providers: [KycProviderService, MapsProviderService, PaymentProviderService],
+  exports: [MapsProviderService, PaymentProviderService],
 })
 export class IntegrationsModule {}

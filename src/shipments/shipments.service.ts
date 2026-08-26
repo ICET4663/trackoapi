@@ -1,5 +1,6 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
+import { MapsProviderService } from '../integrations/maps-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
@@ -79,10 +80,24 @@ export class ShipmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly mapsProvider: MapsProviderService,
   ) {}
 
   async create(customerId: string, dto: CreateShipmentDto) {
+    await this.assertCustomerCanCreateShipment(customerId);
+
     const normalized = this.normalizeShipmentDto(dto);
+    // Price, distance, and duration are always recomputed server-side from the
+    // same formula the client previewed with — a client can never dictate what
+    // it gets charged by sending a different quotedPriceKobo in the request body.
+    const quote = this.mapsProvider.routeEstimate({
+      originLatitude: normalized.pickupLatitude ?? undefined,
+      originLongitude: normalized.pickupLongitude ?? undefined,
+      destinationLatitude: normalized.destinationLatitude ?? undefined,
+      destinationLongitude: normalized.destinationLongitude ?? undefined,
+      truckType: normalized.truckType,
+      weightTons: normalized.weightTons,
+    });
 
     try {
       const shipment = await this.prisma.shipment.create({
@@ -100,9 +115,9 @@ export class ShipmentsService {
           cargoDescription: normalized.cargoDescription,
           cargoWeightKg: normalized.cargoWeightKg,
           cargoValueKobo: dto.cargoValueKobo,
-          quotedPriceKobo: dto.quotedPriceKobo,
-          distanceKm: dto.distanceKm,
-          durationMinutes: dto.durationMinutes,
+          quotedPriceKobo: quote.quotedPriceKobo,
+          distanceKm: quote.distanceKm,
+          durationMinutes: quote.durationMinutes,
           pickupContactPhone: normalized.pickupContactPhone,
           timeline: {
             create: { status: 'DRAFT', note: 'Shipment created.' },
@@ -113,7 +128,7 @@ export class ShipmentsService {
 
       const escrow = await this.createEscrowRecord(
         shipment.id,
-        dto.quotedPriceKobo ?? dto.cargoValueKobo ?? 0,
+        quote.quotedPriceKobo,
       );
       const media = dto.cargoPhotoUri
         ? await this.createMediaRecord(customerId, shipment.id, dto.cargoPhotoUri)
@@ -150,6 +165,26 @@ export class ShipmentsService {
     }
   }
 
+  private async assertCustomerCanCreateShipment(customerId: string) {
+    let rows: Array<{ verificationStatus: string; role: string; isActive: boolean }>;
+    try {
+      rows = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string; role: string; isActive: boolean }>>(
+        'select "verificationStatus"::text as "verificationStatus", "role"::text as "role", "isActive" from "User" where "id" = $1 limit 1',
+        customerId,
+      );
+    } catch {
+      throw new InternalServerErrorException('Could not verify this customer account. Please try again.');
+    }
+
+    const customer = rows[0];
+    if (!customer || customer.role !== 'CUSTOMER' || !customer.isActive) {
+      throw new ForbiddenException('Only an active customer account can create shipments.');
+    }
+    if (customer.verificationStatus !== 'VERIFIED') {
+      throw new BadRequestException('Complete KYC approval before creating a shipment.');
+    }
+  }
+
   async list(userId: string, role: UserRole) {
     try {
       if (role === 'CUSTOMER') {
@@ -182,29 +217,49 @@ export class ShipmentsService {
   }
 
   async get(id: string, userId: string, role: UserRole) {
+    let shipment;
     try {
-      const shipment = await this.prisma.shipment.findUnique({
+      shipment = await this.prisma.shipment.findUnique({
         where: { id },
         include: { assignments: true, timeline: { orderBy: { createdAt: 'asc' } } },
       });
-      if (!shipment) throw new NotFoundException('Shipment not found.');
-
-      const canView =
-        role === 'ADMIN' ||
-        role === 'DISPATCHER' ||
-        shipment.customerId === userId ||
-        shipment.assignments.some((assignment) => assignment.driverId === userId);
-
-      if (!canView) throw new ForbiddenException('You do not have access to this shipment.');
-      return this.toShipmentRecord(shipment);
     } catch {
+      // A real infrastructure failure (DB unreachable) - fall back to preview data.
       return this.previewShipment({ id });
     }
+
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+
+    // Authorization failures must propagate as real errors, not be swallowed into a
+    // successful-looking preview response - that would silently defeat this check.
+    const canView =
+      role === 'ADMIN' ||
+      role === 'DISPATCHER' ||
+      shipment.customerId === userId ||
+      shipment.assignments.some((assignment) => assignment.driverId === userId);
+
+    if (!canView) throw new ForbiddenException('You do not have access to this shipment.');
+    return this.toShipmentRecord(shipment);
   }
 
-  async updateStatus(id: string, dto: UpdateShipmentStatusDto) {
+  async updateStatus(id: string, userId: string, role: UserRole, dto: UpdateShipmentStatusDto) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id },
+      include: { assignments: true },
+    }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+
+    const isOwner = shipment.customerId === userId;
+    const isAssignedDriver = shipment.assignments.some((assignment) => assignment.driverId === userId && assignment.status === 'ACCEPTED');
+    const isOperations = role === 'ADMIN' || role === 'DISPATCHER';
+    if (!isOwner && !isAssignedDriver && !isOperations) {
+      throw new ForbiddenException('You do not have access to this shipment.');
+    }
+
+    this.assertValidTransition(shipment.status, dto.status, role, { isOwner, isAssignedDriver, isOperations });
+
     try {
-      const shipment = await this.prisma.shipment.update({
+      const updated = await this.prisma.shipment.update({
         where: { id },
         data: {
           status: dto.status,
@@ -217,35 +272,108 @@ export class ShipmentsService {
         },
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
-      return this.toShipmentRecord(shipment);
+      return this.toShipmentRecord(updated);
     } catch {
       return this.previewShipment({ id, status: dto.status });
     }
   }
 
+  // Which statuses a shipment may move to next, and which relationship to the shipment
+  // is allowed to make that specific move. Operations staff (ADMIN/DISPATCHER) can also
+  // force CANCELLED or DISPUTED from most states to handle exceptions.
+  private readonly statusTransitions: Partial<Record<ShipmentStatus, ShipmentStatus[]>> = {
+    DRAFT: ['QUOTED', 'CANCELLED'],
+    QUOTED: ['PENDING_PAYMENT', 'CANCELLED'],
+    PENDING_PAYMENT: ['ESCROW_FUNDED', 'CANCELLED'],
+    ESCROW_FUNDED: ['DRIVER_ASSIGNED', 'CANCELLED', 'DISPUTED'],
+    DRIVER_ASSIGNED: ['DRIVER_EN_ROUTE', 'CANCELLED'],
+    DRIVER_EN_ROUTE: ['ARRIVED_PICKUP', 'CANCELLED'],
+    ARRIVED_PICKUP: ['PICKED_UP', 'CANCELLED'],
+    PICKED_UP: ['IN_TRANSIT'],
+    IN_TRANSIT: ['ARRIVED_DESTINATION', 'DISPUTED'],
+    ARRIVED_DESTINATION: ['DELIVERED'],
+    DELIVERED: ['COMPLETED', 'DISPUTED'],
+    DISPUTED: ['ESCROW_FUNDED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED'],
+    COMPLETED: [],
+    CANCELLED: [],
+  };
+
+  private assertValidTransition(
+    current: ShipmentStatus,
+    next: ShipmentStatus,
+    role: UserRole,
+    relationship: { isOwner: boolean; isAssignedDriver: boolean; isOperations: boolean },
+  ) {
+    if (current === next) return;
+
+    const allowed = this.statusTransitions[current] ?? [];
+    if (!allowed.includes(next)) {
+      throw new BadRequestException(`Shipment cannot move from ${current} to ${next}.`);
+    }
+
+    // Operations staff can drive any allowed transition. Otherwise, only the specific
+    // participant whose job that step actually is can trigger it.
+    if (relationship.isOperations) return;
+
+    const driverSteps: ShipmentStatus[] = ['DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION', 'DELIVERED'];
+    if (driverSteps.includes(next)) {
+      if (!relationship.isAssignedDriver) throw new ForbiddenException('Only the assigned driver can make this update.');
+      return;
+    }
+
+    if (next === 'CANCELLED') {
+      if (!relationship.isOwner && !relationship.isAssignedDriver) throw new ForbiddenException('You cannot cancel this shipment.');
+      return;
+    }
+
+    // Anything else (QUOTED, PENDING_PAYMENT, ESCROW_FUNDED, COMPLETED, DISPUTED
+    // transitions) is operations/system-driven, not something a customer or driver
+    // triggers directly through this endpoint.
+    throw new ForbiddenException('This status change must be made by platform operations.');
+  }
+
   async availableDrivers() {
     try {
-      const drivers = await this.prisma.user.findMany({
-        where: {
-          role: 'DRIVER',
-          isActive: true,
-          verificationStatus: { in: ['VERIFIED', 'APPROVED'] },
-        },
-        include: {
-          profile: true,
-          driverVehicles: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-      });
+      const drivers = await this.prisma.$queryRawUnsafe<Array<{
+        id: string;
+        email: string;
+        phone: string | null;
+        verificationStatus: string;
+        fullName: string | null;
+        vehicles: Array<{ id: string; plateNumber: string; type: string; capacityKg: number | null }>;
+      }>>(
+        `select
+          u."id", u."email", u."phone", u."verificationStatus"::text as "verificationStatus",
+          p."fullName",
+          coalesce(
+            json_agg(
+              json_build_object(
+                'id', v."id",
+                'plateNumber', v."plateNumber",
+                'type', v."type",
+                'capacityKg', v."capacityKg"
+              )
+            ) filter (where v."id" is not null),
+            '[]'::json
+          ) as "vehicles"
+        from "User" u
+        left join "Profile" p on p."userId" = u."id"
+        left join "Vehicle" v on v."assignedDriverId" = u."id"
+        where u."role" = 'DRIVER'::"UserRole"
+          and u."isActive" = true
+          and u."verificationStatus" = 'VERIFIED'::"VerificationStatus"
+        group by u."id", p."fullName"
+        order by u."createdAt" desc
+        limit 50`,
+      );
 
       return drivers.map((driver) => ({
         id: driver.id,
-        fullName: driver.profile?.fullName ?? driver.email,
+        fullName: driver.fullName ?? driver.email,
         email: driver.email,
         phone: driver.phone,
         verificationStatus: driver.verificationStatus,
-        vehicles: driver.driverVehicles.map((vehicle) => ({
+        vehicles: driver.vehicles.map((vehicle) => ({
           id: vehicle.id,
           plateNumber: vehicle.plateNumber,
           type: vehicle.type,
@@ -301,8 +429,9 @@ export class ShipmentsService {
 
     const driverId = body.driverId ?? 'preview-driver';
 
+    let shipment, escrowRows, driver;
     try {
-      const [shipment, escrowRows, driver] = await Promise.all([
+      [shipment, escrowRows, driver] = await Promise.all([
         this.prisma.shipment.findUnique({ where: { id: shipmentId } }),
         this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
           'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
@@ -310,58 +439,65 @@ export class ShipmentsService {
         ),
         this.prisma.user.findUnique({ where: { id: driverId }, include: { profile: true } }),
       ]);
-
-      if (!shipment) throw new NotFoundException('Shipment not found.');
-      const escrow = escrowRows[0];
-      if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
-        throw new BadRequestException('Escrow must be funded before assigning a driver.');
-      }
-      if (!driver || driver.role !== 'DRIVER' || !driver.isActive || !['VERIFIED', 'APPROVED'].includes(driver.verificationStatus)) {
-        throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
-      }
-
-      const assignment = await this.prisma.driverAssignment.create({
-        data: {
-          shipmentId,
-          driverId,
-          vehicleId: body.vehicleId,
-          status: 'OFFERED',
-        },
-        include: {
-          driver: { include: { profile: true } },
-          vehicle: true,
-          shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
-        },
-      });
-
-      await this.prisma.shipment.update({
-        where: { id: shipmentId },
-        data: {
-          status: 'DRIVER_ASSIGNED',
-          timeline: {
-            create: {
-              status: 'DRIVER_ASSIGNED',
-              note: 'Driver assignment offer sent.',
-            },
-          },
-        },
-      });
-
-      await this.notifications.create({
-        userId: driverId,
-        role: 'DRIVER',
-        title: 'New shipment offer',
-        body: 'A dispatcher sent you a shipment assignment offer.',
-        tone: 'INFO',
-        entity: 'DriverAssignment',
-        entityId: assignment.id,
-        actionUrl: `/driver/jobs/${assignment.id}`,
-      });
-
-      return this.toAssignmentRecord(assignment);
     } catch {
+      // A real infrastructure failure (DB unreachable) - fall back to preview data.
       return this.previewAssignment({ shipmentId, driverId, vehicleId: body.vehicleId, status: 'OFFERED' });
     }
+
+    // Business-rule failures below must propagate as real errors. Swallowing them into a
+    // fake "assignment created" response (as this used to do) would tell dispatch an
+    // assignment succeeded when nothing was actually written to the database.
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+    if (!shipment.adminApproved) {
+      throw new BadRequestException('This shipment has not been approved by an admin yet.');
+    }
+    const escrow = escrowRows[0];
+    if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
+      throw new BadRequestException('Escrow must be funded before assigning a driver.');
+    }
+    if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
+      throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
+    }
+
+    const assignment = await this.prisma.driverAssignment.create({
+      data: {
+        shipmentId,
+        driverId,
+        vehicleId: body.vehicleId,
+        status: 'OFFERED',
+      },
+      include: {
+        driver: { include: { profile: true } },
+        vehicle: true,
+        shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
+      },
+    });
+
+    await this.prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        status: 'DRIVER_ASSIGNED',
+        timeline: {
+          create: {
+            status: 'DRIVER_ASSIGNED',
+            note: 'Driver assignment offer sent.',
+          },
+        },
+      },
+    });
+
+    await this.notifications.create({
+      userId: driverId,
+      role: 'DRIVER',
+      title: 'New shipment offer',
+      body: 'A dispatcher sent you a shipment assignment offer.',
+      tone: 'INFO',
+      entity: 'DriverAssignment',
+      entityId: assignment.id,
+      actionUrl: `/driver/jobs/${assignment.id}`,
+    });
+
+    return this.toAssignmentRecord(assignment);
   }
 
   async respondToAssignment(assignmentId: string, driverId: string, action: 'ACCEPT' | 'REJECT') {
@@ -421,8 +557,22 @@ export class ShipmentsService {
     }
   }
 
-  async addTimelineEvent(shipmentId: string, event: Record<string, unknown>) {
+  async addTimelineEvent(shipmentId: string, userId: string, role: UserRole, event: Record<string, unknown>) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: { assignments: true },
+    }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+
+    const isOwner = shipment.customerId === userId;
+    const isAssignedDriver = shipment.assignments.some((assignment) => assignment.driverId === userId && assignment.status === 'ACCEPTED');
+    const isOperations = role === 'ADMIN' || role === 'DISPATCHER';
+    if (!isOwner && !isAssignedDriver && !isOperations) {
+      throw new ForbiddenException('You do not have access to this shipment.');
+    }
+
     try {
+      const nextStatus = String(event.status ?? shipment.status ?? 'IN_TRANSIT');
       const rows = await this.prisma.$queryRawUnsafe<
         {
           id: string;
@@ -435,8 +585,17 @@ export class ShipmentsService {
          values ($1, cast($2 as "ShipmentStatus"), $3)
          returning "id", "status"::text as "status", "note", "createdAt"`,
         shipmentId,
-        String(event.status ?? 'IN_TRANSIT'),
+        nextStatus,
         event.note ? String(event.note) : String(event.label ?? 'Shipment updated'),
+      );
+
+      await this.prisma.$executeRawUnsafe(
+        `update "Shipment"
+         set "status" = cast($2 as "ShipmentStatus"),
+             "updatedAt" = current_timestamp
+         where "id" = $1`,
+        shipmentId,
+        nextStatus,
       );
 
       if (rows[0]) return this.toTimelineRecord(rows[0]);
@@ -480,6 +639,54 @@ export class ShipmentsService {
     };
   }
 
+  // Funded shipments awaiting admin sign-off before dispatch can assign a driver.
+  async pendingReview() {
+    const shipments = await this.prisma.shipment.findMany({
+      where: {
+        adminApproved: false,
+        status: { notIn: ['DRAFT', 'QUOTED', 'PENDING_PAYMENT', 'CANCELLED'] },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    }).catch(() => []);
+    return shipments.map((shipment) => this.toShipmentRecord(shipment));
+  }
+
+  async approveShipment(shipmentId: string, reviewerId: string, actorRole: UserRole) {
+    if (actorRole !== 'ADMIN' && actorRole !== 'DISPATCHER') {
+      throw new ForbiddenException('Only platform operations can approve a shipment.');
+    }
+
+    const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId } }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+    if (shipment.adminApproved) return this.toShipmentRecord(shipment);
+
+    const updated = await this.prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        adminApproved: true,
+        adminApprovedAt: new Date(),
+        adminApprovedById: reviewerId,
+        timeline: {
+          create: { status: shipment.status, note: 'Approved by platform operations - ready for driver matching.' },
+        },
+      },
+      include: { timeline: { orderBy: { createdAt: 'asc' } } },
+    });
+
+    await this.notifications.create({
+      role: 'DISPATCHER',
+      title: 'Shipment approved',
+      body: `${shipment.reference} was approved and is ready for driver assignment.`,
+      tone: 'SUCCESS',
+      entity: 'Shipment',
+      entityId: shipmentId,
+      actionUrl: '/dispatcher/assignment',
+    });
+
+    return this.toShipmentRecord(updated);
+  }
+
   async releaseEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
     if (actorRole !== 'ADMIN' && actorRole !== 'DISPATCHER') {
       throw new ForbiddenException('Only platform operations can release escrow.');
@@ -521,6 +728,58 @@ export class ShipmentsService {
         platformApproved: true,
       });
     }
+  }
+
+  async submitReview(shipmentId: string, customerId: string, input: { rating?: number; comment?: string }) {
+    const rating = Number(input.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      throw new BadRequestException('Rating must be a whole number from 1 to 5.');
+    }
+
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: { assignments: { where: { status: 'ACCEPTED' }, take: 1 } },
+    }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+    if (shipment.customerId !== customerId) {
+      throw new ForbiddenException('Only the customer on this shipment can leave a review.');
+    }
+    if (!['DELIVERED', 'COMPLETED'].includes(shipment.status)) {
+      throw new BadRequestException('You can only review a shipment after delivery.');
+    }
+
+    const existing = await this.prisma.review.findUnique({ where: { shipmentId } }).catch(() => null);
+    if (existing) throw new BadRequestException('This shipment has already been reviewed.');
+
+    const driverId = shipment.assignments[0]?.driverId;
+    const review = await this.prisma.review.create({
+      data: {
+        shipmentId,
+        customerId,
+        driverId,
+        rating,
+        comment: input.comment?.trim() || null,
+      },
+    });
+
+    if (driverId) {
+      await this.notifications.create({
+        userId: driverId,
+        title: 'New rating received',
+        body: `A customer rated a completed trip ${rating}/5.`,
+        tone: rating >= 4 ? 'SUCCESS' : 'INFO',
+        entity: 'Review',
+        entityId: review.id,
+        actionUrl: '/driver/earnings',
+      });
+    }
+
+    return review;
+  }
+
+  async getReview(shipmentId: string) {
+    const review = await this.prisma.review.findUnique({ where: { shipmentId } }).catch(() => null);
+    return review;
   }
 
   async disputeEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
@@ -955,5 +1214,3 @@ export class ShipmentsService {
     };
   }
 }
-
-

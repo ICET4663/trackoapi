@@ -134,9 +134,11 @@ export class CommunicationService {
   }
 
   updateTypingStatus(conversationId: string, userId: string, dto: TypingStatusDto) {
+    // userId always comes from the verified session, never from the request body -
+    // otherwise any caller could report typing status (and thus presence) as anyone else.
     return {
       conversationId,
-      userId: dto.userId ?? userId,
+      userId,
       isTyping: dto.isTyping,
       updatedAt: new Date().toISOString(),
     };

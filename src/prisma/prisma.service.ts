@@ -34,12 +34,20 @@ export class PrismaService implements OnModuleDestroy {
     return this.db.otpCode;
   }
 
+  get payout() {
+    return this.db.payout;
+  }
+
   get profile() {
     return this.db.profile;
   }
 
   get refreshToken() {
     return this.db.refreshToken;
+  }
+
+  get review() {
+    return this.db.review;
   }
 
   get shipment() {
