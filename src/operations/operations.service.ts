@@ -537,6 +537,13 @@ export class OperationsService {
 
   async resolveDispute(id: string, body: Record<string, unknown>, actor: OperationActor) {
     this.assertCanOperate(actor.role);
+    const decision = String(body.decision ?? '').toUpperCase();
+    const resolution = String(body.resolution ?? 'Resolved by operations.');
+    const shipmentStatus: ShipmentStatus = decision === 'REFUND'
+      ? 'CANCELLED'
+      : decision === 'RELEASE'
+        ? 'COMPLETED'
+        : 'IN_TRANSIT';
 
     try {
       await this.prisma.$queryRawUnsafe(
@@ -546,7 +553,7 @@ export class OperationsService {
              "resolvedAt" = current_timestamp,
              "updatedAt" = current_timestamp
          where "id" = $2`,
-        String(body.resolution ?? 'Resolved by operations.'),
+        resolution,
         id,
       );
     } catch (error) {
@@ -556,7 +563,8 @@ export class OperationsService {
 
     try {
       await this.audit(actor, 'DISPUTE_RESOLVED', 'Dispute', id, {
-        resolution: body.resolution,
+        decision: decision || 'RESUME',
+        resolution,
         shipmentId: body.shipmentId,
       });
 
@@ -564,11 +572,11 @@ export class OperationsService {
         await this.prisma.shipment.update({
           where: { id: String(body.shipmentId) },
           data: {
-            status: 'IN_TRANSIT',
+            status: shipmentStatus,
             timeline: {
               create: {
-                status: 'IN_TRANSIT',
-                note: String(body.resolution ?? 'Dispute resolved. Shipment returned to operations queue.'),
+                status: shipmentStatus,
+                note: resolution,
               },
             },
           },
@@ -578,7 +586,7 @@ export class OperationsService {
       await this.notifications.create({
         role: 'CUSTOMER',
         title: 'Dispute resolved',
-        body: String(body.resolution ?? 'Your dispute has been reviewed by operations.'),
+        body: resolution,
         tone: 'SUCCESS',
         entity: 'Dispute',
         entityId: id,
@@ -590,7 +598,9 @@ export class OperationsService {
     return {
       id,
       status: 'RESOLVED',
-      resolution: String(body.resolution ?? 'Resolved by operations.'),
+      resolution,
+      decision: decision || 'RESUME',
+      shipmentStatus,
       resolvedAt: new Date().toISOString(),
     };
   }
