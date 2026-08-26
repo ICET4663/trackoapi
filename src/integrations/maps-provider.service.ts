@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 type PlaceSuggestion = {
@@ -77,9 +77,24 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
 
 const ROAD_FACTOR = 1.29;
 const AVERAGE_SPEED_KMH = 58;
-const BASE_FARE_NGN = 45_000;
-const PER_KM_RATE_NGN = 660;
-const REFERENCE_WEIGHT_TONS = 20;
+const SERVICE_FEE_RATE = 0.035;
+const PRICING_VERSION = '2026-08-mvp-1';
+
+type TruckPricingProfile = {
+  label: string;
+  capacityTons: number;
+  baseFareNgn: number;
+  perKmRateNgn: number;
+  minimumFareNgn: number;
+};
+
+const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
+  flatbed: { label: 'Flatbed', capacityTons: 30, baseFareNgn: 55_000, perKmRateNgn: 720, minimumFareNgn: 95_000 },
+  box: { label: 'Box truck', capacityTons: 15, baseFareNgn: 50_000, perKmRateNgn: 680, minimumFareNgn: 90_000 },
+  tipper: { label: 'Tipper', capacityTons: 30, baseFareNgn: 60_000, perKmRateNgn: 760, minimumFareNgn: 100_000 },
+  tanker: { label: 'Tanker', capacityTons: 33, baseFareNgn: 70_000, perKmRateNgn: 820, minimumFareNgn: 115_000 },
+  truck: { label: 'Standard truck', capacityTons: 20, baseFareNgn: 50_000, perKmRateNgn: 700, minimumFareNgn: 90_000 },
+};
 
 @Injectable()
 export class MapsProviderService {
@@ -148,43 +163,60 @@ export class MapsProviderService {
     );
     const distanceKm = Math.max(1, straightKm * ROAD_FACTOR);
     const durationMinutes = Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
+    const profile = this.truckProfile(input.truckType);
     const safeWeight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0
       ? Number(input.weightTons)
-      : REFERENCE_WEIGHT_TONS;
-    const weightMultiplier = 0.6 + 0.4 * (safeWeight / REFERENCE_WEIGHT_TONS);
-    const truckMultiplier = this.truckMultiplier(input.truckType);
-    const linehaulNgn = distanceKm * PER_KM_RATE_NGN * weightMultiplier * truckMultiplier;
-    const subtotalNgn = BASE_FARE_NGN + linehaulNgn;
-    const escrowFeeNgn = Math.round(subtotalNgn * 0.035);
-    const quotedPriceKobo = Math.max(8500000, Math.round((subtotalNgn + escrowFeeNgn) * 100));
+      : 1;
+    if (safeWeight > profile.capacityTons) {
+      throw new BadRequestException(`${profile.label} supports up to ${profile.capacityTons} tons. Select a larger truck or reduce the cargo weight.`);
+    }
+    const loadUtilization = safeWeight / profile.capacityTons;
+    const weightMultiplier = 0.75 + 0.35 * Math.min(loadUtilization, 1);
+    const distancePricing = this.distancePricing(distanceKm);
+    const linehaulNgn = distanceKm * profile.perKmRateNgn * distancePricing.multiplier * weightMultiplier;
+    const subtotalNgn = profile.baseFareNgn + linehaulNgn;
+    const serviceFeeNgn = Math.round(subtotalNgn * SERVICE_FEE_RATE);
+    const quotedPriceKobo = Math.max(profile.minimumFareNgn * 100, Math.round((subtotalNgn + serviceFeeNgn) * 100));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     return {
-      provider: this.status().provider,
+      provider: 'coordinate',
       distanceKm: roundedDistanceKm,
       durationMinutes,
       quotedPriceKobo,
       currency: 'NGN',
       pricingMode: 'coordinate_estimate',
+      pricingVersion: PRICING_VERSION,
+      quoteValidMinutes: 30,
       pricingBreakdown: {
-        baseFareKobo: BASE_FARE_NGN * 100,
+        baseFareKobo: profile.baseFareNgn * 100,
         linehaulKobo: Math.round(linehaulNgn * 100),
-        escrowFeeKobo: escrowFeeNgn * 100,
-        perKmRateKobo: PER_KM_RATE_NGN * 100,
+        escrowFeeKobo: serviceFeeNgn * 100,
+        perKmRateKobo: profile.perKmRateNgn * 100,
         roadFactor: ROAD_FACTOR,
         averageSpeedKmh: AVERAGE_SPEED_KMH,
         weightTons: safeWeight,
         weightMultiplier: Number(weightMultiplier.toFixed(2)),
-        truckMultiplier,
+        truckMultiplier: 1,
+        truckType: profile.label,
+        truckCapacityTons: profile.capacityTons,
+        loadUtilization: Number(loadUtilization.toFixed(3)),
+        distanceBand: distancePricing.band,
+        distanceMultiplier: distancePricing.multiplier,
+        serviceFeeRate: SERVICE_FEE_RATE,
       },
     };
   }
 
-  private truckMultiplier(truckType = '') {
-    if (/tanker/i.test(truckType)) return 1.25;
-    if (/tipper|flatbed/i.test(truckType)) return 1.15;
-    if (/box/i.test(truckType)) return 1.08;
-    return 1;
+  private truckProfile(truckType = '') {
+    const key = Object.keys(TRUCK_PRICING).find((candidate) => truckType.toLowerCase().includes(candidate)) ?? 'truck';
+    return TRUCK_PRICING[key];
+  }
+
+  private distancePricing(distanceKm: number) {
+    if (distanceKm <= 50) return { band: 'LOCAL', multiplier: 1.15 };
+    if (distanceKm <= 300) return { band: 'REGIONAL', multiplier: 1 };
+    return { band: 'LONG_HAUL', multiplier: 0.9 };
   }
 
   private async googlePlaces(query: string, key: string): Promise<PlaceSuggestion[]> {
