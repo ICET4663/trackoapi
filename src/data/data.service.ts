@@ -162,21 +162,71 @@ export class DataService {
   }
 
   private async dispatcherDisputes() {
-    const shipments = await this.prisma.shipment.findMany({
-      where: { status: 'DISPUTED' },
-      orderBy: { updatedAt: 'desc' },
-      take: 100,
-    });
+    type DisputeRow = {
+      id: string;
+      shipmentId: string;
+      reference: string;
+      pickupLabel: string;
+      destinationLabel: string;
+      reason: string;
+      description: string | null;
+      priority: string;
+      status: string;
+      updatedAt: Date | string;
+    };
+    type LegacyShipmentRow = {
+      id: string;
+      reference: string;
+      pickupLabel: string;
+      destinationLabel: string;
+      updatedAt: Date | string;
+    };
 
-    return shipments.map((shipment) => ({
-      id: `dispute-${shipment.reference}`,
-      shipmentId: shipment.reference,
-      category: 'Shipment issue',
-      title: 'Shipment marked as disputed',
-      summary: `${shipment.pickupLabel} to ${shipment.destinationLabel}`,
-      age: this.ageLabel(shipment.updatedAt),
-      status: 'Open',
+    const [disputes, legacyShipments] = await Promise.all([
+      this.prisma.$queryRawUnsafe<DisputeRow[]>(
+        `select d."id", d."shipmentId", d."reason", d."description", d."priority",
+                d."status"::text as "status", d."updatedAt",
+                s."reference", s."pickupLabel", s."destinationLabel"
+         from "Dispute" d
+         join "Shipment" s on s."id" = d."shipmentId"
+         order by d."updatedAt" desc
+         limit 100`,
+      ),
+      this.prisma.$queryRawUnsafe<LegacyShipmentRow[]>(
+        `select s."id", s."reference", s."pickupLabel", s."destinationLabel", s."updatedAt"
+         from "Shipment" s
+         where s."status" = 'DISPUTED'::"ShipmentStatus"
+           and not exists (select 1 from "Dispute" d where d."shipmentId" = s."id")
+         order by s."updatedAt" desc
+         limit 100`,
+      ),
+    ]);
+
+    const records = disputes.map((dispute) => ({
+      id: dispute.id,
+      shipmentId: dispute.reference,
+      category: /payment|escrow|refund/i.test(dispute.reason) ? 'Payment' : /late|delay/i.test(dispute.reason) ? 'Late delivery' : 'Delivery issue',
+      title: dispute.reason,
+      reason: dispute.reason,
+      description: dispute.description ?? undefined,
+      priority: dispute.priority,
+      summary: `${dispute.pickupLabel} to ${dispute.destinationLabel}`,
+      age: this.ageLabel(new Date(dispute.updatedAt)),
+      status: ['RESOLVED', 'REJECTED'].includes(dispute.status) ? 'Resolved' : dispute.status === 'IN_REVIEW' ? 'Escalated' : 'Open',
     }));
+
+    return records.concat(legacyShipments.map((shipment) => ({
+      id: `legacy-${shipment.id}`,
+      shipmentId: shipment.reference,
+      category: 'Delivery issue',
+      title: 'Shipment marked as disputed',
+      reason: 'Legacy delivery dispute',
+      description: undefined,
+      priority: 'MEDIUM',
+      summary: `${shipment.pickupLabel} to ${shipment.destinationLabel}`,
+      age: this.ageLabel(new Date(shipment.updatedAt)),
+      status: 'Open',
+    })));
   }
 
   private async platformUsers() {

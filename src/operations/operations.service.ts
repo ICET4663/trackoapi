@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -47,6 +47,14 @@ type EscrowLedgerRow = {
   disputeWindowClear: boolean;
   platformApproved: boolean;
   updatedAt: Date | string;
+};
+
+type OperationDisputeRow = {
+  id: string;
+  status: string;
+  priority: string;
+  reason: string;
+  createdAt: Date | string;
 };
 
 @Injectable()
@@ -467,7 +475,36 @@ export class OperationsService {
 
   async createDispute(body: Record<string, unknown>, actor: OperationActor) {
     const id = `DSP-${Date.now()}`;
-    const shipmentId = body.shipmentId ? String(body.shipmentId) : undefined;
+    const shipmentIdentifier = body.shipmentId ? String(body.shipmentId) : undefined;
+    const shipment = shipmentIdentifier
+      ? await this.prisma.shipment.findFirst({
+          where: { OR: [{ id: shipmentIdentifier }, { reference: shipmentIdentifier }] },
+          select: { id: true, reference: true },
+        })
+      : null;
+    if (shipmentIdentifier && !shipment) throw new BadRequestException('Shipment was not found.');
+    const shipmentId = shipment?.id;
+
+    if (shipmentId) {
+      const [existing] = await this.prisma.$queryRawUnsafe<OperationDisputeRow[]>(
+        `select "id", "status"::text as "status", "priority", "reason", "createdAt"
+         from "Dispute"
+         where "shipmentId" = $1 and "status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")
+         order by "createdAt" desc
+         limit 1`,
+        shipmentId,
+      );
+      if (existing) {
+        return {
+          id: existing.id,
+          shipmentId: shipment.reference,
+          status: existing.status,
+          priority: existing.priority,
+          reason: existing.reason,
+          createdAt: new Date(existing.createdAt).toISOString(),
+        };
+      }
+    }
 
     // The insert is the actual dispute record: if it fails, the caller must see a real
     // error rather than a fabricated "OPEN" dispute that was never saved.
@@ -498,18 +535,24 @@ export class OperationsService {
       });
 
       if (shipmentId) {
-        await this.prisma.shipment.update({
-          where: { id: shipmentId },
-          data: {
-            status: 'DISPUTED',
-            timeline: {
-              create: {
-                status: 'DISPUTED',
-                note: String(body.reason ?? 'Dispute opened.'),
+        await Promise.all([
+          this.prisma.shipment.update({
+            where: { id: shipmentId },
+            data: {
+              status: 'DISPUTED',
+              timeline: {
+                create: {
+                  status: 'DISPUTED',
+                  note: String(body.description ?? body.reason ?? 'Dispute opened.'),
+                },
               },
             },
-          },
-        });
+          }),
+          this.prisma.$executeRawUnsafe(
+            `update "Escrow" set "status" = 'DISPUTED'::"EscrowStatus", "updatedAt" = current_timestamp where "shipmentId" = $1`,
+            shipmentId,
+          ),
+        ]);
       }
 
       await this.notifications.create({
@@ -527,7 +570,7 @@ export class OperationsService {
 
     return {
       id,
-      shipmentId,
+      shipmentId: shipment?.reference,
       status: 'OPEN',
       priority: String(body.priority ?? 'MEDIUM'),
       reason: String(body.reason ?? 'Shipment support dispute'),
@@ -539,6 +582,14 @@ export class OperationsService {
     this.assertCanOperate(actor.role);
     const decision = String(body.decision ?? '').toUpperCase();
     const resolution = String(body.resolution ?? 'Resolved by operations.');
+    const shipmentIdentifier = body.shipmentId ? String(body.shipmentId) : undefined;
+    const shipment = shipmentIdentifier
+      ? await this.prisma.shipment.findFirst({
+          where: { OR: [{ id: shipmentIdentifier }, { reference: shipmentIdentifier }] },
+          select: { id: true, reference: true, customerId: true },
+        })
+      : null;
+    if (shipmentIdentifier && !shipment) throw new BadRequestException('Shipment was not found.');
     const shipmentStatus: ShipmentStatus = decision === 'REFUND'
       ? 'CANCELLED'
       : decision === 'RELEASE'
@@ -546,7 +597,7 @@ export class OperationsService {
         : 'IN_TRANSIT';
 
     try {
-      await this.prisma.$queryRawUnsafe(
+      const updated = await this.prisma.$executeRawUnsafe(
         `update "Dispute"
          set "status" = 'RESOLVED'::"DisputeStatus",
              "resolution" = $1,
@@ -556,6 +607,20 @@ export class OperationsService {
         resolution,
         id,
       );
+      if (updated === 0) {
+        if (!shipment) throw new BadRequestException('Dispute was not found.');
+        await this.prisma.$executeRawUnsafe(
+          `insert into "Dispute"
+             ("id", "shipmentId", "userId", "reason", "description", "priority", "status", "resolution", "resolvedAt")
+           values
+             ($1, $2, $3, 'Legacy delivery dispute', 'Imported from a shipment that was already marked as disputed.',
+              'MEDIUM', 'RESOLVED'::"DisputeStatus", $4, current_timestamp)`,
+          id,
+          shipment.id,
+          shipment.customerId,
+          resolution,
+        );
+      }
     } catch (error) {
       this.logger.error(`resolveDispute(${id}) failed to persist resolution: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException('Could not resolve the dispute. Please try again.');
@@ -565,12 +630,12 @@ export class OperationsService {
       await this.audit(actor, 'DISPUTE_RESOLVED', 'Dispute', id, {
         decision: decision || 'RESUME',
         resolution,
-        shipmentId: body.shipmentId,
+        shipmentId: shipment?.id,
       });
 
-      if (body.shipmentId) {
+      if (shipment) {
         await this.prisma.shipment.update({
-          where: { id: String(body.shipmentId) },
+          where: { id: shipment.id },
           data: {
             status: shipmentStatus,
             timeline: {
@@ -601,6 +666,7 @@ export class OperationsService {
       resolution,
       decision: decision || 'RESUME',
       shipmentStatus,
+      shipmentId: shipment?.reference,
       resolvedAt: new Date().toISOString(),
     };
   }
