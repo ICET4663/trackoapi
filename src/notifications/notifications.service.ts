@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -31,6 +31,8 @@ type NotificationRow = {
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async create(input: NotificationInput) {
@@ -48,12 +50,71 @@ export class NotificationsService {
         input.entityId ?? null,
         input.actionUrl ?? null,
       );
-      if (rows[0]) return this.toRecord(rows[0]);
+      if (rows[0]) {
+        const record = this.toRecord(rows[0]);
+        // Best-effort: registerPushToken() has always stored real device tokens, but
+        // nothing ever actually sent to them - a closed app never got notified of
+        // anything (shipment updates, new messages, dispute resolutions) until the user
+        // happened to reopen it and check the in-app list. Push delivery failing must
+        // never fail notification creation itself, hence the separate try/catch.
+        await this.sendPushNotifications(input).catch((error) => {
+          this.logger.error(`Push delivery failed for notification ${record.id}: ${this.errorMessage(error)}`);
+        });
+        return record;
+      }
     } catch {
       // Preview fallback below.
     }
 
     return this.previewNotification(input);
+  }
+
+  // Expo's push service needs no API key - just the recipient's Expo push token(s), sent
+  // in batches of up to 100 per request.
+  private async sendPushNotifications(input: NotificationInput) {
+    const tokens = await this.resolvePushTokens(input);
+    if (!tokens.length) return;
+
+    const messages = tokens.map((token) => ({
+      to: token,
+      title: input.title,
+      body: input.body,
+      data: { entity: input.entity, entityId: input.entityId, actionUrl: input.actionUrl },
+    }));
+
+    for (let i = 0; i < messages.length; i += 100) {
+      const batch = messages.slice(i, i + 100);
+      const response = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(batch),
+      });
+      if (!response.ok) {
+        this.logger.warn(`Expo push send returned ${response.status} for a batch of ${batch.length} tokens`);
+      }
+    }
+  }
+
+  private async resolvePushTokens(input: NotificationInput): Promise<string[]> {
+    if (input.userId && !input.userId.startsWith('preview-')) {
+      const rows = await this.prisma.$queryRawUnsafe<{ token: string }[]>(
+        'select "token" from "PushToken" where "userId" = $1',
+        input.userId,
+      );
+      return rows.map((row) => row.token);
+    }
+    if (input.role) {
+      const rows = await this.prisma.$queryRawUnsafe<{ token: string }[]>(
+        `select pt."token" from "PushToken" pt join "User" u on u."id" = pt."userId" where u."role" = cast($1 as "UserRole")`,
+        input.role,
+      );
+      return rows.map((row) => row.token);
+    }
+    return [];
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   async list(userId: string, role: UserRole) {
