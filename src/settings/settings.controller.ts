@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { RequestUserService } from '../common/request-user.service';
 import { SettingsService } from './settings.service';
@@ -274,8 +274,9 @@ export class SettingsController {
 
   @Patch('admin/platform-settings/:key')
   async updatePlatformSetting(@Param('key') key: string, @Body() body: { value?: string }, @Headers('authorization') authorization?: string) {
-    await this.requestUser.requireRole(authorization, ['ADMIN']);
-    return { ...this.settingsService.platformSetting(key), value: body.value ?? this.settingsService.platformSetting(key).value };
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
+    if (body.value === undefined) throw new BadRequestException('A value is required.');
+    return this.settingsService.updatePlatformSetting(key, body.value, user.sub);
   }
 
   @Get('admin/payout-requests')

@@ -113,3 +113,80 @@ describe('SettingsService.requestDriverWithdrawal never validates against the fa
     expect(result.status).toBe('PENDING');
   });
 });
+
+// updatePlatformSetting() used to just echo `{ ...defaults, value: body.value }` straight
+// back to the caller with no database write at all - toggling e.g. maintenance mode in the
+// admin UI looked like it saved, but reverted to the hardcoded default on the next load.
+describe('SettingsService platform settings are actually persisted', () => {
+  let findMany: jest.Mock;
+  let findUnique: jest.Mock;
+  let upsert: jest.Mock;
+  let auditLogCreate: jest.Mock;
+  let service: SettingsService;
+
+  beforeEach(() => {
+    findMany = jest.fn().mockResolvedValue([]);
+    findUnique = jest.fn().mockResolvedValue(null);
+    upsert = jest.fn().mockResolvedValue({ key: 'maintenanceMode', value: 'true' });
+    auditLogCreate = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      platformSetting: { findMany, findUnique, upsert },
+      auditLog: { create: auditLogCreate },
+    } as unknown as PrismaService;
+    const notifications = {} as unknown as NotificationsService;
+    const config = { get: jest.fn() } as unknown as ConfigService;
+    service = new SettingsService(prisma, notifications, config);
+  });
+
+  it('falls back to catalog defaults for settings that have never been changed', async () => {
+    const settings = await service.platformSettings();
+
+    const maintenance = settings.find((entry) => entry.key === 'maintenanceMode');
+    expect(maintenance).toMatchObject({ value: 'false', displayValue: 'Off' });
+  });
+
+  it('reflects a real stored override instead of the default', async () => {
+    findMany.mockResolvedValue([{ key: 'maintenanceMode', value: 'true' }]);
+
+    const settings = await service.platformSettings();
+
+    const maintenance = settings.find((entry) => entry.key === 'maintenanceMode');
+    expect(maintenance).toMatchObject({ value: 'true', displayValue: 'On' });
+  });
+
+  it('actually upserts a real row and audit-logs the change, keyed to the acting admin', async () => {
+    const result = await service.updatePlatformSetting('maintenanceMode', 'true', 'admin-1');
+
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { key: 'maintenanceMode' },
+      update: { value: 'true', updatedById: 'admin-1' },
+      create: { key: 'maintenanceMode', value: 'true', updatedById: 'admin-1' },
+    }));
+    expect(auditLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ actorId: 'admin-1', action: 'PLATFORM_SETTING_UPDATED' }),
+    }));
+    expect(result).toMatchObject({ key: 'maintenanceMode', value: 'true', displayValue: 'On' });
+  });
+
+  it('rejects an unknown setting key rather than silently creating one', async () => {
+    await expect(service.updatePlatformSetting('notARealSetting', 'x', 'admin-1')).rejects.toThrow(
+      'Unknown platform setting',
+    );
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-boolean value for a boolean setting', async () => {
+    await expect(service.updatePlatformSetting('maintenanceMode', 'yes', 'admin-1')).rejects.toThrow(
+      'must be true or false',
+    );
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('throws a real error instead of a fake success when the write fails', async () => {
+    upsert.mockRejectedValue(new Error('connection reset'));
+
+    await expect(service.updatePlatformSetting('maintenanceMode', 'true', 'admin-1')).rejects.toThrow(
+      'Could not save',
+    );
+  });
+});

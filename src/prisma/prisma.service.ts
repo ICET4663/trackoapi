@@ -42,6 +42,10 @@ export class PrismaService implements OnModuleDestroy {
     return this.db.payout;
   }
 
+  get platformSetting() {
+    return this.db.platformSetting;
+  }
+
   get paymentMethod() {
     return this.db.paymentMethod;
   }

@@ -159,6 +159,7 @@ model User {
   driverAssignments DriverAssignment[]
   messages      Message[]
   auditLogs     AuditLog[]
+  platformSettingsUpdated PlatformSetting[]
   savedAddresses SavedAddress[]
   paymentMethods PaymentMethod[]
   billingCharges BillingCharge[]
@@ -728,4 +729,19 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   actor User? @relation(fields: [actorId], references: [id])
+}
+
+// Global admin-facing network config (maintenance mode, platform fee, pause
+// registrations, and so on) - previously the admin "Platform settings" screen was fully
+// wired end-to-end on the frontend but the backend never persisted a write at all, so
+// toggling e.g. maintenance mode silently did nothing and reverted on the next load.
+model PlatformSetting {
+  key         String   @id
+  value       String
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+
+  updatedBy User? @relation(fields: [updatedById], references: [id])
+
+  @@index([updatedById])
 }

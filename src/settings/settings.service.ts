@@ -1518,33 +1518,93 @@ export class SettingsService {
     return next;
   }
 
-  platformSettings() {
-    return [
-      {
-        key: 'fee',
-        title: 'Platform fee',
-        description: 'Default platform commission for preview shipments.',
-        label: 'Fee',
-        value: '7.5',
-        displayValue: '7.5%',
-        helper: 'Preview only',
-        type: 'number',
-      },
-      {
-        key: 'payout',
-        title: 'Payout schedule',
-        description: 'Driver payout timing.',
-        label: 'Schedule',
-        value: 'weekly',
-        displayValue: 'Weekly',
-        helper: 'Preview only',
-        type: 'text',
-      },
-    ];
+  // updatePlatformSetting() used to just echo `{ ...defaults, value: body.value }` straight
+  // back to the caller with no database write at all - an admin toggling e.g. maintenance
+  // mode saw it "save", but the very next load reverted to this hardcoded default. These
+  // are now real, persisted, audit-logged rows. Note: persisting the value is the whole of
+  // this fix - actually enforcing what each flag means (blocking signups, showing a
+  // maintenance banner, requiring staff 2FA, skipping manual KYC review) is separate,
+  // larger work nothing in the codebase currently reads these flags to act on.
+  private readonly platformSettingCatalog: {
+    key: string;
+    title: string;
+    description: string;
+    label: string;
+    defaultValue: string;
+    helper: string;
+    type: 'number' | 'text' | 'boolean';
+  }[] = [
+    { key: 'fee', title: 'Platform fee', description: 'Default platform commission applied to new shipments.', label: 'Fee (%)', defaultValue: '7.5', helper: 'Applies to newly created shipments only; shipments already in progress keep their original rate.', type: 'number' },
+    { key: 'payout', title: 'Payout schedule', description: 'How often driver payout requests are reviewed for release.', label: 'Schedule', defaultValue: 'weekly', helper: 'Accepted values: daily, weekly, biweekly, monthly.', type: 'text' },
+    { key: 'escrow', title: 'Escrow release window', description: 'Days after delivery confirmation before escrow auto-releases if undisputed.', label: 'Days', defaultValue: '3', helper: 'Customers can still confirm delivery earlier to release funds sooner.', type: 'number' },
+    { key: 'manualDriverVerification', title: 'Manual driver verification', description: 'Require an admin to manually review every driver KYC submission.', label: 'Manual driver verification', defaultValue: 'true', helper: 'Recorded for reference - KYC review is currently always manual regardless of this flag.', type: 'boolean' },
+    { key: 'staff2fa', title: 'Require staff 2FA', description: 'Require two-factor authentication for admin and dispatcher accounts.', label: 'Require staff 2FA', defaultValue: 'false', helper: 'Recorded for reference - login does not yet enforce 2FA regardless of this flag.', type: 'boolean' },
+    { key: 'pauseRegistrations', title: 'Pause new registrations', description: 'Temporarily stop new customer, driver, and truck owner sign-ups.', label: 'Pause new registrations', defaultValue: 'false', helper: 'Recorded for reference - registration is not yet gated by this flag.', type: 'boolean' },
+    { key: 'maintenanceMode', title: 'Maintenance mode', description: 'Show a maintenance notice and block new shipment creation network-wide.', label: 'Maintenance mode', defaultValue: 'false', helper: 'Recorded for reference - the app does not yet check this flag.', type: 'boolean' },
+    { key: 'supportHours', title: 'Support hours', description: 'Displayed to customers on the Help & support screen.', label: 'Hours', defaultValue: '24/7', helper: 'Free text, e.g. "Mon-Sat, 8am-8pm WAT".', type: 'text' },
+  ];
+
+  async platformSettings() {
+    const rows = await this.prisma.platformSetting.findMany().catch(() => []);
+    const overridesByKey = new Map(rows.map((row) => [row.key, row.value]));
+    return this.platformSettingCatalog.map((definition) => this.toPlatformSetting(definition, overridesByKey.get(definition.key)));
   }
 
-  platformSetting(key: string) {
-    return this.platformSettings().find((setting) => setting.key === key) ?? this.platformSettings()[0];
+  async platformSetting(key: string) {
+    const definition = this.platformSettingCatalog.find((entry) => entry.key === key) ?? this.platformSettingCatalog[0];
+    const row = await this.prisma.platformSetting.findUnique({ where: { key: definition.key } }).catch(() => null);
+    return this.toPlatformSetting(definition, row?.value);
+  }
+
+  async updatePlatformSetting(key: string, value: string, actorId: string) {
+    const definition = this.platformSettingCatalog.find((entry) => entry.key === key);
+    if (!definition) throw new BadRequestException(`Unknown platform setting: ${key}`);
+    if (definition.type === 'boolean' && value !== 'true' && value !== 'false') {
+      throw new BadRequestException(`${definition.title} must be true or false.`);
+    }
+    if (definition.type === 'number' && (!value.trim() || Number.isNaN(Number(value)))) {
+      throw new BadRequestException(`${definition.title} must be a number.`);
+    }
+
+    try {
+      await this.prisma.platformSetting.upsert({
+        where: { key: definition.key },
+        update: { value, updatedById: actorId },
+        create: { key: definition.key, value, updatedById: actorId },
+      });
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not save ${definition.title.toLowerCase()}. Please try again: ${this.errorMessage(error)}`);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId,
+        action: 'PLATFORM_SETTING_UPDATED',
+        entity: 'PlatformSetting',
+        entityId: definition.key,
+        metadata: { key: definition.key, value },
+      },
+    }).catch(() => null);
+
+    return this.toPlatformSetting(definition, value);
+  }
+
+  private toPlatformSetting(definition: (typeof this.platformSettingCatalog)[number], storedValue?: string) {
+    const value = storedValue ?? definition.defaultValue;
+    const displayValue = definition.type === 'boolean' ? (value === 'true' ? 'On' : 'Off')
+      : definition.type === 'number' && definition.key === 'fee' ? `${value}%`
+      : definition.key === 'payout' ? value.charAt(0).toUpperCase() + value.slice(1)
+      : value;
+    return {
+      key: definition.key,
+      title: definition.title,
+      description: definition.description,
+      label: definition.label,
+      value,
+      displayValue,
+      helper: definition.helper,
+      type: definition.type,
+    };
   }
 
   async auditLogs(category?: string) {
