@@ -11,6 +11,7 @@ type InitializeEscrowInput = {
   amount?: number;
   currency?: string;
   customerEmail?: string;
+  method?: 'card' | 'bank_transfer';
 };
 
 @Injectable()
@@ -104,6 +105,7 @@ export class PaymentProviderService {
         currency,
         customerEmail: input.customerEmail,
         providerReference,
+        method: input.method,
       });
     }
 
@@ -258,9 +260,21 @@ export class PaymentProviderService {
     currency: string;
     customerEmail?: string;
     providerReference: string;
+    method?: 'card' | 'bank_transfer';
   }) {
     const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
     if (!secretKey) return this.mockProviderResponse(input, 'Paystack key is missing.');
+
+    // Paystack's hosted checkout offers every channel enabled on the account when no
+    // `channels` filter is sent. Narrowing it here makes the customer's in-app method
+    // choice actually mean something, instead of it being a purely cosmetic selector
+    // that Paystack's own page would ignore anyway.
+    const channels =
+      input.method === 'card'
+        ? ['card']
+        : input.method === 'bank_transfer'
+          ? ['bank_transfer', 'bank', 'ussd']
+          : undefined;
 
     const response = await fetch('https://api.paystack.co/transaction/initialize', {
       method: 'POST',
@@ -274,6 +288,7 @@ export class PaymentProviderService {
         currency: input.currency,
         reference: input.providerReference,
         callback_url: this.paymentCallbackUrl(input.shipmentId, input.providerReference),
+        ...(channels ? { channels } : {}),
         metadata: {
           shipmentId: input.shipmentId,
           purpose: 'shipment_escrow',
