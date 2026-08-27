@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OtpPurpose, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomInt, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
@@ -29,7 +29,7 @@ export class AuthService {
       throw new BadRequestException('This role cannot self-register.');
     }
 
-    const code = this.config.get<string>('MOCK_OTP_CODE') ?? '123456';
+    const code = this.generateOtpCode();
     const codeHash = await bcrypt.hash(code, 10);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const email = dto.email.trim().toLowerCase();
@@ -75,7 +75,7 @@ export class AuthService {
   }
 
   async requestPasswordReset(identifier: string) {
-    const code = this.config.get<string>('MOCK_OTP_CODE') ?? '123456';
+    const code = this.generateOtpCode();
     const normalized = identifier.trim().toLowerCase();
     await this.rateLimit.assertAllowed(`password-reset:${normalized}`, {
       limit: Number(this.config.get<string>('AUTH_OTP_RATE_LIMIT') ?? 5),
@@ -419,6 +419,22 @@ export class AuthService {
   // accounts the caller doesn't own) to any environment where NODE_ENV is merely unset.
   private exposeDevOtp() {
     return this.config.get<string>('EXPOSE_DEV_OTP') === 'true';
+  }
+
+  // Was `this.config.get('MOCK_OTP_CODE') ?? '123456'`, unconditionally, for both
+  // registration and password-reset - meaning every OTP in the system was the same
+  // static value (the literal string '123456' whenever MOCK_OTP_CODE was unset).
+  // verifyOtp() only ever checks the submitted code against that hash, with no proof of
+  // owning the email/phone otherwise - so this was a full password-reset account-takeover
+  // path for any account whose email is known, including admin@tracko.ng. A real random
+  // code only skips generation when the same explicit, non-NODE_ENV-dependent flag that
+  // gates exposeDevOtp() is on, for local/dev convenience.
+  private generateOtpCode() {
+    if (this.exposeDevOtp()) {
+      const override = this.config.get<string>('MOCK_OTP_CODE');
+      if (override) return override;
+    }
+    return String(randomInt(100000, 1000000));
   }
 
   private async audit(action: string, entity: string, entityId?: string, metadata?: Record<string, unknown>) {
