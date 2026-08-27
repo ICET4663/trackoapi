@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, InternalServerErro
 import { Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ShipmentsService } from '../shipments/shipments.service';
 
 type OperationActor = {
   sub: string;
@@ -64,6 +65,7 @@ export class OperationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly shipments: ShipmentsService,
   ) {}
 
   async dashboard() {
@@ -680,6 +682,18 @@ export class OperationsService {
         ? 'COMPLETED'
         : 'IN_TRANSIT';
 
+    // A REFUND/RELEASE decision is a real financial action, not just a status label - it
+    // must actually move the Escrow record, not only the Shipment's displayed status. This
+    // previously set shipmentStatus to COMPLETED/CANCELLED and told the customer "resolved"
+    // without ever touching Escrow, so the money's own tracked state silently never changed
+    // to match. Run before the dispute is marked resolved, so a failure here means the
+    // dispute stays open rather than showing "resolved" over a financial action that never
+    // happened.
+    if (shipment && (decision === 'RELEASE' || decision === 'REFUND')) {
+      if (decision === 'RELEASE') await this.shipments.releaseEscrow(shipment.id, actor.role, resolution);
+      else await this.shipments.refundEscrow(shipment.id, actor.role, resolution);
+    }
+
     try {
       const updated = await this.prisma.$executeRawUnsafe(
         `update "Dispute"
@@ -717,7 +731,10 @@ export class OperationsService {
         shipmentId: shipment?.id,
       });
 
-      if (shipment) {
+      // RELEASE/REFUND already updated the shipment's status and timeline as part of the
+      // real escrow mutation above - only a RESUME decision (no financial action) needs
+      // this shipment update done here.
+      if (shipment && decision !== 'RELEASE' && decision !== 'REFUND') {
         await this.prisma.shipment.update({
           where: { id: shipment.id },
           data: {

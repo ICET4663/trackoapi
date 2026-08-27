@@ -10,5 +10,6 @@ import { ShipmentsService } from './shipments.service';
   imports: [PrismaModule, RequestUserModule, NotificationsModule, IntegrationsModule],
   controllers: [ShipmentsController],
   providers: [ShipmentsService],
+  exports: [ShipmentsService],
 })
 export class ShipmentsModule {}
