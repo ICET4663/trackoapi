@@ -123,6 +123,15 @@ export class AuthService {
       throw new BadRequestException('Identifier, OTP code, and a new password are required.');
     }
 
+    // Same brute-force gap as verifyOtp() - this path has its own inline verification
+    // rather than sharing that method, so it needs the same guess-side rate limit
+    // independently. Keyed by identifier before the user lookup so an attacker can't
+    // dodge it by not knowing whether the identifier resolves to a real account.
+    await this.rateLimit.assertAllowed(`otp-verify:password-reset:${identifier}`, {
+      limit: Number(this.config.get<string>('AUTH_OTP_VERIFY_RATE_LIMIT') ?? 8),
+      label: 'OTP verification',
+    });
+
     const user = await this.users.findByEmailOrPhone(identifier);
     if (!user) throw new BadRequestException('OTP code is invalid or expired.');
     const otp = await this.prisma.otpCode.findFirst({
@@ -324,6 +333,15 @@ export class AuthService {
   }
 
   private async verifyOtp(email: string, phone: string, code: string, purpose: OtpPurpose) {
+    // The request side (requestRegistrationCode/requestPasswordReset) was already rate-
+    // limited, but the guess side never was - now that codes are genuinely random 6-digit
+    // values (900,000 possibilities) instead of a static one, unlimited guesses against a
+    // single issued code is the residual brute-force path worth closing too.
+    await this.rateLimit.assertAllowed(`otp-verify:${purpose}:${email.trim().toLowerCase()}`, {
+      limit: Number(this.config.get<string>('AUTH_OTP_VERIFY_RATE_LIMIT') ?? 8),
+      label: 'OTP verification',
+    });
+
     const otp = await this.prisma.otpCode.findFirst({
       where: {
         purpose,

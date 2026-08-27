@@ -52,3 +52,43 @@ describe('AuthService.generateOtpCode (private, exercised via cast)', () => {
     expect(service.generateOtpCode()).toBe('111111');
   });
 });
+
+// Making the code random closes the "known static code" attack, but a genuinely random
+// 6-digit code (900,000 possibilities) is still guessable within its expiry window if the
+// verification step allows unlimited attempts. These tests confirm that gap is closed too,
+// and that a rejected rate limit stops the flow before the real code is ever compared.
+describe('AuthService OTP verification is rate-limited on the guess side, not just the request side', () => {
+  function buildService(rateLimit: { assertAllowed: jest.Mock }, prismaOverrides: Record<string, unknown> = {}) {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const prisma = {
+      otpCode: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
+      ...prismaOverrides,
+    } as unknown as PrismaService;
+    const users = { findByEmailOrPhone: jest.fn().mockResolvedValue(null) } as unknown as UsersService;
+    return { service: new AuthService(config, {} as JwtService, prisma, rateLimit as unknown as RateLimitService, users), prisma };
+  }
+
+  it('register() is blocked by the rate limiter before any OTP row is looked up', async () => {
+    const assertAllowed = jest.fn().mockRejectedValue(new Error('rate limited'));
+    const { service, prisma } = buildService({ assertAllowed });
+
+    await expect(service.register({
+      email: 'driver@tracko.ng', phone: '+2348030000000', fullName: 'Test', password: 'password123', code: '123456', role: 'DRIVER' as never,
+    } as never)).rejects.toThrow('rate limited');
+
+    expect(assertAllowed).toHaveBeenCalledWith(expect.stringContaining('otp-verify:REGISTER:'), expect.anything());
+    expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
+  });
+
+  it('confirmPasswordReset() is blocked by the rate limiter before the account is even looked up', async () => {
+    const assertAllowed = jest.fn().mockRejectedValue(new Error('rate limited'));
+    const { service, prisma } = buildService({ assertAllowed });
+
+    await expect(service.confirmPasswordReset({
+      identifier: 'admin@tracko.ng', code: '123456', password: 'newpassword123',
+    })).rejects.toThrow('rate limited');
+
+    expect(assertAllowed).toHaveBeenCalledWith('otp-verify:password-reset:admin@tracko.ng', expect.anything());
+    expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
+  });
+});
