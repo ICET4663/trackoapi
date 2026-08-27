@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -421,10 +422,13 @@ export class SettingsService {
     if (!input.key) return notificationPreferences;
     try {
       await this.prisma.$executeRawUnsafe(
-        `insert into "NotificationPreference" ("userId", "role", "key", "value", "updatedAt")
-         values ($1, cast($2 as "UserRole"), $3, $4, current_timestamp)
+        `insert into "NotificationPreference" ("id", "userId", "role", "key", "value", "updatedAt")
+         values ($1, $2, cast($3 as "UserRole"), $4, $5, current_timestamp)
          on conflict ("userId", "role", "key")
          do update set "value" = excluded."value", "updatedAt" = current_timestamp`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this was still missing after the earlier updatedAt-only fix.
+        `notifpref_${randomUUID().replace(/-/g, '')}`,
         userId,
         role,
         input.key,
@@ -1460,7 +1464,43 @@ export class SettingsService {
   }
 
   async updateSafetySetting(input: { key?: string; value?: boolean | string }, userId = 'preview-driver') {
-    return { ...(await this.safetySettings(userId)), [String(input.key ?? 'shareLiveTripLocation')]: input.value };
+    // This never actually wrote to the database - it just echoed back
+    // { ...currentSettings, [key]: value } as if it had saved, so a driver's safety
+    // toggles (live location sharing, night-driving check-ins, emergency contact) reset
+    // the moment they reloaded the app, no matter how many times they changed them.
+    const key = String(input.key ?? 'shareLiveTripLocation');
+    const validKeys = ['shareLiveTripLocation', 'nightDrivingCheckIns', 'emergencyContact'];
+    if (!validKeys.includes(key)) {
+      throw new BadRequestException(`Unknown safety setting: ${key}`);
+    }
+
+    const current = (await this.safetySettings(userId)) as {
+      shareLiveTripLocation: boolean;
+      nightDrivingCheckIns: boolean;
+      emergencyContact: string | null;
+    };
+    const next = { ...current, [key]: input.value };
+
+    try {
+      await this.prisma.$executeRawUnsafe(
+        `insert into "SafetySettings" ("id", "userId", "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact", "updatedAt")
+         values ($1, $2, $3, $4, $5, current_timestamp)
+         on conflict ("userId") do update set
+           "shareLiveTripLocation" = excluded."shareLiveTripLocation",
+           "nightDrivingCheckIns" = excluded."nightDrivingCheckIns",
+           "emergencyContact" = excluded."emergencyContact",
+           "updatedAt" = current_timestamp`,
+        `safety_${randomUUID().replace(/-/g, '')}`,
+        userId,
+        Boolean(next.shareLiveTripLocation),
+        Boolean(next.nightDrivingCheckIns),
+        next.emergencyContact ? String(next.emergencyContact) : null,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not save this safety setting. Please try again: ${this.errorMessage(error)}`);
+    }
+
+    return next;
   }
 
   platformSettings() {

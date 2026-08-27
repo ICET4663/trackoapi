@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import type { AuthUser } from '../common/types/auth-user';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -243,8 +244,9 @@ export class CommunicationService {
           createdAt: Date;
         }[]
       >(
-        `insert into "MediaAsset" ("userId", "shipmentId", "conversationId", "kind", "url", "storageKey", "label", "transcript", "durationSeconds", "mimeType")
+        `insert into "MediaAsset" ("id", "userId", "shipmentId", "conversationId", "kind", "url", "storageKey", "label", "transcript", "durationSeconds", "mimeType")
          values (
+           $11,
            $10,
            $1,
            $2,
@@ -267,6 +269,10 @@ export class CommunicationService {
         input.durationSeconds ? Number(input.durationSeconds) : null,
         media.mimeType,
         userId.startsWith('preview-') ? null : userId,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this raw insert must generate its own, matching the pattern used
+        // elsewhere in the codebase (e.g. KycService.id()) for handwritten SQL inserts.
+        `media_${randomUUID().replace(/-/g, '')}`,
       );
       if (rows[0]) {
         return {

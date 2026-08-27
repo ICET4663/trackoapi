@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -1058,9 +1059,12 @@ export class ShipmentsService {
   private async createMediaRecord(customerId: string, shipmentId: string, url: string): Promise<MediaRecord | null> {
     try {
       const rows = await this.prisma.$queryRawUnsafe<MediaRecord[]>(
-        `insert into "MediaAsset" ("userId", "shipmentId", "kind", "url", "label")
-         values ($1, $2, 'CARGO_PHOTO'::"MediaKind", $3, 'Cargo photo')
+        `insert into "MediaAsset" ("id", "userId", "shipmentId", "kind", "url", "label")
+         values ($1, $2, $3, 'CARGO_PHOTO'::"MediaKind", $4, 'Cargo photo')
          returning "id", "kind"::text as "kind", "url", "label"`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this raw insert must generate its own.
+        `media_${randomUUID().replace(/-/g, '')}`,
         customerId,
         shipmentId,
         url,

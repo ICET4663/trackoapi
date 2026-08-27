@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 type NotificationTone = 'INFO' | 'SUCCESS' | 'WARNING' | 'DANGER';
@@ -38,9 +39,12 @@ export class NotificationsService {
   async create(input: NotificationInput) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
-        `insert into "Notification" ("userId", "role", "title", "body", "tone", "entity", "entityId", "actionUrl")
-         values ($1, cast($2 as "UserRole"), $3, $4, cast($5 as "NotificationTone"), $6, $7, $8)
+        `insert into "Notification" ("id", "userId", "role", "title", "body", "tone", "entity", "entityId", "actionUrl")
+         values ($1, $2, cast($3 as "UserRole"), $4, $5, cast($6 as "NotificationTone"), $7, $8, $9)
          returning "id", "userId", "role"::text as "role", "title", "body", "tone"::text as "tone", "entity", "entityId", "actionUrl", "readAt", "createdAt"`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - every raw insert into this table must generate its own.
+        `notif_${randomUUID().replace(/-/g, '')}`,
         input.userId && !input.userId.startsWith('preview-') ? input.userId : null,
         input.role ?? null,
         input.title,
@@ -198,10 +202,14 @@ export class NotificationsService {
   async registerPushToken(userId: string, token: string, platform?: string, deviceId?: string) {
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "PushToken" ("userId", "token", "platform", "deviceId", "updatedAt")
-         values ($1, $2, $3, $4, current_timestamp)
+        `insert into "PushToken" ("id", "userId", "token", "platform", "deviceId", "updatedAt")
+         values ($1, $2, $3, $4, $5, current_timestamp)
          on conflict ("userId", "token")
          do update set "platform" = excluded."platform", "deviceId" = excluded."deviceId", "updatedAt" = current_timestamp`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this was still missing after the earlier updatedAt-only fix, which is
+        // why registerPushToken() kept silently failing even after that pass.
+        `push_${randomUUID().replace(/-/g, '')}`,
         userId.startsWith('preview-') ? 'preview-customer' : userId,
         token,
         platform ?? null,

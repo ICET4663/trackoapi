@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AuthUser } from '../common/types/auth-user';
@@ -135,9 +136,13 @@ export class TrackingService {
           createdAt: Date;
         }[]
       >(
-        `insert into "ShipmentLocationPing" ("shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note")
-         values ($1, $2, $3, $4, $5, $6, $7)
+        `insert into "ShipmentLocationPing" ("id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note")
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
          returning "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this raw insert must generate its own, or every location ping ever
+        // sent silently fails and falls back to a fake preview location.
+        `ping_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         driverId.startsWith('preview-') ? null : driverId,
         latitude,
@@ -179,9 +184,13 @@ export class TrackingService {
           submittedAt: Date;
         }[]
       >(
-        `insert into "DeliveryProof" ("shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status")
-         values ($1, $2, $3, $4, $5, $6, 'SUBMITTED'::"ProofStatus")
+        `insert into "DeliveryProof" ("id", "shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status")
+         values ($1, $2, $3, $4, $5, $6, $7, 'SUBMITTED'::"ProofStatus")
          returning "id", "shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status"::text as "status", "submittedAt"`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this raw insert must generate its own, or the delivery photo/signature
+        // silently never gets saved even though the shipment still flips to DELIVERED.
+        `proof_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         driverId.startsWith('preview-') ? null : driverId,
         input.photoUrl ?? null,
