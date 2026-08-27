@@ -11,7 +11,8 @@ export class OperationsController {
   ) {}
 
   @Get('dashboard')
-  dashboard() {
+  async dashboard(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.operations.dashboard();
   }
 

@@ -413,6 +413,16 @@ export class OperationsService {
     actor: OperationActor,
   ) {
     this.assertCanProgressTrip(actor.role);
+    // assertCanProgressTrip only checks role - a DRIVER account still needs an actual
+    // ACCEPTED assignment on this shipment, otherwise any driver could advance (and even
+    // mark DELIVERED/COMPLETED, which feeds escrow release) a trip they were never given.
+    if (actor.role === 'DRIVER') {
+      const assignment = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, driverId: actor.sub, status: 'ACCEPTED' },
+        select: { id: true },
+      }).catch(() => null);
+      if (!assignment) throw new ForbiddenException('You are not the assigned driver for this shipment.');
+    }
     const status = body.status ?? 'IN_TRANSIT';
 
     // The status update is the actual point of this call: if it fails, the caller must
