@@ -147,6 +147,7 @@ export class PortalService {
 
   private toCustomerShipment(shipment: {
     id: string;
+    reference: string;
     status: string;
     createdAt: Date;
     pickupLabel: string;
@@ -157,6 +158,7 @@ export class PortalService {
     const month = shipment.createdAt.toLocaleString('en-US', { month: 'short' }).toUpperCase();
     return {
       id: shipment.id,
+      reference: shipment.reference,
       status: shipment.status,
       date: String(shipment.createdAt.getDate()).padStart(2, '0'),
       month,
@@ -172,6 +174,7 @@ export class PortalService {
     const recentShipments = [
       {
         id: 'TRK-1024',
+        reference: 'TRK-1024',
         status: 'IN_TRANSIT',
         date: '21',
         month: 'JUL',
