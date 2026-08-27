@@ -255,17 +255,20 @@ export class SettingsController {
   }
 
   @Get('admin/platform-settings')
-  platformSettings() {
+  async platformSettings(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN']);
     return this.settingsService.platformSettings();
   }
 
   @Get('admin/platform-settings/:key')
-  platformSetting(@Param('key') key: string) {
+  async platformSetting(@Param('key') key: string, @Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN']);
     return this.settingsService.platformSetting(key);
   }
 
   @Patch('admin/platform-settings/:key')
-  updatePlatformSetting(@Param('key') key: string, @Body() body: { value?: string }) {
+  async updatePlatformSetting(@Param('key') key: string, @Body() body: { value?: string }, @Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN']);
     return { ...this.settingsService.platformSetting(key), value: body.value ?? this.settingsService.platformSetting(key).value };
   }
 
