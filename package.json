@@ -26,6 +26,8 @@
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run prisma:validate",
     "lint": "eslint \"src/**/*.ts\"",
+    "test": "jest",
+    "test:watch": "jest --watch",
     "format": "prettier --write \"src/**/*.ts\" \"prisma/**/*.prisma\"",
     "prisma:validate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma validate",
     "prisma:generate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma generate",
@@ -35,6 +37,16 @@
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": "ts-jest"
+    },
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "collectCoverageFrom": ["**/*.(t|j)s"],
+    "coverageDirectory": "../coverage"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
@@ -55,17 +67,20 @@
   "devDependencies": {
     "@nestjs/cli": "^10.4.8",
     "@nestjs/schematics": "^10.2.3",
-    "@nestjs/testing": "^10.4.15",
+    "@nestjs/testing": "^10.4.22",
     "@types/bcryptjs": "^2.4.6",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.10.5",
     "@types/passport-jwt": "^4.0.1",
     "@typescript-eslint/eslint-plugin": "^8.19.0",
     "@typescript-eslint/parser": "^8.19.0",
     "eslint": "^9.17.0",
+    "jest": "^30.4.2",
     "prettier": "^3.4.2",
     "prisma": "^6.2.1",
     "source-map-support": "^0.5.21",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.2"
