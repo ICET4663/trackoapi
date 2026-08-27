@@ -22,6 +22,10 @@ export class PrismaService implements OnModuleDestroy {
     return this.db.conversation;
   }
 
+  get rateLimitBucket() {
+    return this.db.rateLimitBucket;
+  }
+
   get driverAssignment() {
     return this.db.driverAssignment;
   }

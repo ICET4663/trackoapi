@@ -34,7 +34,7 @@ export class AuthService {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const email = dto.email.trim().toLowerCase();
     const phone = dto.phone.trim();
-    this.rateLimit.assertAllowed(`register-otp:${email}:${dto.role}`, {
+    await this.rateLimit.assertAllowed(`register-otp:${email}:${dto.role}`, {
       limit: Number(this.config.get<string>('AUTH_OTP_RATE_LIMIT') ?? 5),
       label: 'Registration OTP',
     });
@@ -77,7 +77,7 @@ export class AuthService {
   async requestPasswordReset(identifier: string) {
     const code = this.config.get<string>('MOCK_OTP_CODE') ?? '123456';
     const normalized = identifier.trim().toLowerCase();
-    this.rateLimit.assertAllowed(`password-reset:${normalized}`, {
+    await this.rateLimit.assertAllowed(`password-reset:${normalized}`, {
       limit: Number(this.config.get<string>('AUTH_OTP_RATE_LIMIT') ?? 5),
       label: 'Password reset OTP',
     });
@@ -188,7 +188,7 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
-    this.rateLimit.assertAllowed(`login:${dto.identifier.trim().toLowerCase()}`, {
+    await this.rateLimit.assertAllowed(`login:${dto.identifier.trim().toLowerCase()}`, {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),
       label: 'Login',
     });
@@ -208,7 +208,7 @@ export class AuthService {
   }
 
   async getLoginPortals(dto: LoginDto) {
-    this.rateLimit.assertAllowed(`login-portals:${dto.identifier.trim().toLowerCase()}`, {
+    await this.rateLimit.assertAllowed(`login-portals:${dto.identifier.trim().toLowerCase()}`, {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),
       label: 'Login',
     });

@@ -706,6 +706,18 @@ model Message {
   sender       User         @relation(fields: [senderId], references: [id])
 }
 
+// Backs RateLimitService. Was an in-memory Map, which doesn't work correctly on Vercel
+// serverless - each invocation can land on a different, memory-isolated instance, so a
+// determined caller could bypass the limit just by getting routed around. This table is
+// the shared counter every instance reads/writes instead.
+model RateLimitBucket {
+  key     String   @id
+  count   Int      @default(1)
+  resetAt DateTime
+
+  @@index([resetAt])
+}
+
 model AuditLog {
   id        String   @id @default(cuid())
   actorId   String?
