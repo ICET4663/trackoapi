@@ -198,8 +198,8 @@ export class NotificationsService {
   async registerPushToken(userId: string, token: string, platform?: string, deviceId?: string) {
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "PushToken" ("userId", "token", "platform", "deviceId")
-         values ($1, $2, $3, $4)
+        `insert into "PushToken" ("userId", "token", "platform", "deviceId", "updatedAt")
+         values ($1, $2, $3, $4, current_timestamp)
          on conflict ("userId", "token")
          do update set "platform" = excluded."platform", "deviceId" = excluded."deviceId", "updatedAt" = current_timestamp`,
         userId.startsWith('preview-') ? 'preview-customer' : userId,

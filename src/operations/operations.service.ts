@@ -596,8 +596,8 @@ export class OperationsService {
     // error rather than a fabricated "OPEN" dispute that was never saved.
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "Dispute" ("id", "shipmentId", "userId", "reason", "description", "priority", "status")
-         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"DisputeStatus")`,
+        `insert into "Dispute" ("id", "shipmentId", "userId", "reason", "description", "priority", "status", "updatedAt")
+         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"DisputeStatus", current_timestamp)`,
         id,
         shipmentId ?? null,
         actor.sub.startsWith('preview-') ? null : actor.sub,
@@ -709,10 +709,10 @@ export class OperationsService {
         if (!shipment) throw new BadRequestException('Dispute was not found.');
         await this.prisma.$executeRawUnsafe(
           `insert into "Dispute"
-             ("id", "shipmentId", "userId", "reason", "description", "priority", "status", "resolution", "resolvedAt")
+             ("id", "shipmentId", "userId", "reason", "description", "priority", "status", "resolution", "resolvedAt", "updatedAt")
            values
              ($1, $2, $3, 'Legacy delivery dispute', 'Imported from a shipment that was already marked as disputed.',
-              'MEDIUM', 'RESOLVED'::"DisputeStatus", $4, current_timestamp)`,
+              'MEDIUM', 'RESOLVED'::"DisputeStatus", $4, current_timestamp, current_timestamp)`,
           id,
           shipment.id,
           shipment.customerId,
@@ -779,8 +779,8 @@ export class OperationsService {
     // rather than a fabricated "OPEN" ticket that was never saved.
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
-         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus")`,
+        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
+         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
         body.shipmentId ? String(body.shipmentId) : null,
         actor.sub.startsWith('preview-') ? null : actor.sub,

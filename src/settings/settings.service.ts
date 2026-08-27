@@ -421,8 +421,8 @@ export class SettingsService {
     if (!input.key) return notificationPreferences;
     try {
       await this.prisma.$executeRawUnsafe(
-        `insert into "NotificationPreference" ("userId", "role", "key", "value")
-         values ($1, cast($2 as "UserRole"), $3, $4)
+        `insert into "NotificationPreference" ("userId", "role", "key", "value", "updatedAt")
+         values ($1, cast($2 as "UserRole"), $3, $4, current_timestamp)
          on conflict ("userId", "role", "key")
          do update set "value" = excluded."value", "updatedAt" = current_timestamp`,
         userId,
@@ -487,10 +487,15 @@ export class SettingsService {
     const message = String(input.message ?? `${channel} support request from ${input.role ?? 'user'}.`);
     const id = `support-${Date.now()}`;
 
+    // Same reasoning as createSafetyTicket() below: the catch here used to swallow a failed
+    // insert into a fake "request received" response, so a user's support request could be
+    // silently lost while the UI told them it had gone through. It also carried the same
+    // "updatedAt" bug - that column uses Prisma's client-side-only @updatedAt, which has no
+    // database default, so every raw-SQL insert that omits it violates a NOT NULL constraint.
     try {
       await this.prisma.$executeRawUnsafe(
-        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
-         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus")`,
+        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
+         values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
         input.shipmentId ?? null,
         userId,
@@ -498,41 +503,38 @@ export class SettingsService {
         channel,
         message,
       );
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Could not submit your support request. Please try again: ${this.errorMessage(error)}`,
+      );
+    }
 
-      await this.notifications.create({
-        role: 'ADMIN',
-        title: 'New support request',
-        body: `${topic} request opened through ${channel.toLowerCase()} support.`,
-        tone: 'WARNING',
+    await this.notifications.create({
+      role: 'ADMIN',
+      title: 'New support request',
+      body: `${topic} request opened through ${channel.toLowerCase()} support.`,
+      tone: 'WARNING',
+      entity: 'SupportTicket',
+      entityId: id,
+      actionUrl: '/admin/support',
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: 'SUPPORT_TICKET_CREATED',
         entity: 'SupportTicket',
         entityId: id,
-        actionUrl: '/admin/support',
-      });
+        metadata: { channel, topic, role: input.role ?? null },
+      },
+    }).catch(() => null);
 
-      await this.prisma.auditLog.create({
-        data: {
-          actorId: userId,
-          action: 'SUPPORT_TICKET_CREATED',
-          entity: 'SupportTicket',
-          entityId: id,
-          metadata: { channel, topic, role: input.role ?? null },
-        },
-      }).catch(() => null);
-
-      return {
-        message: 'Support request received. Tracko support will follow up.',
-        conversationId: id,
-        ticketId: id,
-        status: 'OPEN',
-      };
-    } catch {
-      return {
-        message: `${channel} request received for ${input.role ?? 'user'} preview.`,
-        conversationId: 'preview-support-thread',
-        ticketId: id,
-        status: 'OPEN',
-      };
-    }
+    return {
+      message: 'Support request received. Tracko support will follow up.',
+      conversationId: id,
+      ticketId: id,
+      status: 'OPEN',
+    };
   }
 
   async sendEmergencyAlert(userId: string, role: Role, input: SafetyAlertInput = {}) {
@@ -574,8 +576,8 @@ export class SettingsService {
     // (call emergency services / dispatch directly) instead of trusting a false positive.
     try {
       await this.prisma.$executeRawUnsafe(
-        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
-         values ($1, $2, $3, $4, 'EMERGENCY', $5, 'OPEN'::"SupportTicketStatus")`,
+        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
+         values ($1, $2, $3, $4, 'EMERGENCY', $5, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
         input.shipmentId ?? null,
         userId,
@@ -830,8 +832,8 @@ export class SettingsService {
     const addressId = id ?? `addr-${Date.now()}`;
     try {
       const rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
-        `insert into "SavedAddress" ("id", "userId", "label", "line", "city", "address", "icon", "isDefaultPickup")
-         values ($1, $2, $3, $4, $5, $6, $7, $8)
+        `insert into "SavedAddress" ("id", "userId", "label", "line", "city", "address", "icon", "isDefaultPickup", "updatedAt")
+         values ($1, $2, $3, $4, $5, $6, $7, $8, current_timestamp)
          on conflict ("id") do update set
            "label" = excluded."label",
            "line" = excluded."line",
@@ -1004,8 +1006,8 @@ export class SettingsService {
 
     const maskedNumber = `**** ${accountNumber.slice(-4)}`;
     await this.prisma.$queryRawUnsafe(
-      `insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule")
-       values ($1, $2, $3, $4, $5, $6, 'Weekly')
+      `insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "updatedAt")
+       values ($1, $2, $3, $4, $5, $6, 'Weekly', current_timestamp)
        on conflict ("userId") do update set
          "bankName" = excluded."bankName",
          "maskedNumber" = excluded."maskedNumber",
@@ -1386,8 +1388,8 @@ export class SettingsService {
       const rows = await this.prisma.$queryRawUnsafe<
         { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string }[]
       >(
-        `insert into "DriverDocument" ("id", "userId", "title", "meta", "state", "expires", "number", "fileUrl")
-         values ($1, $2, $3, $4, 'EXPIRING'::"DriverDocumentState", $5, $6, $7)
+        `insert into "DriverDocument" ("id", "userId", "title", "meta", "state", "expires", "number", "fileUrl", "updatedAt")
+         values ($1, $2, $3, $4, 'EXPIRING'::"DriverDocumentState", $5, $6, $7, current_timestamp)
          on conflict ("id") do update
          set "meta" = excluded."meta",
              "state" = 'EXPIRING'::"DriverDocumentState",

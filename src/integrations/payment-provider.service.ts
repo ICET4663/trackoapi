@@ -73,8 +73,8 @@ export class PaymentProviderService {
 
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "Escrow" ("id", "shipmentId", "amount", "currency", "status")
-         values ($1, $2, $3, $4, 'PENDING'::"EscrowStatus")
+        `insert into "Escrow" ("id", "shipmentId", "amount", "currency", "status", "updatedAt")
+         values ($1, $2, $3, $4, 'PENDING'::"EscrowStatus", current_timestamp)
          on conflict ("shipmentId")
          do update set "amount" = excluded."amount", "currency" = excluded."currency", "updatedAt" = current_timestamp`,
         `escrow-${shipmentId}`,
@@ -95,7 +95,9 @@ export class PaymentProviderService {
         },
       }).catch(() => null);
     } catch {
-      // Keep preview usable until Supabase migrations are applied.
+      // Escrow bookkeeping is best-effort here; the real charge is still initialized with
+      // the provider below regardless. (This used to swallow a guaranteed NOT NULL violation
+      // on "updatedAt" - now fixed above - so this row was never actually being created.)
     }
 
     if (status.provider === 'paystack' && status.realChargeEnabled) {
