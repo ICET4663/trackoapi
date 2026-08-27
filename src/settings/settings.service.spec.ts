@@ -58,3 +58,58 @@ describe('SettingsService safety alerts never fake success on failure', () => {
     expect(executeRawUnsafe).toHaveBeenCalledTimes(1);
   });
 });
+
+// driverEarnings() falls back to a fixed preview balance (₦512,400) if its real balance
+// computation fails, for the read-only earnings screen. requestDriverWithdrawal() must
+// never validate a real withdrawal amount against that fake number - previously it did,
+// via the same driverEarnings() call, meaning a DB hiccup could let a withdrawal request
+// through that had nothing to do with the driver's actual released escrow.
+describe('SettingsService.requestDriverWithdrawal never validates against the fake preview balance', () => {
+  let queryRawUnsafe: jest.Mock;
+  let payoutFindMany: jest.Mock;
+  let payoutCreate: jest.Mock;
+  let service: SettingsService;
+
+  beforeEach(() => {
+    queryRawUnsafe = jest.fn();
+    payoutFindMany = jest.fn().mockResolvedValue([]);
+    payoutCreate = jest.fn().mockResolvedValue({ id: 'payout-1', status: 'PENDING' });
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      payout: { findMany: payoutFindMany, create: payoutCreate },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const config = { get: jest.fn() } as unknown as ConfigService;
+    service = new SettingsService(prisma, notifications, config);
+  });
+
+  it('throws instead of silently falling back to the fake balance when the real computation fails', async () => {
+    queryRawUnsafe.mockRejectedValue(new Error('connection reset'));
+
+    await expect(
+      service.requestDriverWithdrawal('driver-1', { amountKobo: 10_000_000 }),
+    ).rejects.toBeInstanceOf(InternalServerErrorException);
+    expect(payoutCreate).not.toHaveBeenCalled();
+  });
+
+  it('still allows a real withdrawal within the real (non-fake) available balance', async () => {
+    queryRawUnsafe.mockImplementation((sql: string) => {
+      if (sql.includes('"BankAccount"')) {
+        return Promise.resolve([{ id: 'bank-1', bankName: 'GTBank', maskedNumber: '**** 1234', holderName: 'A Driver', verified: true, payoutSchedule: 'Weekly', pendingPayout: 'N0' }]);
+      }
+      if (sql.includes('"User"')) {
+        return Promise.resolve([{ verificationStatus: 'VERIFIED' }]);
+      }
+      if (sql.includes(`e."status" = 'RELEASED'`)) {
+        return Promise.resolve([{ shipmentId: 'shp-1', reference: 'TRK-1', route: 'Lagos to Abuja', amount: 20_000_000, currency: 'NGN', status: 'RELEASED', updatedAt: new Date() }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const result = await service.requestDriverWithdrawal('driver-1', { amountKobo: 10_000_000 });
+
+    expect(payoutCreate).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('PENDING');
+  });
+});

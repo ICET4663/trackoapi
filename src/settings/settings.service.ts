@@ -1061,7 +1061,7 @@ export class SettingsService {
     };
   }
 
-  async driverEarnings(userId = 'preview-driver') {
+  async driverEarnings(userId = 'preview-driver', options: { strict?: boolean } = {}) {
     try {
       const [releasedRows, pendingRows, bankAccount, withdrawalLogs] = await Promise.all([
         this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
@@ -1149,7 +1149,13 @@ export class SettingsService {
           ...withdrawals,
         ],
       };
-    } catch {
+    } catch (error) {
+      // requestDriverWithdrawal() validates the requested amount against this balance -
+      // if the real computation fails, it must never fall through to this fixed preview
+      // balance (₦512,400) and let a withdrawal request be validated against a number
+      // that has nothing to do with the driver's real released escrow. Reserve the
+      // friendly fallback for the read-only earnings screen.
+      if (options.strict) throw error;
       return {
         availableBalance: 51240000,
         availableBalanceLabel: 'N512,400',
@@ -1173,7 +1179,12 @@ export class SettingsService {
       throw new BadRequestException('Enter a valid withdrawal amount.');
     }
 
-    const earnings = await this.driverEarnings(userId);
+    let earnings: Awaited<ReturnType<typeof this.driverEarnings>>;
+    try {
+      earnings = await this.driverEarnings(userId, { strict: true });
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not verify your available balance. Please try again: ${this.errorMessage(error)}`);
+    }
     if (amountKobo > earnings.availableBalance) {
       throw new BadRequestException('Withdrawal amount is higher than available balance.');
     }
