@@ -232,13 +232,31 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
+    // Every refresh previously just minted a new session without ever revoking the token
+    // that was presented - refresh tokens were never rotated, so a stolen one (XSS,
+    // insecure device storage, a leaked log line) stayed valid for its full 30-day
+    // lifetime no matter how many times the legitimate user also refreshed, with no way
+    // to detect that a second party was using it too.
     const tokenHash = await this.hashToken(refreshToken);
-    const stored = await this.prisma.refreshToken.findFirst({
-      where: { tokenHash, revokedAt: null, expiresAt: { gt: new Date() } },
-      include: { user: true },
-    });
+    const stored = await this.prisma.refreshToken.findFirst({ where: { tokenHash } });
     if (!stored) throw new UnauthorizedException('Refresh token is invalid or expired.');
 
+    if (stored.revokedAt) {
+      // This exact token was already redeemed once (rotated below) - a second
+      // presentation means it leaked, since the legitimate client would only ever
+      // hold whichever token was issued most recently. Treat every other active
+      // session for this user as compromised rather than trusting any of them.
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: stored.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.audit('REFRESH_TOKEN_REUSE_DETECTED', 'RefreshToken', stored.id, { userId: stored.userId });
+      throw new UnauthorizedException('Refresh token is invalid or expired.');
+    }
+
+    if (stored.expiresAt <= new Date()) throw new UnauthorizedException('Refresh token is invalid or expired.');
+
+    await this.prisma.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } });
     return this.createSession(stored.userId);
   }
 

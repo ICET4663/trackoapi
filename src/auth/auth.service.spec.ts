@@ -92,3 +92,59 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
     expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
   });
 });
+
+// refresh() previously never revoked the token it was given - every call just minted a
+// new session, so a stolen refresh token stayed valid for its full 30-day lifetime no
+// matter how many times the real user also refreshed. These tests pin down rotation
+// (the presented token becomes unusable) and reuse detection (presenting an already-
+// rotated token nukes every other active session, since that only happens if it leaked).
+describe('AuthService.refresh rotates tokens and detects reuse', () => {
+  function buildService(otpRow: { id: string; userId: string; revokedAt: Date | null; expiresAt: Date } | null) {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const jwt = { signAsync: jest.fn().mockResolvedValue('access-token') } as unknown as JwtService;
+    const prisma = {
+      refreshToken: {
+        findFirst: jest.fn().mockResolvedValue(otpRow),
+        update: jest.fn().mockResolvedValue(undefined),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        create: jest.fn().mockResolvedValue(undefined),
+      },
+      user: { findUnique: jest.fn() },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const users = { findById: jest.fn().mockResolvedValue({ id: 'user-1', email: 'a@b.com', role: 'CUSTOMER', verificationStatus: 'VERIFIED' }) } as unknown as UsersService;
+    const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
+    return { service: new AuthService(config, jwt, prisma, rateLimit, users), prisma };
+  }
+
+  it('revokes the presented token as part of issuing a new session (rotation)', async () => {
+    const row = { id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 1000 * 60 * 60) };
+    const { service, prisma } = buildService(row);
+
+    await service.refresh('some-refresh-token');
+
+    expect((prisma.refreshToken.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'rt-1' }, data: { revokedAt: expect.any(Date) } });
+  });
+
+  it('rejects an already-rotated (revoked) token and revokes every other active session for that user', async () => {
+    const row = { id: 'rt-1', userId: 'user-1', revokedAt: new Date(), expiresAt: new Date(Date.now() + 1000 * 60 * 60) };
+    const { service, prisma } = buildService(row);
+
+    await expect(service.refresh('stolen-refresh-token')).rejects.toThrow();
+
+    expect((prisma.refreshToken.updateMany as jest.Mock)).toHaveBeenCalledWith({
+      where: { userId: 'user-1', revokedAt: null },
+      data: { revokedAt: expect.any(Date) },
+    });
+    // A reuse attempt must never itself rotate/mint a new session.
+    expect((prisma.refreshToken.update as jest.Mock)).not.toHaveBeenCalled();
+  });
+
+  it('rejects an expired token without treating it as a reuse/theft signal', async () => {
+    const row = { id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() - 1000) };
+    const { service, prisma } = buildService(row);
+
+    await expect(service.refresh('expired-refresh-token')).rejects.toThrow();
+    expect((prisma.refreshToken.updateMany as jest.Mock)).not.toHaveBeenCalled();
+  });
+});
