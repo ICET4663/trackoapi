@@ -149,6 +149,7 @@ export class PaymentProviderService {
           provider,
           payment.reference,
         );
+        if (escrowUpdated) await this.savePaymentMethodFromAuthorization(payment.shipmentId, payment.authorization);
       }
     }
 
@@ -216,6 +217,16 @@ export class PaymentProviderService {
         amount?: number;
         currency?: string;
         metadata?: { shipmentId?: string; purpose?: string };
+        authorization?: {
+          authorization_code?: string;
+          card_type?: string;
+          bank?: string;
+          last4?: string;
+          exp_month?: string;
+          exp_year?: string;
+          channel?: string;
+          reusable?: boolean;
+        };
       };
     };
 
@@ -224,6 +235,7 @@ export class PaymentProviderService {
     const escrowUpdated = verified && payment.shipmentId
       ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference)
       : false;
+    if (escrowUpdated && payment.shipmentId) await this.savePaymentMethodFromAuthorization(payment.shipmentId, payment.authorization);
 
     try {
       await this.prisma.auditLog.create({
@@ -468,6 +480,16 @@ export class PaymentProviderService {
         amount?: number;
         currency?: string;
         metadata?: { shipmentId?: string; purpose?: string };
+        authorization?: {
+          authorization_code?: string;
+          card_type?: string;
+          bank?: string;
+          last4?: string;
+          exp_month?: string;
+          exp_year?: string;
+          channel?: string;
+          reusable?: boolean;
+        };
       };
     };
     return {
@@ -476,7 +498,56 @@ export class PaymentProviderService {
       amount: typeof payload.data?.amount === 'number' ? payload.data.amount : undefined,
       currency: payload.data?.currency,
       shipmentId: payload.data?.metadata?.shipmentId,
+      authorization: payload.data?.authorization,
     };
+  }
+
+  // Paystack's own flow for "saving a card": a successful card charge with
+  // reusable=true returns an authorization_code good for future off-session charges.
+  // There's no separate "add a card without paying" API - so the customer's card is
+  // saved automatically the first time they fund escrow with one, same as most apps
+  // built on Paystack. Bank transfer/USSD charges are not reusable, so those never
+  // create a saved "payment method" here.
+  private async savePaymentMethodFromAuthorization(
+    shipmentId: string,
+    authorization?: {
+      authorization_code?: string;
+      card_type?: string;
+      bank?: string;
+      last4?: string;
+      exp_month?: string;
+      exp_year?: string;
+      channel?: string;
+      reusable?: boolean;
+    },
+  ) {
+    if (!authorization?.reusable || !authorization.authorization_code || authorization.channel !== 'card') return;
+
+    try {
+      const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId }, select: { customerId: true } });
+      if (!shipment) return;
+
+      const detail = `auth:${authorization.authorization_code}`;
+      const existing = await this.prisma.paymentMethod.findFirst({ where: { userId: shipment.customerId, detail } });
+      if (existing) return;
+
+      const isFirstMethod = (await this.prisma.paymentMethod.count({ where: { userId: shipment.customerId } })) === 0;
+
+      await this.prisma.paymentMethod.create({
+        data: {
+          userId: shipment.customerId,
+          brand: authorization.card_type ?? authorization.bank ?? 'Card',
+          maskedNumber: authorization.last4 ? `**** ${authorization.last4}` : '****',
+          detail,
+          type: 'CARD',
+          isDefault: isFirstMethod,
+          expiry: authorization.exp_month && authorization.exp_year ? `${authorization.exp_month}/${authorization.exp_year.slice(-2)}` : undefined,
+        },
+      });
+    } catch {
+      // Saving the card for reuse is a convenience on top of a successful payment -
+      // the escrow funding itself must not be treated as failed if this part errors.
+    }
   }
 
   private toJson(value: unknown): Prisma.InputJsonValue {

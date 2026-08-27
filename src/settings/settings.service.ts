@@ -875,6 +875,24 @@ export class SettingsService {
     return methods.find((method: { id: string }) => method.id === id) ?? { ...methods[0], id };
   }
 
+  // Previously always returned { ...method, isDefault: true } without writing anything -
+  // the change never actually persisted, so it silently reverted the next time the list
+  // was fetched.
+  async setDefaultPaymentMethod(id: string, userId: string) {
+    const owned = await this.prisma.paymentMethod.findFirst({ where: { id, userId } });
+    if (!owned) throw new NotFoundException('Payment method not found.');
+    await this.prisma.paymentMethod.updateMany({ where: { userId }, data: { isDefault: false } });
+    return this.prisma.paymentMethod.update({ where: { id }, data: { isDefault: true } });
+  }
+
+  // Previously had no auth check and no real query at all - just always returned
+  // { deleted: true }, whether or not a method with that id (or a valid session) existed.
+  async removePaymentMethod(id: string, userId: string) {
+    const result = await this.prisma.paymentMethod.deleteMany({ where: { id, userId } });
+    if (result.count === 0) throw new NotFoundException('Payment method not found.');
+    return { deleted: true };
+  }
+
   async billingHistory(userId = 'preview-customer') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(

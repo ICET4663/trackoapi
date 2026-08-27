@@ -163,17 +163,13 @@ export class SettingsController {
   @Post('customer/payment-methods/:id/default')
   async setDefaultPaymentMethod(@Param('id') id: string, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
-    return { ...(await this.settingsService.paymentMethod(id, user.sub)), isDefault: true };
+    return this.settingsService.setDefaultPaymentMethod(id, user.sub);
   }
 
   @Delete('customer/payment-methods/:id')
-  removePaymentMethod() {
-    return { deleted: true };
-  }
-
-  @Post('customer/payment-methods/setup')
-  createPaymentSetup() {
-    return { message: 'Payment setup is disabled in preview.' };
+  async removePaymentMethod(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.removePaymentMethod(id, user.sub);
   }
 
   @Get('customer/billing-history')
