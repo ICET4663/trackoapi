@@ -582,9 +582,13 @@ export class ShipmentsService {
           createdAt: Date;
         }[]
       >(
-        `insert into "ShipmentTimeline" ("shipmentId", "status", "note")
-         values ($1, cast($2 as "ShipmentStatus"), $3)
+        `insert into "ShipmentTimeline" ("id", "shipmentId", "status", "note")
+         values ($1, $2, cast($3 as "ShipmentStatus"), $4)
          returning "id", "status"::text as "status", "note", "createdAt"`,
+        // "id" has no database-level default (Prisma's @default(cuid()) is client-side
+        // only) - this raw insert must generate its own, or a manually-added timeline
+        // note silently never gets saved even though the shipment's status still flips.
+        `tl_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         nextStatus,
         event.note ? String(event.note) : String(event.label ?? 'Shipment updated'),
