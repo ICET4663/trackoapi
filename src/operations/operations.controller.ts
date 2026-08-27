@@ -28,6 +28,12 @@ export class OperationsController {
     return this.operations.workflowReadiness(user);
   }
 
+  @Get('alerts')
+  async alerts(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    return this.operations.alerts(user);
+  }
+
   @Get('escrow-ledger')
   async escrowLedger(@Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'ADMIN');

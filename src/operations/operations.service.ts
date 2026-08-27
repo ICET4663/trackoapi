@@ -221,6 +221,80 @@ export class OperationsService {
     }
   }
 
+  // Real operational alerts computed from actual trip data - deliberately narrower than
+  // a typical "alerts" screen: only flags what can honestly be derived from data that
+  // exists (GPS ping recency, elapsed time vs. quoted duration). No route-deviation
+  // detection (would need real route geometry, not built) and no document-expiry
+  // tracking (no such column exists on Vehicle yet) - those are left out entirely
+  // rather than faked.
+  async alerts(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+    const ACTIVE_STATUSES: ShipmentStatus[] = [
+      'DRIVER_ASSIGNED',
+      'DRIVER_EN_ROUTE',
+      'ARRIVED_PICKUP',
+      'PICKED_UP',
+      'IN_TRANSIT',
+      'ARRIVED_DESTINATION',
+    ];
+    const STALE_GPS_MINUTES = 20;
+    const DELAY_BUFFER = 1.25;
+
+    try {
+      const shipments = await this.prisma.shipment.findMany({
+        where: { status: { in: ACTIVE_STATUSES } },
+        include: {
+          timeline: { orderBy: { createdAt: 'asc' } },
+          locationPings: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      });
+
+      const now = Date.now();
+      const alerts: Array<{ id: string; type: 'delayed' | 'stale_gps'; icon: string; title: string; detail: string; shipmentId: string; createdAt: string }> = [];
+
+      for (const shipment of shipments) {
+        const latestPing = shipment.locationPings[0];
+        const pingAgeMinutes = latestPing ? (now - latestPing.createdAt.getTime()) / 60000 : null;
+        if (pingAgeMinutes === null || pingAgeMinutes > STALE_GPS_MINUTES) {
+          alerts.push({
+            id: `stale-${shipment.id}`,
+            type: 'stale_gps',
+            icon: 'location-off',
+            title: 'GPS signal stale',
+            detail: latestPing
+              ? `${shipment.reference} · Last update ${Math.round(pingAgeMinutes!)} min ago`
+              : `${shipment.reference} · No location received yet`,
+            shipmentId: shipment.id,
+            createdAt: (latestPing?.createdAt ?? shipment.updatedAt).toISOString(),
+          });
+        }
+
+        const movingSince = shipment.timeline.find((event) => event.status === 'IN_TRANSIT' || event.status === 'DRIVER_EN_ROUTE');
+        if (movingSince && shipment.durationMinutes) {
+          const elapsedMinutes = (now - movingSince.createdAt.getTime()) / 60000;
+          if (elapsedMinutes > shipment.durationMinutes * DELAY_BUFFER) {
+            alerts.push({
+              id: `delayed-${shipment.id}`,
+              type: 'delayed',
+              icon: 'schedule',
+              title: 'Shipment delayed',
+              detail: `${shipment.reference} · ${Math.round(elapsedMinutes - shipment.durationMinutes)} min over estimate`,
+              shipmentId: shipment.id,
+              createdAt: movingSince.createdAt.toISOString(),
+            });
+          }
+        }
+      }
+
+      return alerts.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    } catch (error) {
+      this.logger.error(`alerts() failed: ${this.errorMessage(error)}`);
+      return [];
+    }
+  }
+
   async workflowReadiness(actor: OperationActor) {
     this.assertCanOperate(actor.role);
 
