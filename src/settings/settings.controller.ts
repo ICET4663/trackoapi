@@ -202,9 +202,19 @@ export class SettingsController {
     return this.settingsService.requestDriverWithdrawal(user.sub, body);
   }
 
+  @Get('driver/payout-account/banks')
+  async payoutBanks(@Headers('authorization') authorization?: string) {
+    await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.payoutBanks();
+  }
+
   @Post('driver/payout-account/change-request')
-  createBankAccountChange() {
-    return { message: 'Payout account changes are disabled in preview.' };
+  async createBankAccountChange(
+    @Body() body: { bankCode?: string; bankName?: string; accountNumber?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.setPayoutAccount(user.sub, body);
   }
 
   @Get('driver/documents')

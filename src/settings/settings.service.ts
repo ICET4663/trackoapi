@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -99,6 +100,7 @@ export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly config: ConfigService,
   ) {}
 
   async accountOverview(role: Role, userId = 'preview-user', authRole?: Role) {
@@ -918,18 +920,106 @@ export class SettingsService {
       );
       if (rows[0]) return rows[0];
     } catch {
-      // Preview fallback below.
+      // A real infra failure (DB unreachable) falls through to the placeholder below too -
+      // but that placeholder must never claim `verified: true`. It previously did, which
+      // meant a driver who had never actually set up a payout account still saw a fully
+      // "Verified" fake "Preview Bank" and could pass the withdraw screen's bankReady gate
+      // with nothing real for finance to actually pay out to.
     }
 
     return {
-      id: 'bank-preview',
-      bankName: 'Preview Bank',
-      maskedNumber: '**** 0012',
-      holderName: 'Tracko Driver',
-      verified: true,
+      id: null,
+      bankName: null,
+      maskedNumber: null,
+      holderName: null,
+      verified: false,
       payoutSchedule: 'Weekly',
       pendingPayout: 'N0',
     };
+  }
+
+  // Paystack's real-time account-name resolution, not a fake "verification URL" flow -
+  // the previous "Change bank account" button opened nothing and called a stub that
+  // always said "disabled in preview."
+  async payoutBanks() {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey) throw new BadRequestException('Bank verification is not configured yet.');
+
+    const response = await fetch('https://api.paystack.co/bank?currency=NGN', {
+      headers: { Authorization: `Bearer ${secretKey}` },
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      status?: boolean;
+      data?: { name: string; code: string; slug: string }[];
+    };
+    if (!response.ok || !payload.status) throw new BadRequestException('Could not load the bank list. Please try again.');
+
+    return (payload.data ?? []).map((bank) => ({ name: bank.name, code: bank.code, slug: bank.slug }));
+  }
+
+  async setPayoutAccount(userId: string, input: { bankCode?: string; bankName?: string; accountNumber?: string }) {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey) throw new BadRequestException('Bank verification is not configured yet.');
+
+    const bankCode = String(input.bankCode ?? '').trim();
+    const accountNumber = String(input.accountNumber ?? '').trim();
+    if (!bankCode || accountNumber.length < 10) {
+      throw new BadRequestException('A valid bank and 10-digit account number are required.');
+    }
+
+    const response = await fetch(
+      `https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
+      { headers: { Authorization: `Bearer ${secretKey}` } },
+    );
+    const payload = (await response.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { account_number?: string; account_name?: string };
+    };
+    if (!response.ok || !payload.status || !payload.data?.account_name) {
+      throw new BadRequestException(payload.message || 'Could not verify this account number with the bank. Please check the details and try again.');
+    }
+
+    const resolvedName = payload.data.account_name;
+    const driverName = (await this.prisma.$queryRawUnsafe<{ fullName: string | null }[]>(
+      'select p."fullName" from "Profile" p where p."userId" = $1 limit 1',
+      userId,
+    ).catch(() => [])) [0]?.fullName;
+
+    // The account name Paystack resolves must reasonably match the driver's own verified
+    // identity - otherwise this is exactly the kind of "payout to someone else's account"
+    // fraud pattern the (pre-existing) UI copy already warns about, now actually enforced.
+    const nameMatches = driverName ? this.namesRoughlyMatch(resolvedName, driverName) : false;
+
+    const maskedNumber = `**** ${accountNumber.slice(-4)}`;
+    await this.prisma.$queryRawUnsafe(
+      `insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule")
+       values ($1, $2, $3, $4, $5, $6, 'Weekly')
+       on conflict ("userId") do update set
+         "bankName" = excluded."bankName",
+         "maskedNumber" = excluded."maskedNumber",
+         "holderName" = excluded."holderName",
+         "verified" = excluded."verified",
+         "updatedAt" = current_timestamp`,
+      `bank-${userId}`,
+      userId,
+      input.bankName ?? bankCode,
+      maskedNumber,
+      resolvedName,
+      nameMatches,
+    );
+
+    return this.bankAccount(userId);
+  }
+
+  private namesRoughlyMatch(a: string, b: string) {
+    const words = (value: string) => new Set(value.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter((word) => word.length > 1));
+    const wordsA = words(a);
+    const wordsB = words(b);
+    for (const word of wordsA) {
+      if (wordsB.has(word)) return true;
+    }
+    return false;
   }
 
   async driverRatingSummary(driverId: string) {
