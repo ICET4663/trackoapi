@@ -1198,7 +1198,11 @@ export class SettingsService {
       'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
       userId,
     );
-    if (driver && driver.verificationStatus !== 'VERIFIED') {
+    // Fails closed: `driver` coming back empty (no matching User row) must be treated the
+    // same as "not verified", not silently skipped. The original `driver && ...` check let
+    // an unverified/unresolvable driver bypass the KYC gate entirely if this query ever
+    // returned zero rows for a valid session.
+    if (!driver || driver.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Complete KYC approval before requesting driver payout.');
     }
 

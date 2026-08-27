@@ -59,7 +59,11 @@ export class PaymentProviderService {
         'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
         input.customerId,
       );
-      if (customer && customer.verificationStatus !== 'VERIFIED') {
+      // Fails closed: `customer` coming back empty (no matching User row for a customerId
+      // the caller supplied) must be treated the same as "not verified", not silently
+      // skipped - the original `customer && ...` check let an unresolvable customerId
+      // bypass the KYC gate entirely instead of rejecting it.
+      if (!customer || customer.verificationStatus !== 'VERIFIED') {
         throw new BadRequestException('Complete KYC approval before funding escrow.');
       }
     }
