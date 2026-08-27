@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
 import { DataCollection, DataService } from './data.service';
 
@@ -10,14 +9,16 @@ export class DataController {
     private readonly requestUser: RequestUserService,
   ) {}
 
+  // The `role` query param is a display hint only (which portal UI is asking) - it is
+  // never trusted for authorization. Every permission check uses user.role from the
+  // verified JWT, via DataService.list()/item() gating the ops-only collections.
   @Get(':collection')
   async list(
     @Param('collection') collection: DataCollection,
     @Headers('authorization') authorization?: string,
-    @Query('role') role?: UserRole,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, role ?? 'CUSTOMER');
-    return this.dataService.list(collection, user.sub);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.dataService.list(collection, user.sub, user.role);
   }
 
   @Get(':collection/:id')
@@ -25,10 +26,9 @@ export class DataController {
     @Param('collection') collection: DataCollection,
     @Param('id') id: string,
     @Headers('authorization') authorization?: string,
-    @Query('role') role?: UserRole,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, role ?? 'CUSTOMER');
-    return this.dataService.item(collection, id, user.sub);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.dataService.item(collection, id, user.sub, user.role);
   }
 
   @Post(':collection')
@@ -36,9 +36,8 @@ export class DataController {
     @Param('collection') collection: DataCollection,
     @Body() body: Record<string, unknown>,
     @Headers('authorization') authorization?: string,
-    @Query('role') role?: UserRole,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, role ?? 'CUSTOMER');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
     return this.dataService.create(collection, body, user.sub);
   }
 }

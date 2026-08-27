@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -9,6 +9,7 @@ export type DataCollection =
   | 'chat-threads'
   | 'verification'
   | 'owner-trucks'
+  | 'driver-vehicles'
   | 'seeking-drivers'
   | 'dispatcher-shipments'
   | 'dispatcher-disputes'
@@ -18,19 +19,56 @@ export type DataCollection =
   | 'driver-jobs'
   | 'active-trips';
 
+// These collections return platform-wide data (every user's PII, every shipment,
+// every dispute) with no per-user scoping - only ops staff may read them. Everything
+// else here is already scoped to the caller's own userId inside its case branch.
+const OPS_ONLY_COLLECTIONS = new Set<DataCollection>([
+  'dispatcher-shipments',
+  'dispatcher-disputes',
+  'platform-users',
+  'operation-drivers',
+  'operation-shipments',
+  // Unused by the frontend (real conversation listing goes through the participant-
+  // scoped /v1/conversations endpoint) - gated the same way rather than left as an
+  // unscoped bypass of that scoping.
+  'chat-threads',
+]);
+
+// Every driver's name, phone, and location, platform-wide - legitimate for a truck
+// owner browsing for drivers to hire (or ops staff), not for a bare customer/driver
+// account to enumerate.
+const OWNER_OR_OPS_COLLECTIONS = new Set<DataCollection>(['seeking-drivers']);
+
 @Injectable()
 export class DataService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(collection: DataCollection, userId: string) {
+  async list(collection: DataCollection, userId: string, role: UserRole) {
+    // Checked before the try block on purpose: the catch below exists to fall back to
+    // preview data on a real infrastructure failure, and must never also swallow this
+    // into a silent "here's some data anyway" response for someone who isn't ops staff.
+    if (OPS_ONLY_COLLECTIONS.has(collection) && role !== 'ADMIN' && role !== 'DISPATCHER') {
+      throw new ForbiddenException('Only platform operations can view this data.');
+    }
+    if (OWNER_OR_OPS_COLLECTIONS.has(collection) && !['TRUCK_OWNER', 'ADMIN', 'DISPATCHER'].includes(role)) {
+      throw new ForbiddenException('Only truck owners and platform operations can view this data.');
+    }
     try {
       switch (collection) {
         case 'customer-shipments':
+          // `id` is the real Shipment.id (cuid) - the same id the /v1/shipments/:id/...
+          // endpoints (escrow, timeline, review) expect. `reference` is the human-facing
+          // TRK-... code for display only. These must not be swapped: portal.service.ts's
+          // toCustomerShipment() produces this same CustomerShipment shape using the real
+          // id, and the two were previously inconsistent (this list used the reference as
+          // `id`), which silently broke escrow/timeline/review lookups for any shipment
+          // opened via this list instead of straight from shipment creation.
           return (await this.prisma.shipment.findMany({
             where: { customerId: userId },
             orderBy: { createdAt: 'desc' },
           })).map((shipment) => ({
-            id: shipment.reference,
+            id: shipment.id,
+            reference: shipment.reference,
             status: shipment.status,
             date: shipment.createdAt.toLocaleString('en-US', { day: '2-digit' }),
             month: shipment.createdAt.toLocaleString('en-US', { month: 'short' }).toUpperCase(),
@@ -41,7 +79,43 @@ export class DataService {
             meta: shipment.distanceKm ? `${shipment.distanceKm.toFixed(1)} km route` : shipment.pickupAddress,
           }));
         case 'owner-trucks':
-          return await this.prisma.vehicle.findMany({ where: { ownerId: userId }, orderBy: { createdAt: 'desc' } });
+          // The raw Vehicle row doesn't match the frontend's OwnerTruck shape (reg/
+          // capacity/status/documents vs plateNumber/capacityKg/isActive) - every real
+          // registered truck was rendering with those fields blank. Mapped explicitly
+          // below. `documents`/`year` have no backing column yet (no vehicle-document
+          // tracking exists), so they get an honest neutral value rather than a fake
+          // "Verified" - this is the one input this collection cannot get right until
+          // that tracking is built.
+          return (await this.prisma.vehicle.findMany({
+            where: { ownerId: userId },
+            include: { assignedDriver: { include: { profile: true } } },
+            orderBy: { createdAt: 'desc' },
+          })).map((vehicle) => ({
+            id: vehicle.id,
+            reg: vehicle.plateNumber,
+            type: vehicle.type,
+            capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            year: '—',
+            status: vehicle.assignedDriverId ? 'Assigned' : vehicle.isActive ? 'Available' : 'Maintenance',
+            base: vehicle.registrationState ?? 'Location pending',
+            assignedDriver: vehicle.assignedDriver?.profile?.fullName ?? vehicle.assignedDriver?.email,
+            documents: 'Incomplete',
+          }));
+        case 'driver-vehicles':
+          // The truck(s) this driver is currently assigned to drive - not the owner's
+          // full fleet.
+          return (await this.prisma.vehicle.findMany({
+            where: { assignedDriverId: userId },
+            include: { owner: { include: { profile: true } } },
+            orderBy: { updatedAt: 'desc' },
+          })).map((vehicle) => ({
+            id: vehicle.id,
+            reg: vehicle.plateNumber,
+            type: vehicle.type,
+            capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            status: vehicle.isActive ? 'Active' : 'Inactive',
+            owner: vehicle.owner.profile?.fullName ?? vehicle.owner.email,
+          }));
         case 'driver-jobs':
         case 'active-trips':
           return await this.prisma.driverAssignment.findMany({
@@ -97,8 +171,8 @@ export class DataService {
     }
   }
 
-  async item(collection: DataCollection, id: string, userId: string) {
-    const items = await this.list(collection, userId);
+  async item(collection: DataCollection, id: string, userId: string, role: UserRole) {
+    const items = await this.list(collection, userId, role);
     return items.find((item: { id: string }) => item.id === id) ?? { id };
   }
 
@@ -117,6 +191,33 @@ export class DataService {
               cargoDescription: String(item.cargoDescription ?? item.commodity ?? 'Cargo'),
             },
           });
+        case 'owner-trucks': {
+          // register-truck.tsx tells the owner "saved to the backend fleet database" -
+          // the default branch below only ever echoed the submitted form fields back
+          // with a local id and never wrote a Vehicle row, so that message was false
+          // and the truck vanished on reload.
+          const plateNumber = String(item.reg ?? item.plateNumber ?? '').trim().toUpperCase();
+          if (!plateNumber) throw new BadRequestException('A registration/plate number is required.');
+          const vehicle = await this.prisma.vehicle.create({
+            data: {
+              ownerId: userId,
+              plateNumber,
+              type: String(item.type ?? 'Flatbed'),
+              capacityKg: this.parseCapacityKg(item.capacity),
+              registrationState: item.base ? String(item.base) : null,
+            },
+          });
+          return {
+            id: vehicle.id,
+            reg: vehicle.plateNumber,
+            type: vehicle.type,
+            capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            year: '—',
+            status: 'Available',
+            base: vehicle.registrationState ?? 'Location pending',
+            documents: 'Incomplete',
+          };
+        }
         default:
           return { ...item, id: String(item.id ?? `local_${Date.now()}`) };
       }
@@ -446,6 +547,17 @@ export class DataService {
     return `N${Math.round(amountKobo / 100).toLocaleString('en-US')}`;
   }
 
+  // Owners type free text like "30 tons" or "12000 kg" into the capacity field - pull
+  // the leading number out and assume tons unless "kg" is explicitly present.
+  private parseCapacityKg(input: unknown): number | null {
+    const raw = String(input ?? '').trim().toLowerCase();
+    const match = raw.match(/[\d.]+/);
+    if (!match) return null;
+    const value = Number(match[0]);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return raw.includes('kg') ? Math.round(value) : Math.round(value * 1000);
+  }
+
   private ageLabel(date: Date) {
     const hours = Math.max(1, Math.round((Date.now() - date.getTime()) / 36e5));
     if (hours < 24) return `${hours}h`;
@@ -474,6 +586,7 @@ export class DataService {
         return [
           {
             id: 'TRK-1024',
+            reference: 'TRK-1024',
             status: 'IN_TRANSIT',
             date: '22',
             month: 'JUL',
