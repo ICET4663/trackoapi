@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -565,6 +565,13 @@ export class SettingsService {
         : '';
     const message = `${input.message ?? `${input.topic} reported from the ${role.toLowerCase()} app.`}${location}`;
 
+    // This is the single most safety-critical write path in the app - a driver or
+    // customer using this believes operations has been alerted. The catch below used to
+    // swallow ANY failure here (DB unreachable, bad connection, anything) into a fake
+    // { sent: true, reported: true } response, meaning an emergency could silently go
+    // completely unreported while the app told the person help was on the way. A real
+    // failure must surface as a real failure so the caller knows to try another channel
+    // (call emergency services / dispatch directly) instead of trusting a false positive.
     try {
       await this.prisma.$executeRawUnsafe(
         `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status")
@@ -575,71 +582,75 @@ export class SettingsService {
         input.topic,
         message,
       );
-
-      await Promise.all([
-        this.notifications.create({
-          role: 'ADMIN',
-          title: input.topic,
-          body: message,
-          tone: 'DANGER',
-          entity: 'SupportTicket',
-          entityId: id,
-          actionUrl: '/admin/support',
-        }),
-        this.notifications.create({
-          role: 'DISPATCHER',
-          title: input.topic,
-          body: message,
-          tone: 'DANGER',
-          entity: 'SupportTicket',
-          entityId: id,
-          actionUrl: '/dispatcher/support',
-        }),
-        this.notifications.create({
-          userId,
-          title: 'Safety alert received',
-          body: input.userMessage,
-          tone: 'WARNING',
-          entity: 'SupportTicket',
-          entityId: id,
-          actionUrl: role === 'DRIVER' ? '/driver/safety-settings' : '/customer/support',
-        }),
-      ]);
-
-      await this.prisma.auditLog.create({
-        data: {
-          actorId: userId,
-          action: input.action,
-          entity: 'SupportTicket',
-          entityId: id,
-          metadata: {
-            role,
-            shipmentId: input.shipmentId ?? null,
-            latitude: input.latitude ?? null,
-            longitude: input.longitude ?? null,
-            priority: 'HIGH',
-          },
-        },
-      }).catch(() => null);
-
-      return {
-        sent: true,
-        reported: true,
-        ticketId: id,
-        status: 'OPEN',
-        priority: 'HIGH',
-        message: input.userMessage,
-      };
-    } catch {
-      return {
-        sent: true,
-        reported: true,
-        ticketId: id,
-        status: 'OPEN',
-        priority: 'HIGH',
-        message: `${input.topic} captured in preview mode.`,
-      };
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Could not report this ${input.topic.toLowerCase()}. Please try again immediately, or contact emergency services directly if you cannot wait: ${this.errorMessage(error)}`,
+      );
     }
+
+    // Notifying staff is the actual point of an emergency alert, not a nice-to-have - but
+    // NotificationsService.create() already never throws (it falls back to an in-memory
+    // preview record on its own DB errors), so this can't silently mask a real failure the
+    // way the removed outer catch did. The ticket itself (the source of truth staff can
+    // find in the support queue) is already safely persisted above regardless.
+    await Promise.all([
+      this.notifications.create({
+        role: 'ADMIN',
+        title: input.topic,
+        body: message,
+        tone: 'DANGER',
+        entity: 'SupportTicket',
+        entityId: id,
+        actionUrl: '/admin/support',
+      }),
+      this.notifications.create({
+        role: 'DISPATCHER',
+        title: input.topic,
+        body: message,
+        tone: 'DANGER',
+        entity: 'SupportTicket',
+        entityId: id,
+        actionUrl: '/dispatcher/support',
+      }),
+      this.notifications.create({
+        userId,
+        title: 'Safety alert received',
+        body: input.userMessage,
+        tone: 'WARNING',
+        entity: 'SupportTicket',
+        entityId: id,
+        actionUrl: role === 'DRIVER' ? '/driver/safety-settings' : '/customer/support',
+      }),
+    ]);
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: input.action,
+        entity: 'SupportTicket',
+        entityId: id,
+        metadata: {
+          role,
+          shipmentId: input.shipmentId ?? null,
+          latitude: input.latitude ?? null,
+          longitude: input.longitude ?? null,
+          priority: 'HIGH',
+        },
+      },
+    }).catch(() => null);
+
+    return {
+      sent: true,
+      reported: true,
+      ticketId: id,
+      status: 'OPEN',
+      priority: 'HIGH',
+      message: input.userMessage,
+    };
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   async supportTickets() {
