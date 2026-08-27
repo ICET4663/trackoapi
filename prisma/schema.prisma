@@ -177,6 +177,8 @@ model User {
   payouts Payout[] @relation("DriverPayouts")
   customerReviews Review[] @relation("CustomerReviews")
   driverReviews   Review[] @relation("DriverReviews")
+  customerConversations Conversation[] @relation("CustomerConversations")
+  driverConversations   Conversation[] @relation("DriverConversations")
 }
 
 model Profile {
@@ -280,6 +282,7 @@ model Shipment {
   locationPings ShipmentLocationPing[]
   deliveryProofs DeliveryProof[]
   review        Review?
+  conversation  Conversation?
 }
 
 model Review {
@@ -662,11 +665,28 @@ model Notification {
 }
 
 model Conversation {
-  id        String    @id @default(cuid())
-  subject   String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  messages  Message[]
+  id         String    @id @default(cuid())
+  subject    String?
+  // Nullable so legacy/admin threads created before scoping existed keep working.
+  // A real shipment thread always has shipmentId + customerId set (driverId once
+  // one is assigned) so listConversations/listMessages/sendMessage can enforce
+  // "only participants (or ops) may read or write this conversation".
+  shipmentId String?
+  customerId String?
+  driverId   String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  customer User?     @relation("CustomerConversations", fields: [customerId], references: [id])
+  driver   User?     @relation("DriverConversations", fields: [driverId], references: [id])
+  messages Message[]
+
+  // NULLs are distinct under a Postgres unique index, so this only enforces
+  // "one conversation per shipment" for real shipment threads, not the legacy ones.
+  @@unique([shipmentId])
+  @@index([customerId])
+  @@index([driverId])
 }
 
 model Message {

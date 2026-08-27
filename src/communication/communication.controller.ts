@@ -13,22 +13,30 @@ export class CommunicationController {
     private readonly requestUser: RequestUserService,
   ) {}
 
-  // NOTE: conversations are not yet scoped to participants at the schema level (no
-  // customerId/driverId/shipmentId on Conversation), so any authenticated user currently
-  // sees every conversation on the platform, not just their own. Deriving the role from
-  // the verified token (instead of a client-supplied ?role= query param) at least stops
-  // someone from viewing conversations *as* a role they don't hold. Proper per-user
-  // scoping needs a schema change - flagged as a follow-up, not fixed here.
+  // Conversations are scoped to their two participants (customerId/driverId on the
+  // Conversation row) - listConversations only returns the caller's own threads, and
+  // listMessages/sendMessage assert the caller is one of the two participants (or ops
+  // staff) before allowing access. Legacy threads created before scoping existed
+  // (customerId/driverId both null) stay reachable by anyone, unchanged.
   @Get('conversations')
   async listConversations(@Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.communicationService.listConversations(user.role);
+    return this.communicationService.listConversations(user);
+  }
+
+  // Gets (or lazily creates) the single conversation thread for a shipment, scoped to
+  // its customer and assigned driver. This is the real entry point for "message the
+  // driver/customer about this shipment" - the client never invents a conversation id.
+  @Post('shipments/:shipmentId/conversation')
+  async getShipmentConversation(@Param('shipmentId') shipmentId: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.getOrCreateShipmentConversation(shipmentId, user);
   }
 
   @Get('conversations/:conversationId/messages')
   async listMessages(@Param('conversationId') conversationId: string, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.communicationService.listMessages(conversationId);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.communicationService.listMessages(conversationId, user);
   }
 
   @Post('conversations/:conversationId/messages')
@@ -38,7 +46,7 @@ export class CommunicationController {
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.communicationService.sendMessage(conversationId, user.sub, dto);
+    return this.communicationService.sendMessage(conversationId, user.sub, dto, user);
   }
 
   @Post('conversations/:conversationId/typing')

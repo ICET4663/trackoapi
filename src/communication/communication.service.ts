@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
+import type { AuthUser } from '../common/types/auth-user';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -16,9 +17,76 @@ export class CommunicationService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async listConversations(role: UserRole) {
+  // A conversation created with a customerId/driverId is scoped: only those two
+  // people (or ops staff) may read/write it. A conversation with both null is a
+  // legacy/admin-mock thread from before scoping existed - left open rather than
+  // locking existing admin/dispatcher screens out of threads they already use.
+  private async assertConversationAccess(
+    conversation: { customerId: string | null; driverId: string | null },
+    user: AuthUser,
+  ) {
+    if (user.role === 'ADMIN' || user.role === 'DISPATCHER') return;
+    if (!conversation.customerId && !conversation.driverId) return;
+    if (conversation.customerId === user.sub || conversation.driverId === user.sub) return;
+    throw new ForbiddenException('You do not have access to this conversation.');
+  }
+
+  // Finds (or lazily creates) the single conversation thread scoped to a shipment,
+  // so the customer and the assigned driver have exactly one place to talk about it.
+  async getOrCreateShipmentConversation(shipmentId: string, user: AuthUser) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { id: true, reference: true, customerId: true },
+    });
+    if (!shipment) throw new NotFoundException('Shipment was not found.');
+
+    let driverId: string | null = null;
+    if (user.role === 'DRIVER') {
+      const assignment = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, driverId: user.sub, status: 'ACCEPTED' },
+        select: { driverId: true },
+      });
+      if (!assignment) throw new ForbiddenException('You are not the assigned driver for this shipment.');
+      driverId = assignment.driverId;
+    } else if (user.role === 'CUSTOMER') {
+      if (shipment.customerId !== user.sub) throw new ForbiddenException('You do not have access to this shipment.');
+    } else if (user.role !== 'ADMIN' && user.role !== 'DISPATCHER') {
+      throw new ForbiddenException('You do not have access to this shipment.');
+    }
+
+    if (!driverId) {
+      const acceptedAssignment = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, status: 'ACCEPTED' },
+        select: { driverId: true },
+      });
+      driverId = acceptedAssignment?.driverId ?? null;
+    }
+
+    const conversation = await this.prisma.conversation.upsert({
+      where: { shipmentId },
+      update: driverId ? { driverId } : {},
+      create: {
+        subject: `Shipment ${shipment.reference}`,
+        shipmentId,
+        customerId: shipment.customerId,
+        driverId,
+      },
+    });
+
+    return { id: conversation.id, shipmentId, subject: conversation.subject };
+  }
+
+  async listConversations(user: AuthUser) {
     try {
+      const where =
+        user.role === 'CUSTOMER'
+          ? { customerId: user.sub }
+          : user.role === 'DRIVER'
+            ? { driverId: user.sub }
+            : {}; // ADMIN/DISPATCHER get operational visibility across all threads.
+
       const conversations = await this.prisma.conversation.findMany({
+        where,
         include: {
           messages: {
             orderBy: { createdAt: 'desc' },
@@ -34,7 +102,7 @@ export class CommunicationService {
         const lastMessage = conversation.messages[0];
         return {
           id: conversation.id,
-          role,
+          role: user.role,
           title: conversation.subject ?? 'Tracko conversation',
           subtitle: lastMessage?.body ?? lastMessage?.transcript ?? 'No messages yet',
           lastMessageAt: lastMessage?.createdAt?.toISOString() ?? conversation.updatedAt.toISOString(),
@@ -46,13 +114,14 @@ export class CommunicationService {
     }
   }
 
-  async listMessages(conversationId: string) {
+  async listMessages(conversationId: string, user: AuthUser) {
     try {
       const conversation = await this.prisma.conversation.upsert({
         where: { id: conversationId },
         update: {},
         create: { id: conversationId, subject: 'Tracko conversation' },
       });
+      await this.assertConversationAccess(conversation, user);
 
       const messages = await this.prisma.message.findMany({
         where: { conversationId },
@@ -65,7 +134,8 @@ export class CommunicationService {
         typingUserIds: [],
         messages: messages.map((message) => this.toMessageRecord(message)),
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof ForbiddenException) throw error;
       return {
         conversation: {
           id: conversationId,
@@ -89,13 +159,14 @@ export class CommunicationService {
     }
   }
 
-  async sendMessage(conversationId: string, senderId: string, dto: SendMessageDto) {
+  async sendMessage(conversationId: string, senderId: string, dto: SendMessageDto, user: AuthUser) {
     try {
-      await this.prisma.conversation.upsert({
+      const conversation = await this.prisma.conversation.upsert({
         where: { id: conversationId },
         update: { updatedAt: new Date() },
         create: { id: conversationId, subject: 'Tracko conversation' },
       });
+      await this.assertConversationAccess(conversation, user);
 
       const message = await this.prisma.message.create({
         data: {
@@ -117,7 +188,8 @@ export class CommunicationService {
       });
 
       return this.toMessageRecord(message);
-    } catch {
+    } catch (error) {
+      if (error instanceof ForbiddenException) throw error;
       return {
         id: dto.id ?? `msg-${Date.now()}`,
         conversationId,
