@@ -82,8 +82,8 @@ export class ShipmentsController {
 
   @Get(':id/assignments')
   async listAssignments(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.shipmentsService.listAssignments(id);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.shipmentsService.listAssignments(id, user.sub, user.role);
   }
 
   @Post(':id/assignments')

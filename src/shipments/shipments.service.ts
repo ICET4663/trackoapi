@@ -434,7 +434,21 @@ export class ShipmentsService {
     }
   }
 
-  async listAssignments(shipmentId: string) {
+  async listAssignments(shipmentId: string, userId?: string, role?: UserRole) {
+    if (userId && role) {
+      const shipment = await this.prisma.shipment.findUnique({
+        where: { id: shipmentId },
+        select: {
+          customerId: true,
+          assignments: { select: { driverId: true, vehicle: { select: { ownerId: true } } } },
+        },
+      });
+      if (!shipment) throw new NotFoundException('Shipment not found.');
+      const canView = ['ADMIN', 'DISPATCHER'].includes(role)
+        || shipment.customerId === userId
+        || shipment.assignments.some((assignment) => assignment.driverId === userId || assignment.vehicle?.ownerId === userId);
+      if (!canView) throw new ForbiddenException('You do not have access to this shipment assignment history.');
+    }
     await this.expireStaleAssignmentOffers(shipmentId);
     try {
       const validityMinutes = await this.assignmentOfferValidityMinutes();

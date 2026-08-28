@@ -147,7 +147,7 @@ export class OperationsService {
             limit 1
           ) da on true
           where e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
-            and s."status" in ('ESCROW_FUNDED'::"ShipmentStatus", 'QUOTED'::"ShipmentStatus", 'PENDING_PAYMENT'::"ShipmentStatus")
+            and s."status" in ('ESCROW_FUNDED'::"ShipmentStatus", 'QUOTED'::"ShipmentStatus", 'PENDING_PAYMENT'::"ShipmentStatus", 'DRIVER_ASSIGNED'::"ShipmentStatus")
             and s."adminApproved" = true
           order by s."createdAt" desc
           limit 50`,

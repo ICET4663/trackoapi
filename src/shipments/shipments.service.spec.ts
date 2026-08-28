@@ -217,3 +217,21 @@ describe('ShipmentsService driver assignment offer expiry', () => {
     );
   });
 });
+
+describe('ShipmentsService.listAssignments access control', () => {
+  it('does not expose assignment history to an unrelated authenticated user', async () => {
+    const prisma = {
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({
+          customerId: 'customer-owner',
+          assignments: [{ driverId: 'driver-1', vehicle: { ownerId: 'truck-owner-1' } }],
+        }),
+      },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.listAssignments('shipment-1', 'unrelated-user', 'CUSTOMER')).rejects.toThrow(
+      'do not have access',
+    );
+  });
+});
