@@ -10,31 +10,35 @@ import type { ConfigService } from '@nestjs/config';
 describe('CronController.autoReleaseEscrow requires a real CRON_SECRET', () => {
   function buildController(configuredSecret: string | undefined) {
     const autoReleaseEligibleEscrows = jest.fn().mockResolvedValue({ candidateCount: 0, releasedCount: 0, results: [] });
-    const shipments = { autoReleaseEligibleEscrows } as unknown as ShipmentsService;
+    const expireStaleAssignmentOffers = jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 });
+    const shipments = { autoReleaseEligibleEscrows, expireStaleAssignmentOffers } as unknown as ShipmentsService;
     const config = { get: () => configuredSecret } as unknown as ConfigService;
-    return { controller: new CronController(shipments, config), autoReleaseEligibleEscrows };
+    return { controller: new CronController(shipments, config), autoReleaseEligibleEscrows, expireStaleAssignmentOffers };
   }
 
   it('refuses the request outright when CRON_SECRET is not configured at all', async () => {
-    const { controller, autoReleaseEligibleEscrows } = buildController(undefined);
+    const { controller, autoReleaseEligibleEscrows, expireStaleAssignmentOffers } = buildController(undefined);
 
     await expect(controller.autoReleaseEscrow('Bearer anything')).rejects.toBeInstanceOf(ForbiddenException);
     expect(autoReleaseEligibleEscrows).not.toHaveBeenCalled();
+    expect(expireStaleAssignmentOffers).not.toHaveBeenCalled();
   });
 
   it('refuses a request with a missing or wrong bearer token', async () => {
-    const { controller, autoReleaseEligibleEscrows } = buildController('the-real-secret');
+    const { controller, autoReleaseEligibleEscrows, expireStaleAssignmentOffers } = buildController('the-real-secret');
 
     await expect(controller.autoReleaseEscrow(undefined)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(controller.autoReleaseEscrow('Bearer wrong-secret')).rejects.toBeInstanceOf(ForbiddenException);
     expect(autoReleaseEligibleEscrows).not.toHaveBeenCalled();
+    expect(expireStaleAssignmentOffers).not.toHaveBeenCalled();
   });
 
   it('runs the real auto-release job when the bearer token matches CRON_SECRET', async () => {
-    const { controller, autoReleaseEligibleEscrows } = buildController('the-real-secret');
+    const { controller, autoReleaseEligibleEscrows, expireStaleAssignmentOffers } = buildController('the-real-secret');
 
     await controller.autoReleaseEscrow('Bearer the-real-secret');
 
     expect(autoReleaseEligibleEscrows).toHaveBeenCalledTimes(1);
+    expect(expireStaleAssignmentOffers).toHaveBeenCalledTimes(1);
   });
 });

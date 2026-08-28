@@ -23,6 +23,10 @@ export class CronController {
       throw new ForbiddenException('This endpoint is only reachable by the scheduled job.');
     }
 
-    return this.shipments.autoReleaseEligibleEscrows();
+    const [escrow, assignments] = await Promise.all([
+      this.shipments.autoReleaseEligibleEscrows(),
+      this.shipments.expireStaleAssignmentOffers(),
+    ]);
+    return { escrow, assignments, ranAt: new Date().toISOString() };
   }
 }

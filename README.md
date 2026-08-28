@@ -136,6 +136,12 @@ POST /v1/shipments/assignments/:assignmentId/accept
 POST /v1/shipments/assignments/:assignmentId/reject
 ```
 
+Driver offers expire after 15 minutes by default. Admins can change
+`driverOfferValidityMinutes` in Platform settings. Rejected or expired offers are
+automatically sent to the next verified driver with a suitable active truck. The
+secured Vercel maintenance job also processes stale offers; configure `CRON_SECRET`
+in Vercel for `/v1/cron/escrow-auto-release`.
+
 Provider-ready endpoints:
 
 ```text
