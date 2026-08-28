@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { createHmac } from 'crypto';
 import { PaymentProviderService } from './payment-provider.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -60,5 +61,60 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
     await service.initializeEscrow({ amount: 500000, currency: 'NGN' });
 
     expect(paystackRequestBody().channels).toBeUndefined();
+  });
+});
+
+// verifyPaystackSignature() used a plain `digest === signature` string comparison - this
+// endpoint decides whether escrow gets marked funded, so that's a real timing side-channel
+// on a financially load-bearing check, not just a style nit. Exercised indirectly through
+// the public recordWebhook() method, since the signature check itself is private.
+describe('PaymentProviderService webhook signature verification is constant-time and crash-safe', () => {
+  const secretKey = 'sk_test_fake_webhook_secret';
+  const rawBody = JSON.stringify({ event: 'charge.success', data: { reference: 'ref-1', status: 'success' } });
+
+  function buildService() {
+    const config = {
+      get: jest.fn((key: string) => (key === 'PAYSTACK_SECRET_KEY' ? secretKey : undefined)),
+    } as unknown as ConfigService;
+    const prisma = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    return new PaymentProviderService(config, prisma, {} as NotificationsService);
+  }
+
+  it('accepts a genuinely correct signature', async () => {
+    const service = buildService();
+    const realSignature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), realSignature, rawBody);
+
+    expect(result.verified).toBe(true);
+  });
+
+  it('rejects a same-length but wrong signature', async () => {
+    const service = buildService();
+    const realSignature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
+    const tamperedSignature = `0${realSignature.slice(1)}` === realSignature ? `1${realSignature.slice(1)}` : `0${realSignature.slice(1)}`;
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), tamperedSignature, rawBody);
+
+    expect(result.verified).toBe(false);
+  });
+
+  it('rejects a shorter/malformed signature without throwing (timingSafeEqual would throw on a raw length mismatch)', async () => {
+    const service = buildService();
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), 'too-short', rawBody);
+
+    expect(result.verified).toBe(false);
+  });
+
+  it('rejects a non-hex signature without throwing', async () => {
+    const service = buildService();
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), 'not-valid-hex-!!!-zzzz'.repeat(6), rawBody);
+
+    expect(result.verified).toBe(false);
   });
 });

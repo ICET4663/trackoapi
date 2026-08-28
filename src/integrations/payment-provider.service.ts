@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -474,7 +474,17 @@ export class PaymentProviderService {
     if (!secretKey || !signature) return false;
     const payload = rawBody ?? JSON.stringify(body ?? {});
     const digest = createHmac('sha512', secretKey).update(payload).digest('hex');
-    return digest === signature;
+    // This endpoint decides whether escrow gets marked funded - a plain `===` string
+    // comparison leaks timing information about how many leading characters of the digest
+    // matched, byte by byte, which is exactly the kind of side channel a constant-time
+    // comparison exists to close (the same fix already applied to quote-token
+    // verification elsewhere in this codebase). Node's Buffer.from(str, 'hex') silently
+    // truncates at the first invalid hex character rather than throwing, so an
+    // attacker-supplied signature that isn't valid hex safely fails the length check below
+    // instead of ever reaching timingSafeEqual (which throws on mismatched lengths).
+    const suppliedBuffer = Buffer.from(signature, 'hex');
+    const digestBuffer = Buffer.from(digest, 'hex');
+    return suppliedBuffer.length === digestBuffer.length && timingSafeEqual(suppliedBuffer, digestBuffer);
   }
 
   private extractPaymentEvent(body: unknown) {
