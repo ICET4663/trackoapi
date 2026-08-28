@@ -182,6 +182,23 @@ describe('SettingsService platform settings are actually persisted', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  it('rejects a pricing adjustment outside its safe range', async () => {
+    await expect(service.updatePlatformSetting('pricingDemandSurgePercent', '75', 'admin-1')).rejects.toThrow(
+      'must not exceed 50',
+    );
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('persists a valid pricing adjustment', async () => {
+    const result = await service.updatePlatformSetting('pricingFuelSurchargePercent', '12.5', 'admin-1');
+
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { key: 'pricingFuelSurchargePercent' },
+      update: { value: '12.5', updatedById: 'admin-1' },
+    }));
+    expect(result).toMatchObject({ key: 'pricingFuelSurchargePercent', value: '12.5' });
+  });
+
   it('throws a real error instead of a fake success when the write fails', async () => {
     upsert.mockRejectedValue(new Error('connection reset'));
 
