@@ -658,6 +658,82 @@ export class ShipmentsService {
     }
   }
 
+  async cancelAssignment(assignmentId: string, actorId: string, actorRole: UserRole) {
+    if (!['ADMIN', 'DISPATCHER'].includes(actorRole)) {
+      throw new ForbiddenException('Only platform operations can cancel a driver offer.');
+    }
+
+    const assignment = await this.prisma.driverAssignment.findUnique({
+      where: { id: assignmentId },
+      include: { shipment: true, driver: { include: { profile: true } }, vehicle: true },
+    });
+    if (!assignment) throw new NotFoundException('Assignment not found.');
+    if (assignment.status !== 'OFFERED') {
+      throw new BadRequestException('Only a pending driver offer can be cancelled.');
+    }
+
+    const updated = await this.prisma.driverAssignment.update({
+      where: { id: assignmentId },
+      data: {
+        status: 'CANCELLED',
+        rejectedAt: new Date(),
+        shipment: {
+          update: {
+            status: 'QUOTED',
+            timeline: {
+              create: {
+                status: 'QUOTED',
+                note: `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
+              },
+            },
+          },
+        },
+      },
+      include: {
+        driver: { include: { profile: true } },
+        vehicle: true,
+        shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
+      },
+    });
+
+    await Promise.all([
+      this.notifications.create({
+        userId: updated.driverId,
+        role: 'DRIVER',
+        title: 'Shipment offer withdrawn',
+        body: 'Tracko operations withdrew this offer. It is no longer available to accept.',
+        tone: 'WARNING',
+        entity: 'DriverAssignment',
+        entityId: updated.id,
+        actionUrl: '/driver/jobs',
+      }).catch(() => null),
+      this.notifications.create({
+        userId: updated.shipment.customerId,
+        title: 'Driver reassignment started',
+        body: 'Operations withdrew the previous offer and is selecting another eligible driver.',
+        tone: 'INFO',
+        entity: 'Shipment',
+        entityId: updated.shipmentId,
+        actionUrl: `/shipments/${updated.shipmentId}`,
+      }).catch(() => null),
+      this.prisma.auditLog.create({
+        data: {
+          actorId,
+          action: 'DRIVER_ASSIGNMENT_CANCELLED',
+          entity: 'DriverAssignment',
+          entityId: updated.id,
+          metadata: { shipmentId: updated.shipmentId, driverId: updated.driverId },
+        },
+      }).catch(() => null),
+    ]);
+
+    const nextAssignment = await this.offerNextEligibleDriver(updated.shipmentId);
+    return {
+      ...this.toAssignmentRecord(updated, await this.assignmentOfferValidityMinutes()),
+      nextAssignment,
+    };
+  }
+
   async expireStaleAssignmentOffers(shipmentId?: string) {
     const validityMinutes = await this.assignmentOfferValidityMinutes();
     const cutoff = new Date(Date.now() - validityMinutes * 60_000);
@@ -732,7 +808,7 @@ export class ShipmentsService {
           select: { cargoWeightKg: true },
         }),
         this.prisma.driverAssignment.findMany({
-          where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED'] } },
+          where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED', 'CANCELLED'] } },
           select: { driverId: true },
         }),
         this.prisma.user.findMany({

@@ -135,7 +135,7 @@ export class OperationsService {
               select json_agg(distinct history."driverId")
               from "DriverAssignment" history
               where history."shipmentId" = s."id"
-                and history."status" in ('REJECTED'::"AssignmentStatus", 'EXPIRED'::"AssignmentStatus")
+                and history."status" in ('REJECTED'::"AssignmentStatus", 'EXPIRED'::"AssignmentStatus", 'CANCELLED'::"AssignmentStatus")
             ), '[]'::json) as "rejectedDriverIds"
           from "Shipment" s
           join "Escrow" e on e."shipmentId" = s."id"

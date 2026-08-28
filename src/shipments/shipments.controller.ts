@@ -54,6 +54,12 @@ export class ShipmentsController {
     return this.shipmentsService.respondToAssignment(assignmentId, user.sub, 'REJECT');
   }
 
+  @Post('assignments/:assignmentId/cancel')
+  async cancelAssignment(@Param('assignmentId') assignmentId: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.shipmentsService.cancelAssignment(assignmentId, user.sub, user.role);
+  }
+
   @Get(':id')
   async get(@Param('id') id: string, @Headers('authorization') authorization?: string, @Query('role') role?: UserRole) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role ?? 'CUSTOMER');

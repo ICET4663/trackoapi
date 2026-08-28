@@ -290,3 +290,41 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
     expect(driverAssignment.create).not.toHaveBeenCalled();
   });
 });
+
+describe('ShipmentsService.cancelAssignment', () => {
+  it('withdraws a pending offer, records the action, and starts reassignment', async () => {
+    const assignment = {
+      id: 'assignment-1', shipmentId: 'shipment-1', driverId: 'driver-1', vehicleId: 'vehicle-1',
+      status: 'OFFERED', offeredAt: new Date(), acceptedAt: null, rejectedAt: null,
+      driver: { id: 'driver-1', email: 'driver@tracko.ng', phone: '+2341', profile: { fullName: 'Driver One' } },
+      vehicle: { id: 'vehicle-1', plateNumber: 'TRK-1', type: 'Flatbed', capacityKg: 10000 },
+      shipment: { id: 'shipment-1', customerId: 'customer-1', timeline: [] },
+    };
+    const updated = { ...assignment, status: 'CANCELLED', rejectedAt: new Date() };
+    const auditCreate = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      driverAssignment: {
+        findUnique: jest.fn().mockResolvedValue(assignment),
+        update: jest.fn().mockResolvedValue(updated),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      shipment: { findUnique: jest.fn().mockResolvedValue({ cargoWeightKg: 8000 }) },
+      user: { findMany: jest.fn().mockResolvedValue([]) },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '15' }) },
+      auditLog: { create: auditCreate },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService;
+    const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
+
+    const result = await service.cancelAssignment('assignment-1', 'dispatcher-1', 'DISPATCHER');
+
+    expect(result).toMatchObject({ id: 'assignment-1', status: 'CANCELLED', nextAssignment: null });
+    expect(prisma.driverAssignment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'assignment-1' },
+      data: expect.objectContaining({ status: 'CANCELLED' }),
+    }));
+    expect(auditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ actorId: 'dispatcher-1', action: 'DRIVER_ASSIGNMENT_CANCELLED' }),
+    }));
+  });
+});
