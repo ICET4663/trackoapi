@@ -166,7 +166,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
           cargoDescription: 'Food', cargoWeightKg: 8000, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
           escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
           assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
-          assignmentOfferedAt: null, createdAt: new Date('2026-08-28T09:00:00.000Z'),
+          assignmentOfferedAt: null, rejectedDriverIds: [], createdAt: new Date('2026-08-28T09:00:00.000Z'),
         },
       ]),
       user: {
@@ -201,7 +201,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     const service = new OperationsService(
       prisma as unknown as PrismaService,
       {} as NotificationsService,
-      {} as ShipmentsService,
+      { expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) } as unknown as ShipmentsService,
     );
 
     const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });

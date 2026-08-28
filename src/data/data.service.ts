@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ShipmentsService } from '../shipments/shipments.service';
 
 export type DataCollection =
   | 'customer-shipments'
@@ -41,7 +42,7 @@ const OWNER_OR_OPS_COLLECTIONS = new Set<DataCollection>(['seeking-drivers']);
 
 @Injectable()
 export class DataService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly shipments?: ShipmentsService) {}
 
   async list(collection: DataCollection, userId: string, role: UserRole) {
     // Checked before the try block on purpose: the catch below exists to fall back to
@@ -118,6 +119,9 @@ export class DataService {
           }));
         case 'driver-jobs':
         case 'active-trips':
+          const offerWindow = collection === 'driver-jobs'
+            ? await this.shipments?.expireStaleAssignmentOffers()
+            : undefined;
           return await this.prisma.driverAssignment.findMany({
             where: {
               driverId: userId,
@@ -134,6 +138,8 @@ export class DataService {
             cargo: assignment.shipment.cargoDescription,
             price: this.formatMoney(assignment.shipment.quotedPriceKobo),
             status: assignment.status,
+            offeredAt: assignment.offeredAt.toISOString(),
+            expiresAt: new Date(assignment.offeredAt.getTime() + (offerWindow?.validityMinutes ?? 15) * 60_000).toISOString(),
             truck: assignment.vehicle?.plateNumber ?? 'Truck pending',
             sender: 'Tracko customer',
             senderInitial: 'TC',

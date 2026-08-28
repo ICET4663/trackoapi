@@ -155,3 +155,65 @@ describe('ShipmentsService.create is actually gated by the maintenanceMode platf
     await expect(service.create('cust-1', {} as never)).rejects.not.toThrow('maintenance mode');
   });
 });
+
+describe('ShipmentsService driver assignment offer expiry', () => {
+  function buildService() {
+    const staleOffer = {
+      id: 'assignment-1',
+      shipmentId: 'shipment-1',
+      driverId: 'driver-1',
+      status: 'OFFERED',
+      offeredAt: new Date(Date.now() - 20 * 60_000),
+      shipment: { id: 'shipment-1', customerId: 'customer-1' },
+    };
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ key: 'driverOfferValidityMinutes', value: '15' }) },
+      driverAssignment: {
+        findMany: jest.fn()
+          .mockResolvedValueOnce([staleOffer])
+          .mockResolvedValueOnce([{ driverId: 'driver-1' }]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      shipment: {
+        update: jest.fn().mockResolvedValue(undefined),
+        findUnique: jest.fn().mockResolvedValue({ cargoWeightKg: 8000 }),
+      },
+      user: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'driver-2',
+            driverVehicles: [{ id: 'vehicle-2', capacityKg: 10000, isActive: true }],
+            driverAssignments: [],
+          },
+        ]),
+      },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService;
+    const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
+    service.offerAssignment = jest.fn().mockResolvedValue({ id: 'assignment-2', status: 'OFFERED' }) as never;
+    return { service, prisma, notifications };
+  }
+
+  it('expires stale offers and returns the shipment to dispatch', async () => {
+    const { service, prisma, notifications } = buildService();
+
+    const result = await service.expireStaleAssignmentOffers('shipment-1');
+
+    expect(result).toEqual({ expiredCount: 1, validityMinutes: 15 });
+    expect(prisma.driverAssignment.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'assignment-1', status: 'OFFERED' },
+      data: expect.objectContaining({ status: 'EXPIRED' }),
+    }));
+    expect(prisma.shipment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'shipment-1' },
+      data: expect.objectContaining({ status: 'QUOTED' }),
+    }));
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'customer-1' }));
+    expect(service.offerAssignment).toHaveBeenCalledWith(
+      'shipment-1',
+      { driverId: 'driver-2', vehicleId: 'vehicle-2' },
+      'DISPATCHER',
+    );
+  });
+});

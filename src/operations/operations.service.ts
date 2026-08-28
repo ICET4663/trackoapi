@@ -30,6 +30,7 @@ type AssignmentQueueShipmentRow = {
   assignedVehicleId: string | null;
   assignmentStatus: string | null;
   assignmentOfferedAt: Date | string | null;
+  rejectedDriverIds: string[] | null;
   createdAt: Date | string;
 };
 
@@ -117,6 +118,7 @@ export class OperationsService {
 
   async assignmentQueue(actor: OperationActor) {
     this.assertCanOperate(actor.role);
+    const offerWindow = await this.shipments.expireStaleAssignmentOffers();
 
     try {
       const [shipments, drivers] = await Promise.all([
@@ -128,7 +130,13 @@ export class OperationsService {
             e."currency" as "escrowCurrency",
             da."id" as "assignmentId", da."driverId" as "assignedDriverId",
             da."vehicleId" as "assignedVehicleId", da."status"::text as "assignmentStatus",
-            da."offeredAt" as "assignmentOfferedAt"
+            da."offeredAt" as "assignmentOfferedAt",
+            coalesce((
+              select json_agg(distinct history."driverId")
+              from "DriverAssignment" history
+              where history."shipmentId" = s."id"
+                and history."status" in ('REJECTED'::"AssignmentStatus", 'EXPIRED'::"AssignmentStatus")
+            ), '[]'::json) as "rejectedDriverIds"
           from "Shipment" s
           join "Escrow" e on e."shipmentId" = s."id"
           left join lateral (
@@ -190,6 +198,9 @@ export class OperationsService {
                 vehicleId: shipment.assignedVehicleId,
                 status: shipment.assignmentStatus,
                 offeredAt: this.isoDate(shipment.assignmentOfferedAt),
+                expiresAt: shipment.assignmentOfferedAt
+                  ? new Date(new Date(shipment.assignmentOfferedAt).getTime() + offerWindow.validityMinutes * 60_000).toISOString()
+                  : null,
               }
             : null,
           createdAt: this.isoDate(shipment.createdAt),
@@ -256,6 +267,9 @@ export class OperationsService {
   }
 
   private matchDriver(driver: DriverMatchInput, shipment: AssignmentQueueShipmentRow) {
+    if ((shipment.rejectedDriverIds ?? []).includes(driver.id)) {
+      return { score: 0, eligible: false, vehicleId: null, reason: 'Driver already declined or missed this shipment offer.' };
+    }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const vehicles = [...driver.driverVehicles].sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
     const vehicle = cargoWeightKg > 0

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
@@ -82,6 +82,7 @@ type AssignmentRecordInput = {
 @Injectable()
 export class ShipmentsService {
   private readonly logger = new Logger(ShipmentsService.name);
+  private readonly defaultAssignmentOfferMinutes = 15;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -434,7 +435,9 @@ export class ShipmentsService {
   }
 
   async listAssignments(shipmentId: string) {
+    await this.expireStaleAssignmentOffers(shipmentId);
     try {
+      const validityMinutes = await this.assignmentOfferValidityMinutes();
       const assignments = await this.prisma.driverAssignment.findMany({
         where: { shipmentId },
         include: {
@@ -444,7 +447,7 @@ export class ShipmentsService {
         },
         orderBy: { offeredAt: 'desc' },
       });
-      return assignments.map((assignment) => this.toAssignmentRecord(assignment));
+      return assignments.map((assignment) => this.toAssignmentRecord(assignment, validityMinutes));
     } catch {
       return [this.previewAssignment({ shipmentId })];
     }
@@ -459,6 +462,7 @@ export class ShipmentsService {
       throw new ForbiddenException('Only dispatchers, admins, and truck owners can assign drivers.');
     }
 
+    await this.expireStaleAssignmentOffers(shipmentId);
     const driverId = body.driverId ?? 'preview-driver';
 
     let shipment, escrowRows, driver;
@@ -545,7 +549,7 @@ export class ShipmentsService {
       actionUrl: `/driver/jobs/${assignment.id}`,
     });
 
-    return this.toAssignmentRecord(assignment);
+    return this.toAssignmentRecord(assignment, await this.assignmentOfferValidityMinutes());
   }
 
   async respondToAssignment(assignmentId: string, driverId: string, action: 'ACCEPT' | 'REJECT') {
@@ -560,6 +564,13 @@ export class ShipmentsService {
       if (!assignment) throw new NotFoundException('Assignment not found.');
       if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
       if (assignment.status !== 'OFFERED') throw new BadRequestException('This assignment has already been handled.');
+
+      const validityMinutes = await this.assignmentOfferValidityMinutes();
+      const expiresAt = this.assignmentExpiresAt(assignment.offeredAt, validityMinutes);
+      if (expiresAt.getTime() <= Date.now()) {
+        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId);
+        throw new BadRequestException('This load offer has expired. Dispatch will send the shipment to another eligible driver.');
+      }
 
       const updated = await this.prisma.driverAssignment.update({
         where: { id: assignmentId },
@@ -599,10 +610,143 @@ export class ShipmentsService {
         actionUrl: `/shipments/${updated.shipmentId}`,
       });
 
-      return this.toAssignmentRecord(updated);
-    } catch {
+      const nextAssignment = action === 'REJECT' ? await this.offerNextEligibleDriver(updated.shipmentId) : null;
+      return {
+        ...this.toAssignmentRecord(updated, validityMinutes),
+        nextAssignment,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
       return this.previewAssignment({ id: assignmentId, driverId, status });
     }
+  }
+
+  async expireStaleAssignmentOffers(shipmentId?: string) {
+    const validityMinutes = await this.assignmentOfferValidityMinutes();
+    const cutoff = new Date(Date.now() - validityMinutes * 60_000);
+
+    try {
+      const stale = await this.prisma.driverAssignment.findMany({
+        where: {
+          status: 'OFFERED',
+          offeredAt: { lte: cutoff },
+          ...(shipmentId ? { shipmentId } : {}),
+        },
+        include: { shipment: true },
+        orderBy: { offeredAt: 'asc' },
+        take: 100,
+      });
+
+      for (const assignment of stale) {
+        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId);
+      }
+
+      return { expiredCount: stale.length, validityMinutes };
+    } catch (error) {
+      this.logger.error(`expireStaleAssignmentOffers() failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { expiredCount: 0, validityMinutes };
+    }
+  }
+
+  private async expireAssignment(assignmentId: string, shipmentId: string, customerId: string) {
+    const updated = await this.prisma.driverAssignment.updateMany({
+      where: { id: assignmentId, status: 'OFFERED' },
+      data: { status: 'EXPIRED', rejectedAt: new Date() },
+    });
+    if (!updated.count) return false;
+
+    const activeAssignment = await this.prisma.driverAssignment.findFirst({
+      where: { shipmentId, status: { in: ['OFFERED', 'ACCEPTED'] } },
+      select: { id: true },
+    });
+    if (!activeAssignment) {
+      await this.prisma.shipment.update({
+        where: { id: shipmentId },
+        data: {
+          status: 'QUOTED',
+          timeline: {
+            create: {
+              status: 'QUOTED',
+              note: 'Driver offer expired. Shipment returned to dispatch for the next eligible driver.',
+            },
+          },
+        },
+      });
+    }
+
+    await this.notifications.create({
+      userId: customerId,
+      title: 'Driver offer expired',
+      body: 'Dispatch is selecting the next eligible driver for your shipment.',
+      tone: 'WARNING',
+      entity: 'Shipment',
+      entityId: shipmentId,
+      actionUrl: `/shipments/${shipmentId}`,
+    }).catch(() => null);
+    await this.offerNextEligibleDriver(shipmentId);
+    return true;
+  }
+
+  private async offerNextEligibleDriver(shipmentId: string) {
+    try {
+      const [shipment, previousAssignments, candidates] = await Promise.all([
+        this.prisma.shipment.findUnique({
+          where: { id: shipmentId },
+          select: { cargoWeightKg: true },
+        }),
+        this.prisma.driverAssignment.findMany({
+          where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED'] } },
+          select: { driverId: true },
+        }),
+        this.prisma.user.findMany({
+          where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
+          include: {
+            driverVehicles: { where: { isActive: true } },
+            driverAssignments: {
+              where: { status: { in: ['OFFERED', 'ACCEPTED'] } },
+              select: { id: true },
+              take: 20,
+            },
+          },
+          take: 100,
+        }),
+      ]);
+      if (!shipment) return null;
+
+      const excluded = new Set(previousAssignments.map((assignment) => assignment.driverId));
+      const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+      const ranked = candidates
+        .filter((driver) => !excluded.has(driver.id))
+        .map((driver) => {
+          const vehicle = [...driver.driverVehicles]
+            .filter((candidate) => !cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)
+            .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0))[0];
+          return { driver, vehicle, activeAssignments: driver.driverAssignments.length };
+        })
+        .filter((candidate) => Boolean(candidate.vehicle))
+        .sort((left, right) => left.activeAssignments - right.activeAssignments);
+      const next = ranked[0];
+      if (!next?.vehicle) return null;
+
+      return await this.offerAssignment(
+        shipmentId,
+        { driverId: next.driver.id, vehicleId: next.vehicle.id },
+        'DISPATCHER',
+      );
+    } catch (error) {
+      this.logger.error(`offerNextEligibleDriver(${shipmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  private async assignmentOfferValidityMinutes() {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { key: 'driverOfferValidityMinutes' } }).catch(() => null);
+    const value = Number(setting?.value ?? this.defaultAssignmentOfferMinutes);
+    return Number.isFinite(value) && value >= 5 && value <= 120 ? Math.round(value) : this.defaultAssignmentOfferMinutes;
+  }
+
+  private assignmentExpiresAt(offeredAt: Date | string, validityMinutes: number) {
+    return new Date(new Date(offeredAt).getTime() + validityMinutes * 60_000);
   }
 
   async addTimelineEvent(shipmentId: string, userId: string, role: UserRole, event: Record<string, unknown>) {
@@ -1278,14 +1422,16 @@ export class ShipmentsService {
     };
   }
 
-  private toAssignmentRecord(assignment: AssignmentRecordInput) {
+  private toAssignmentRecord(assignment: AssignmentRecordInput, validityMinutes = this.defaultAssignmentOfferMinutes) {
+    const offeredAt = assignment.offeredAt instanceof Date ? assignment.offeredAt.toISOString() : assignment.offeredAt;
     return {
       id: assignment.id,
       shipmentId: assignment.shipmentId,
       driverId: assignment.driverId,
       vehicleId: assignment.vehicleId ?? undefined,
       status: assignment.status,
-      offeredAt: assignment.offeredAt instanceof Date ? assignment.offeredAt.toISOString() : assignment.offeredAt,
+      offeredAt,
+      expiresAt: this.assignmentExpiresAt(offeredAt, validityMinutes).toISOString(),
       acceptedAt:
         assignment.acceptedAt instanceof Date ? assignment.acceptedAt.toISOString() : assignment.acceptedAt ?? undefined,
       rejectedAt:
@@ -1311,13 +1457,15 @@ export class ShipmentsService {
   }
 
   private previewAssignment(input: Partial<Record<string, unknown>> = {}) {
+    const offeredAt = new Date();
     return {
       id: String(input.id ?? `assignment-${Date.now()}`),
       shipmentId: String(input.shipmentId ?? 'TRK-1024'),
       driverId: String(input.driverId ?? 'preview-driver'),
       vehicleId: input.vehicleId ? String(input.vehicleId) : 'preview-vehicle',
       status: String(input.status ?? 'OFFERED'),
-      offeredAt: new Date().toISOString(),
+      offeredAt: offeredAt.toISOString(),
+      expiresAt: this.assignmentExpiresAt(offeredAt, this.defaultAssignmentOfferMinutes).toISOString(),
       driver: {
         id: String(input.driverId ?? 'preview-driver'),
         fullName: 'Tracko Preview Driver',
