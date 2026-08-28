@@ -469,7 +469,10 @@ export class ShipmentsService {
           'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
           shipmentId,
         ),
-        this.prisma.user.findUnique({ where: { id: driverId }, include: { profile: true } }),
+        this.prisma.user.findUnique({
+          where: { id: driverId },
+          include: { profile: true, driverVehicles: { where: { isActive: true } } },
+        }),
       ]);
     } catch {
       // A real infrastructure failure (DB unreachable) - fall back to preview data.
@@ -490,12 +493,25 @@ export class ShipmentsService {
     if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
     }
+    const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+    const eligibleVehicles = [...driver.driverVehicles]
+      .filter((vehicle) => !cargoWeightKg || (vehicle.capacityKg ?? 0) >= cargoWeightKg)
+      .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
+    const selectedVehicle = body.vehicleId
+      ? driver.driverVehicles.find((vehicle) => vehicle.id === body.vehicleId)
+      : eligibleVehicles[0];
+    if (!selectedVehicle) {
+      throw new BadRequestException('This driver has no active truck available for the shipment.');
+    }
+    if (cargoWeightKg && (selectedVehicle.capacityKg ?? 0) < cargoWeightKg) {
+      throw new BadRequestException('The selected truck does not have enough capacity for this cargo.');
+    }
 
     const assignment = await this.prisma.driverAssignment.create({
       data: {
         shipmentId,
         driverId,
-        vehicleId: body.vehicleId,
+        vehicleId: selectedVehicle.id,
         status: 'OFFERED',
       },
       include: {

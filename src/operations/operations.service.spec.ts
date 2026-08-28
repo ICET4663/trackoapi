@@ -156,3 +156,62 @@ describe('OperationsService.resolveDispute wires decisions to real escrow mutati
     expect(prisma.$executeRawUnsafe).not.toHaveBeenCalled();
   });
 });
+
+describe('OperationsService.assignmentQueue driver matching', () => {
+  it('ranks real capacity, workload, experience, and ratings per shipment', async () => {
+    const prisma = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([
+        {
+          id: 'shipment-1', reference: 'TRK-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
+          cargoDescription: 'Food', cargoWeightKg: 8000, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
+          escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
+          assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
+          assignmentOfferedAt: null, createdAt: new Date('2026-08-28T09:00:00.000Z'),
+        },
+      ]),
+      user: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'driver-best', email: 'best@tracko.ng', phone: '+2341', verificationStatus: 'VERIFIED',
+            profile: { fullName: 'Best Driver' },
+            driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000 }],
+            driverAssignments: Array.from({ length: 5 }, () => ({ status: 'ACCEPTED', shipment: { status: 'COMPLETED' } })),
+            driverReviews: [{ rating: 5 }, { rating: 5 }],
+          },
+          {
+            id: 'driver-busy', email: 'busy@tracko.ng', phone: '+2342', verificationStatus: 'VERIFIED',
+            profile: { fullName: 'Busy Driver' },
+            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000 }],
+            driverAssignments: [
+              { status: 'ACCEPTED', shipment: { status: 'IN_TRANSIT' } },
+              { status: 'OFFERED', shipment: { status: 'DRIVER_ASSIGNED' } },
+            ],
+            driverReviews: [],
+          },
+          {
+            id: 'driver-small', email: 'small@tracko.ng', phone: '+2343', verificationStatus: 'VERIFIED',
+            profile: { fullName: 'Small Truck Driver' },
+            driverVehicles: [{ id: 'truck-small', plateNumber: 'SML-1', type: 'Van', capacityKg: 5000 }],
+            driverAssignments: [],
+            driverReviews: [{ rating: 5 }],
+          },
+        ]),
+      },
+    };
+    const service = new OperationsService(
+      prisma as unknown as PrismaService,
+      {} as NotificationsService,
+      {} as ShipmentsService,
+    );
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+    const bestMatches = queue.drivers[0].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
+    const busyMatches = queue.drivers[1].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
+    const smallMatches = queue.drivers[2].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
+
+    expect(queue.drivers[0]).toMatchObject({ activeAssignments: 0, completedTrips: 5, averageRating: 5 });
+    expect(bestMatches['shipment-1']).toMatchObject({ eligible: true, vehicleId: 'truck-fit' });
+    expect(bestMatches['shipment-1'].score).toBeGreaterThan(busyMatches['shipment-1'].score);
+    expect(smallMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
+  });
+});

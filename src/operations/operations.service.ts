@@ -33,6 +33,14 @@ type AssignmentQueueShipmentRow = {
   createdAt: Date | string;
 };
 
+type DriverMatchInput = {
+  id: string;
+  verificationStatus: string;
+  driverVehicles: Array<{ id: string; plateNumber: string; type: string; capacityKg: number | null }>;
+  driverAssignments: Array<{ status: string; shipment: { status: string } }>;
+  driverReviews: Array<{ rating: number }>;
+};
+
 type EscrowLedgerRow = {
   id: string;
   shipmentId: string;
@@ -142,7 +150,16 @@ export class OperationsService {
             isActive: true,
             verificationStatus: 'VERIFIED',
           },
-          include: { profile: true, driverVehicles: true },
+          include: {
+            profile: true,
+            driverVehicles: { where: { isActive: true } },
+            driverAssignments: {
+              select: { status: true, shipment: { select: { status: true } } },
+              orderBy: { offeredAt: 'desc' },
+              take: 100,
+            },
+            driverReviews: { select: { rating: true }, take: 100 },
+          },
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
@@ -183,12 +200,21 @@ export class OperationsService {
           email: driver.email,
           phone: driver.phone,
           verificationStatus: driver.verificationStatus,
+          activeAssignments: driver.driverAssignments.filter((assignment) =>
+            ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+            && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
+          ).length,
+          completedTrips: driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length,
+          averageRating: driver.driverReviews.length
+            ? Number((driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length).toFixed(1))
+            : null,
           vehicles: driver.driverVehicles.map((vehicle) => ({
             id: vehicle.id,
             plateNumber: vehicle.plateNumber,
             type: vehicle.type,
             capacityKg: vehicle.capacityKg,
           })),
+          matches: Object.fromEntries(shipments.map((shipment) => [shipment.id, this.matchDriver(driver, shipment)])),
         })),
       };
     } catch (error) {
@@ -216,11 +242,55 @@ export class OperationsService {
             email: 'driver@tracko.ng',
             phone: '+234 800 000 0001',
             verificationStatus: 'VERIFIED',
+            activeAssignments: 0,
+            completedTrips: 12,
+            averageRating: 4.8,
             vehicles: [{ id: 'preview-vehicle', plateNumber: 'LAG-204-TK', type: 'Flatbed truck', capacityKg: 12000 }],
+            matches: {
+              'TRK-1024': { score: 92, eligible: true, vehicleId: 'preview-vehicle', reason: '12t truck fits 8t cargo · Available now · 4.8 rating' },
+            },
           },
         ],
       };
     }
+  }
+
+  private matchDriver(driver: DriverMatchInput, shipment: AssignmentQueueShipmentRow) {
+    const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+    const vehicles = [...driver.driverVehicles].sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
+    const vehicle = cargoWeightKg > 0
+      ? vehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
+      : vehicles[vehicles.length - 1];
+    if (!vehicle) {
+      return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck has enough capacity for this cargo.' };
+    }
+
+    const activeAssignments = driver.driverAssignments.filter((assignment) =>
+      ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+      && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
+    ).length;
+    const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
+    const averageRating = driver.driverReviews.length
+      ? driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length
+      : null;
+    const capacityKg = vehicle.capacityKg ?? cargoWeightKg;
+    const spareRatio = capacityKg > 0 ? Math.max(0, capacityKg - cargoWeightKg) / capacityKg : 0;
+    const capacityScore = Math.round(45 - Math.min(spareRatio * 15, 15));
+    const availabilityScore = Math.max(0, 25 - activeAssignments * 12);
+    const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
+    const experienceScore = Math.min(10, completedTrips * 2);
+    const verificationScore = driver.verificationStatus === 'VERIFIED' ? 5 : 0;
+    const score = Math.max(0, Math.min(100, capacityScore + availabilityScore + ratingScore + experienceScore + verificationScore));
+    const capacityTons = Math.round(capacityKg / 100) / 10;
+    const cargoTons = Math.round(cargoWeightKg / 100) / 10;
+    const availability = activeAssignments === 0 ? 'Available now' : `${activeAssignments} active offer${activeAssignments === 1 ? '' : 's'}`;
+    const rating = averageRating === null ? 'New driver' : `${averageRating.toFixed(1)} rating`;
+    return {
+      score,
+      eligible: true,
+      vehicleId: vehicle.id,
+      reason: `${capacityTons}t ${vehicle.type} fits ${cargoTons}t cargo · ${availability} · ${rating}`,
+    };
   }
 
   // Real operational alerts computed from actual trip data - deliberately narrower than
