@@ -1598,6 +1598,45 @@ export class SettingsService {
     return next;
   }
 
+  async updateDriverAvailabilityLocation(
+    userId: string,
+    input: { latitude?: number; longitude?: number },
+  ) {
+    const latitude = Number(input.latitude);
+    const longitude = Number(input.longitude);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+      throw new BadRequestException('A valid latitude is required.');
+    }
+    if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new BadRequestException('A valid longitude is required.');
+    }
+
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{
+        availableForAssignments: boolean;
+        lastKnownLatitude: number;
+        lastKnownLongitude: number;
+        locationUpdatedAt: Date;
+      }>>(
+        `insert into "SafetySettings" ("id", "userId", "lastKnownLatitude", "lastKnownLongitude", "locationUpdatedAt", "updatedAt")
+         values ($1, $2, $3, $4, current_timestamp, current_timestamp)
+         on conflict ("userId") do update set
+           "lastKnownLatitude" = excluded."lastKnownLatitude",
+           "lastKnownLongitude" = excluded."lastKnownLongitude",
+           "locationUpdatedAt" = current_timestamp,
+           "updatedAt" = current_timestamp
+         returning "availableForAssignments", "lastKnownLatitude", "lastKnownLongitude", "locationUpdatedAt"`,
+        `safety_${randomUUID().replace(/-/g, '')}`,
+        userId,
+        latitude,
+        longitude,
+      );
+      return rows[0];
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not update driver location: ${this.errorMessage(error)}`);
+    }
+  }
+
   // updatePlatformSetting() used to just echo `{ ...defaults, value: body.value }` straight
   // back to the caller with no database write at all - an admin toggling e.g. maintenance
   // mode saw it "save", but the very next load reverted to this hardcoded default. These

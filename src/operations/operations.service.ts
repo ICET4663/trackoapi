@@ -19,6 +19,8 @@ type AssignmentQueueShipmentRow = {
   destinationLabel: string;
   cargoDescription: string;
   cargoWeightKg: number | null;
+  pickupLatitude: number | null;
+  pickupLongitude: number | null;
   status: string;
   quotedPriceKobo: number | null;
   escrowId: string | null;
@@ -40,6 +42,17 @@ type DriverMatchInput = {
   driverVehicles: Array<{ id: string; plateNumber: string; type: string; capacityKg: number | null }>;
   driverAssignments: Array<{ status: string; shipment: { status: string } }>;
   driverReviews: Array<{ rating: number }>;
+  lastKnownLatitude?: number | null;
+  lastKnownLongitude?: number | null;
+  locationUpdatedAt?: Date | string | null;
+};
+
+type DriverAvailabilityRow = {
+  userId: string;
+  availableForAssignments: boolean;
+  lastKnownLatitude: number | null;
+  lastKnownLongitude: number | null;
+  locationUpdatedAt: Date | string | null;
 };
 
 type EscrowLedgerRow = {
@@ -121,11 +134,12 @@ export class OperationsService {
     const offerWindow = await this.shipments.expireStaleAssignmentOffers();
 
     try {
-      const [shipments, drivers, unavailableDrivers] = await Promise.all([
+      const [shipments, drivers, driverAvailability] = await Promise.all([
         this.prisma.$queryRawUnsafe<AssignmentQueueShipmentRow[]>(
           `select
             s."id", s."reference", s."pickupLabel", s."destinationLabel", s."cargoDescription",
-            s."cargoWeightKg", s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
+            s."cargoWeightKg", s."pickupLatitude", s."pickupLongitude",
+            s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
             e."id" as "escrowId", e."status"::text as "escrowStatus", e."amount" as "escrowAmount",
             e."currency" as "escrowCurrency",
             da."id" as "assignmentId", da."driverId" as "assignedDriverId",
@@ -171,13 +185,16 @@ export class OperationsService {
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
-        this.prisma.$queryRawUnsafe<Array<{ userId: string }>>(
-          'select "userId" from "SafetySettings" where "availableForAssignments" = false',
+        this.prisma.$queryRawUnsafe<DriverAvailabilityRow[]>(
+          `select "userId", "availableForAssignments", "lastKnownLatitude", "lastKnownLongitude", "locationUpdatedAt"
+           from "SafetySettings"`,
         ).catch(() => []),
       ]);
 
-      const unavailableDriverIds = new Set(unavailableDrivers.map((driver) => driver.userId));
-      const availableDrivers = drivers.filter((driver) => !unavailableDriverIds.has(driver.id));
+      const availabilityByDriver = new Map(driverAvailability.map((entry) => [entry.userId, entry]));
+      const availableDrivers = drivers
+        .filter((driver) => availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
+        .map((driver) => ({ ...driver, ...availabilityByDriver.get(driver.id) }));
 
       return {
         shipments: shipments.map((shipment) => ({
@@ -303,22 +320,57 @@ export class OperationsService {
       : null;
     const capacityKg = vehicle.capacityKg ?? cargoWeightKg;
     const spareRatio = capacityKg > 0 ? Math.max(0, capacityKg - cargoWeightKg) / capacityKg : 0;
-    const capacityScore = Math.round(45 - Math.min(spareRatio * 15, 15));
-    const availabilityScore = Math.max(0, 25 - activeAssignments * 12);
+    const capacityScore = Math.round(35 - Math.min(spareRatio * 12, 12));
+    const availabilityScore = Math.max(0, 20 - activeAssignments * 10);
     const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
     const experienceScore = Math.min(10, completedTrips * 2);
     const verificationScore = driver.verificationStatus === 'VERIFIED' ? 5 : 0;
-    const score = Math.max(0, Math.min(100, capacityScore + availabilityScore + ratingScore + experienceScore + verificationScore));
+    const pickupDistanceKm = this.driverPickupDistanceKm(driver, shipment);
+    const proximityScore = pickupDistanceKm === null
+      ? 5
+      : pickupDistanceKm <= 10
+        ? 15
+        : pickupDistanceKm <= 25
+          ? 12
+          : pickupDistanceKm <= 50
+            ? 9
+            : pickupDistanceKm <= 100
+              ? 5
+              : 1;
+    const score = Math.max(0, Math.min(100, capacityScore + availabilityScore + ratingScore + experienceScore + verificationScore + proximityScore));
     const capacityTons = Math.round(capacityKg / 100) / 10;
     const cargoTons = Math.round(cargoWeightKg / 100) / 10;
     const availability = activeAssignments === 0 ? 'Available now' : `${activeAssignments} active offer${activeAssignments === 1 ? '' : 's'}`;
     const rating = averageRating === null ? 'New driver' : `${averageRating.toFixed(1)} rating`;
+    const proximity = pickupDistanceKm === null ? 'Location unavailable' : `${pickupDistanceKm.toFixed(1)} km from pickup`;
     return {
       score,
       eligible: true,
       vehicleId: vehicle.id,
-      reason: `${capacityTons}t ${vehicle.type} fits ${cargoTons}t cargo · ${availability} · ${rating}`,
+      pickupDistanceKm,
+      reason: `${capacityTons}t ${vehicle.type} fits ${cargoTons}t cargo · ${proximity} · ${availability} · ${rating}`,
     };
+  }
+
+  private driverPickupDistanceKm(driver: DriverMatchInput, shipment: AssignmentQueueShipmentRow) {
+    const values = [
+      driver.lastKnownLatitude,
+      driver.lastKnownLongitude,
+      shipment.pickupLatitude,
+      shipment.pickupLongitude,
+    ];
+    if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
+    const updatedAt = driver.locationUpdatedAt ? new Date(driver.locationUpdatedAt).getTime() : 0;
+    if (!updatedAt || Date.now() - updatedAt > 2 * 60 * 60 * 1000) return null;
+
+    const radians = (degrees: number) => (degrees * Math.PI) / 180;
+    const latitudeDelta = radians(shipment.pickupLatitude! - driver.lastKnownLatitude!);
+    const longitudeDelta = radians(shipment.pickupLongitude! - driver.lastKnownLongitude!);
+    const originLatitude = radians(driver.lastKnownLatitude!);
+    const destinationLatitude = radians(shipment.pickupLatitude!);
+    const haversine = Math.sin(latitudeDelta / 2) ** 2
+      + Math.cos(originLatitude) * Math.cos(destinationLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
   }
 
   // Real operational alerts computed from actual trip data - deliberately narrower than

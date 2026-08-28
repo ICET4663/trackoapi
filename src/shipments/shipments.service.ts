@@ -827,7 +827,7 @@ export class ShipmentsService {
       const [shipment, previousAssignments, candidates, unavailableDrivers] = await Promise.all([
         this.prisma.shipment.findUnique({
           where: { id: shipmentId },
-          select: { cargoWeightKg: true },
+          select: { cargoWeightKg: true, pickupLatitude: true, pickupLongitude: true },
         }),
         this.prisma.driverAssignment.findMany({
           where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED', 'CANCELLED'] } },
@@ -845,25 +845,44 @@ export class ShipmentsService {
           },
           take: 100,
         }),
-        this.prisma.$queryRawUnsafe<Array<{ userId: string }>>(
-          'select "userId" from "SafetySettings" where "availableForAssignments" = false',
+        this.prisma.$queryRawUnsafe<Array<{
+          userId: string;
+          availableForAssignments: boolean;
+          lastKnownLatitude: number | null;
+          lastKnownLongitude: number | null;
+          locationUpdatedAt: Date | string | null;
+        }>>(
+          `select "userId", "availableForAssignments", "lastKnownLatitude", "lastKnownLongitude", "locationUpdatedAt"
+           from "SafetySettings"`,
         ).catch(() => []),
       ]);
       if (!shipment) return null;
 
       const excluded = new Set(previousAssignments.map((assignment) => assignment.driverId));
-      const unavailableDriverIds = new Set(unavailableDrivers.map((driver) => driver.userId));
+      const availabilityByDriver = new Map(unavailableDrivers.map((driver) => [driver.userId, driver]));
       const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
       const ranked = candidates
-        .filter((driver) => !excluded.has(driver.id) && !unavailableDriverIds.has(driver.id))
+        .filter((driver) => !excluded.has(driver.id) && availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
             .filter((candidate) => !cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)
             .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0))[0];
-          return { driver, vehicle, activeAssignments: driver.driverAssignments.length };
+          const availability = availabilityByDriver.get(driver.id);
+          const pickupDistanceKm = this.pickupDistanceKm(
+            availability?.lastKnownLatitude,
+            availability?.lastKnownLongitude,
+            availability?.locationUpdatedAt,
+            shipment.pickupLatitude,
+            shipment.pickupLongitude,
+          );
+          return { driver, vehicle, activeAssignments: driver.driverAssignments.length, pickupDistanceKm };
         })
         .filter((candidate) => Boolean(candidate.vehicle) && candidate.activeAssignments === 0)
-        .sort((left, right) => left.activeAssignments - right.activeAssignments);
+        .sort((left, right) => {
+          const leftDistance = left.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
+          const rightDistance = right.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
+          return leftDistance - rightDistance;
+        });
       const next = ranked[0];
       if (!next?.vehicle) return null;
 
@@ -876,6 +895,28 @@ export class ShipmentsService {
       this.logger.error(`offerNextEligibleDriver(${shipmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
+  }
+
+  private pickupDistanceKm(
+    driverLatitude: number | null | undefined,
+    driverLongitude: number | null | undefined,
+    locationUpdatedAt: Date | string | null | undefined,
+    pickupLatitude: number | null,
+    pickupLongitude: number | null,
+  ) {
+    const values = [driverLatitude, driverLongitude, pickupLatitude, pickupLongitude];
+    if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
+    const updatedAt = locationUpdatedAt ? new Date(locationUpdatedAt).getTime() : 0;
+    if (!updatedAt || Date.now() - updatedAt > 2 * 60 * 60 * 1000) return null;
+
+    const radians = (degrees: number) => (degrees * Math.PI) / 180;
+    const latitudeDelta = radians(pickupLatitude! - driverLatitude!);
+    const longitudeDelta = radians(pickupLongitude! - driverLongitude!);
+    const originLatitude = radians(driverLatitude!);
+    const destinationLatitude = radians(pickupLatitude!);
+    const haversine = Math.sin(latitudeDelta / 2) ** 2
+      + Math.cos(originLatitude) * Math.cos(destinationLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
   }
 
   private async assignmentOfferValidityMinutes() {

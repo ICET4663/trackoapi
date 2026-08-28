@@ -218,7 +218,11 @@ describe('OperationsService.assignmentQueue driver matching', () => {
 
   it('removes offline drivers from the dispatcher matching queue', async () => {
     const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
-      if (sql.includes('from "SafetySettings"')) return Promise.resolve([{ userId: 'driver-offline' }]);
+      // availableForAssignments is a real NOT NULL DB column (`Boolean @default(true)`), so
+      // a real row can never omit it the way this mock originally did - that made the
+      // "offline" driver's row indistinguishable from having no SafetySettings row at all,
+      // which the filter (correctly) treats as available-by-default.
+      if (sql.includes('from "SafetySettings"')) return Promise.resolve([{ userId: 'driver-offline', availableForAssignments: false }]);
       return Promise.resolve([
         {
           id: 'shipment-1', reference: 'TRK-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
@@ -248,5 +252,47 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
 
     expect(queue.drivers.map((entry) => entry.id)).toEqual(['driver-online']);
+  });
+
+  it('scores a recently located nearby driver above a distant driver', async () => {
+    const now = new Date();
+    const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('from "SafetySettings"')) {
+        return Promise.resolve([
+          { userId: 'driver-near', availableForAssignments: true, lastKnownLatitude: 6.53, lastKnownLongitude: 3.38, locationUpdatedAt: now },
+          { userId: 'driver-far', availableForAssignments: true, lastKnownLatitude: 9.08, lastKnownLongitude: 7.4, locationUpdatedAt: now },
+        ]);
+      }
+      return Promise.resolve([{
+        id: 'shipment-1', reference: 'TRK-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
+        pickupLatitude: 6.5244, pickupLongitude: 3.3792,
+        cargoDescription: 'Food', cargoWeightKg: 8000, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
+        escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
+        assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
+        assignmentOfferedAt: null, rejectedDriverIds: [], createdAt: now,
+      }]);
+    });
+    const driver = (id: string) => ({
+      id, email: `${id}@tracko.ng`, phone: '+2341', verificationStatus: 'VERIFIED', profile: { fullName: id },
+      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000 }],
+      driverAssignments: [], driverReviews: [{ rating: 5 }],
+    });
+    const service = new OperationsService(
+      { $queryRawUnsafe: queryRawUnsafe, user: { findMany: jest.fn().mockResolvedValue([driver('driver-near'), driver('driver-far')]) } } as unknown as PrismaService,
+      {} as NotificationsService,
+      { expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) } as unknown as ShipmentsService,
+    );
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+    // assignmentQueue()'s inferred return type is a union of the real result and the
+    // catch-path preview fallback, whose `matches` object has literal (not indexable) keys -
+    // this test only ever exercises the real success path, so the cast is safe.
+    type MatchRecord = Record<string, { score: number; eligible: boolean; vehicleId: string | null; pickupDistanceKm?: number | null; reason: string }>;
+    const nearMatch = (queue.drivers[0].matches as MatchRecord)['shipment-1'];
+    const farMatch = (queue.drivers[1].matches as MatchRecord)['shipment-1'];
+
+    expect(nearMatch.score).toBeGreaterThan(farMatch.score);
+    expect(nearMatch.pickupDistanceKm).toBeLessThan(2);
+    expect(nearMatch.reason).toContain('km from pickup');
   });
 });

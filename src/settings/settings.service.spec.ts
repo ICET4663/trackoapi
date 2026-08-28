@@ -40,6 +40,53 @@ describe('SettingsService driver availability', () => {
       null,
     );
   });
+
+  it('validates and stores a driver foreground location', async () => {
+    const locationUpdatedAt = new Date();
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{
+      availableForAssignments: true,
+      lastKnownLatitude: 6.5244,
+      lastKnownLongitude: 3.3792,
+      locationUpdatedAt,
+    }]);
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      {} as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+
+    const result = await service.updateDriverAvailabilityLocation('driver-1', {
+      latitude: 6.5244,
+      longitude: 3.3792,
+    });
+
+    expect(result).toMatchObject({ lastKnownLatitude: 6.5244, lastKnownLongitude: 3.3792 });
+    expect(queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining('"locationUpdatedAt"'),
+      expect.any(String),
+      'driver-1',
+      6.5244,
+      3.3792,
+    );
+  });
+
+  it('rejects invalid driver coordinates before writing', async () => {
+    const queryRawUnsafe = jest.fn();
+    const service = new SettingsService(
+      { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService,
+      {} as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+
+    await expect(service.updateDriverAvailabilityLocation('driver-1', {
+      latitude: 200,
+      longitude: 3.3792,
+    })).rejects.toThrow('valid latitude');
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
 });
 
 // sendEmergencyAlert()/reportSafetyIncident() both go through createSafetyTicket(), whose

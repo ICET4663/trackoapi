@@ -217,6 +217,54 @@ describe('ShipmentsService driver assignment offer expiry', () => {
       'DISPATCHER',
     );
   });
+
+  it('automatically reassigns to the nearest recently located eligible driver', async () => {
+    const now = new Date();
+    const staleOffer = {
+      id: 'assignment-1', shipmentId: 'shipment-1', driverId: 'driver-old', status: 'OFFERED',
+      offeredAt: new Date(Date.now() - 20 * 60_000), shipment: { id: 'shipment-1', customerId: 'customer-1' },
+    };
+    const driver = (id: string) => ({
+      id,
+      driverVehicles: [{ id: `vehicle-${id}`, capacityKg: 10000, isActive: true }],
+      driverAssignments: [],
+    });
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '15' }) },
+      driverAssignment: {
+        findMany: jest.fn().mockResolvedValueOnce([staleOffer]).mockResolvedValueOnce([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      shipment: {
+        update: jest.fn().mockResolvedValue(undefined),
+        findUnique: jest.fn().mockResolvedValue({
+          cargoWeightKg: 8000,
+          pickupLatitude: 6.5244,
+          pickupLongitude: 3.3792,
+        }),
+      },
+      user: { findMany: jest.fn().mockResolvedValue([driver('driver-far'), driver('driver-near')]) },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([
+        { userId: 'driver-far', availableForAssignments: true, lastKnownLatitude: 9.0765, lastKnownLongitude: 7.3986, locationUpdatedAt: now },
+        { userId: 'driver-near', availableForAssignments: true, lastKnownLatitude: 6.53, lastKnownLongitude: 3.38, locationUpdatedAt: now },
+      ]),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(
+      prisma,
+      { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService,
+      {} as MapsProviderService,
+    );
+    service.offerAssignment = jest.fn().mockResolvedValue({ id: 'assignment-2' }) as never;
+
+    await service.expireStaleAssignmentOffers('shipment-1');
+
+    expect(service.offerAssignment).toHaveBeenCalledWith(
+      'shipment-1',
+      { driverId: 'driver-near', vehicleId: 'vehicle-driver-near' },
+      'DISPATCHER',
+    );
+  });
 });
 
 describe('ShipmentsService.listAssignments access control', () => {

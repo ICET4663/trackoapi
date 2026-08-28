@@ -267,6 +267,15 @@ export class SettingsController {
     return this.settingsService.updateSafetySetting(body, user.sub);
   }
 
+  @Post('driver/availability/location')
+  async updateDriverAvailabilityLocation(
+    @Body() body: { latitude?: number; longitude?: number },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.settingsService.updateDriverAvailabilityLocation(user.sub, body);
+  }
+
   @Post('driver/safety-incidents')
   async reportSafetyIncident(
     @Body() body: { message?: string; shipmentId?: string; latitude?: number; longitude?: number },
