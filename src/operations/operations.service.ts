@@ -121,7 +121,7 @@ export class OperationsService {
     const offerWindow = await this.shipments.expireStaleAssignmentOffers();
 
     try {
-      const [shipments, drivers] = await Promise.all([
+      const [shipments, drivers, unavailableDrivers] = await Promise.all([
         this.prisma.$queryRawUnsafe<AssignmentQueueShipmentRow[]>(
           `select
             s."id", s."reference", s."pickupLabel", s."destinationLabel", s."cargoDescription",
@@ -171,7 +171,13 @@ export class OperationsService {
           orderBy: { createdAt: 'desc' },
           take: 50,
         }),
+        this.prisma.$queryRawUnsafe<Array<{ userId: string }>>(
+          'select "userId" from "SafetySettings" where "availableForAssignments" = false',
+        ).catch(() => []),
       ]);
+
+      const unavailableDriverIds = new Set(unavailableDrivers.map((driver) => driver.userId));
+      const availableDrivers = drivers.filter((driver) => !unavailableDriverIds.has(driver.id));
 
       return {
         shipments: shipments.map((shipment) => ({
@@ -205,7 +211,7 @@ export class OperationsService {
             : null,
           createdAt: this.isoDate(shipment.createdAt),
         })),
-        drivers: drivers.map((driver) => ({
+        drivers: availableDrivers.map((driver) => ({
           id: driver.id,
           fullName: driver.profile?.fullName ?? driver.email,
           email: driver.email,

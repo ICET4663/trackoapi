@@ -1539,7 +1539,7 @@ export class SettingsService {
   async safetySettings(userId = 'preview-driver') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
-        'select "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact" from "SafetySettings" where "userId" = $1 limit 1',
+        'select "availableForAssignments", "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact" from "SafetySettings" where "userId" = $1 limit 1',
         userId,
       );
       if (rows[0]) return rows[0];
@@ -1548,6 +1548,7 @@ export class SettingsService {
     }
 
     return {
+      availableForAssignments: true,
       shareLiveTripLocation: true,
       nightDrivingCheckIns: true,
       emergencyContact: '+234 800 000 0000',
@@ -1560,12 +1561,13 @@ export class SettingsService {
     // toggles (live location sharing, night-driving check-ins, emergency contact) reset
     // the moment they reloaded the app, no matter how many times they changed them.
     const key = String(input.key ?? 'shareLiveTripLocation');
-    const validKeys = ['shareLiveTripLocation', 'nightDrivingCheckIns', 'emergencyContact'];
+    const validKeys = ['availableForAssignments', 'shareLiveTripLocation', 'nightDrivingCheckIns', 'emergencyContact'];
     if (!validKeys.includes(key)) {
       throw new BadRequestException(`Unknown safety setting: ${key}`);
     }
 
     const current = (await this.safetySettings(userId)) as {
+      availableForAssignments: boolean;
       shareLiveTripLocation: boolean;
       nightDrivingCheckIns: boolean;
       emergencyContact: string | null;
@@ -1574,15 +1576,17 @@ export class SettingsService {
 
     try {
       await this.prisma.$executeRawUnsafe(
-        `insert into "SafetySettings" ("id", "userId", "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact", "updatedAt")
-         values ($1, $2, $3, $4, $5, current_timestamp)
+        `insert into "SafetySettings" ("id", "userId", "availableForAssignments", "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact", "updatedAt")
+         values ($1, $2, $3, $4, $5, $6, current_timestamp)
          on conflict ("userId") do update set
+           "availableForAssignments" = excluded."availableForAssignments",
            "shareLiveTripLocation" = excluded."shareLiveTripLocation",
            "nightDrivingCheckIns" = excluded."nightDrivingCheckIns",
            "emergencyContact" = excluded."emergencyContact",
            "updatedAt" = current_timestamp`,
         `safety_${randomUUID().replace(/-/g, '')}`,
         userId,
+        Boolean(next.availableForAssignments),
         Boolean(next.shareLiveTripLocation),
         Boolean(next.nightDrivingCheckIns),
         next.emergencyContact ? String(next.emergencyContact) : null,

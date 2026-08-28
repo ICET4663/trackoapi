@@ -215,4 +215,38 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     expect(bestMatches['shipment-1'].score).toBeGreaterThan(busyMatches['shipment-1'].score);
     expect(smallMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
   });
+
+  it('removes offline drivers from the dispatcher matching queue', async () => {
+    const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('from "SafetySettings"')) return Promise.resolve([{ userId: 'driver-offline' }]);
+      return Promise.resolve([
+        {
+          id: 'shipment-1', reference: 'TRK-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
+          cargoDescription: 'Food', cargoWeightKg: 8000, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
+          escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
+          assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
+          assignmentOfferedAt: null, rejectedDriverIds: [], createdAt: new Date('2026-08-28T09:00:00.000Z'),
+        },
+      ]);
+    });
+    const driver = (id: string) => ({
+      id, email: `${id}@tracko.ng`, phone: '+2341', verificationStatus: 'VERIFIED',
+      profile: { fullName: id },
+      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000 }],
+      driverAssignments: [], driverReviews: [],
+    });
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      user: { findMany: jest.fn().mockResolvedValue([driver('driver-online'), driver('driver-offline')]) },
+    };
+    const service = new OperationsService(
+      prisma as unknown as PrismaService,
+      {} as NotificationsService,
+      { expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) } as unknown as ShipmentsService,
+    );
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+
+    expect(queue.drivers.map((entry) => entry.id)).toEqual(['driver-online']);
+  });
 });

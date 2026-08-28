@@ -468,6 +468,7 @@ model DriverDocument {
 model SafetySettings {
   id                    String   @id @default(cuid())
   userId                String   @unique
+  availableForAssignments Boolean @default(true)
   shareLiveTripLocation Boolean  @default(true)
   nightDrivingCheckIns  Boolean  @default(true)
   emergencyContact      String?

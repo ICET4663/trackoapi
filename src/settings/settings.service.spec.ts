@@ -7,6 +7,41 @@ import type { AuthService } from '../auth/auth.service';
 
 const noopAuthService = {} as unknown as AuthService;
 
+describe('SettingsService driver availability', () => {
+  it('persists whether a driver accepts new shipment offers', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{
+      availableForAssignments: true,
+      shareLiveTripLocation: true,
+      nightDrivingCheckIns: true,
+      emergencyContact: null,
+    }]);
+    const executeRawUnsafe = jest.fn().mockResolvedValue(1);
+    const prisma = { $queryRawUnsafe: queryRawUnsafe, $executeRawUnsafe: executeRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      {} as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+
+    const result = await service.updateSafetySetting(
+      { key: 'availableForAssignments', value: false },
+      'driver-1',
+    );
+
+    expect(result.availableForAssignments).toBe(false);
+    expect(executeRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining('"availableForAssignments"'),
+      expect.any(String),
+      'driver-1',
+      false,
+      true,
+      true,
+      null,
+    );
+  });
+});
+
 // sendEmergencyAlert()/reportSafetyIncident() both go through createSafetyTicket(), whose
 // catch block used to swallow ANY failure - a broken DB connection, a failed insert,
 // anything - into a fake { sent: true, reported: true } response. A driver or customer

@@ -479,9 +479,9 @@ export class ShipmentsService {
     await this.expireStaleAssignmentOffers(shipmentId);
     const driverId = body.driverId ?? 'preview-driver';
 
-    let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment;
+    let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows;
     try {
-      [shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment] = await Promise.all([
+      [shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows] = await Promise.all([
         this.prisma.shipment.findUnique({ where: { id: shipmentId } }),
         this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
           'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
@@ -504,6 +504,10 @@ export class ShipmentsService {
           },
           select: { id: true, shipmentId: true, status: true },
         }),
+        this.prisma.$queryRawUnsafe<Array<{ availableForAssignments: boolean }>>(
+          'select "availableForAssignments" from "SafetySettings" where "userId" = $1 limit 1',
+          driverId,
+        ).catch(() => []),
       ]);
     } catch {
       // A real infrastructure failure (DB unreachable) - fall back to preview data.
@@ -523,6 +527,9 @@ export class ShipmentsService {
     }
     if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
+    }
+    if (availabilityRows[0]?.availableForAssignments === false) {
+      throw new BadRequestException('This driver is offline and is not accepting new shipment offers.');
     }
     if (activeShipmentAssignment) {
       throw new BadRequestException(
@@ -817,7 +824,7 @@ export class ShipmentsService {
 
   private async offerNextEligibleDriver(shipmentId: string) {
     try {
-      const [shipment, previousAssignments, candidates] = await Promise.all([
+      const [shipment, previousAssignments, candidates, unavailableDrivers] = await Promise.all([
         this.prisma.shipment.findUnique({
           where: { id: shipmentId },
           select: { cargoWeightKg: true },
@@ -838,13 +845,17 @@ export class ShipmentsService {
           },
           take: 100,
         }),
+        this.prisma.$queryRawUnsafe<Array<{ userId: string }>>(
+          'select "userId" from "SafetySettings" where "availableForAssignments" = false',
+        ).catch(() => []),
       ]);
       if (!shipment) return null;
 
       const excluded = new Set(previousAssignments.map((assignment) => assignment.driverId));
+      const unavailableDriverIds = new Set(unavailableDrivers.map((driver) => driver.userId));
       const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
       const ranked = candidates
-        .filter((driver) => !excluded.has(driver.id))
+        .filter((driver) => !excluded.has(driver.id) && !unavailableDriverIds.has(driver.id))
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
             .filter((candidate) => !cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)

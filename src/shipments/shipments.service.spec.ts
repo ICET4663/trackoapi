@@ -188,6 +188,7 @@ describe('ShipmentsService driver assignment offer expiry', () => {
           },
         ]),
       },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
     } as unknown as PrismaService;
     const notifications = { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService;
     const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
@@ -237,7 +238,7 @@ describe('ShipmentsService.listAssignments access control', () => {
 });
 
 describe('ShipmentsService.offerAssignment conflict protection', () => {
-  function buildService(activeShipmentAssignment: unknown, activeDriverAssignment: unknown) {
+  function buildService(activeShipmentAssignment: unknown, activeDriverAssignment: unknown, availableForAssignments = true) {
     const driverAssignment = {
       findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn()
@@ -258,7 +259,9 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
         }),
       },
       driverAssignment,
-      $queryRawUnsafe: jest.fn().mockResolvedValue([{ status: 'FUNDED' }]),
+      $queryRawUnsafe: jest.fn().mockImplementation((sql: string) =>
+        Promise.resolve(sql.includes('"SafetySettings"') ? [{ availableForAssignments }] : [{ status: 'FUNDED' }]),
+      ),
     } as unknown as PrismaService;
     return {
       service: new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService),
@@ -286,6 +289,15 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
 
     await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
       'already has an active shipment',
+    );
+    expect(driverAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses to offer a shipment to a driver who is offline', async () => {
+    const { service, driverAssignment } = buildService(null, null, false);
+
+    await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
+      'driver is offline',
     );
     expect(driverAssignment.create).not.toHaveBeenCalled();
   });
