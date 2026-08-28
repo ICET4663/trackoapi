@@ -283,6 +283,14 @@ export class OperationsService {
       ['OFFERED', 'ACCEPTED'].includes(assignment.status)
       && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
     ).length;
+    if (activeAssignments > 0) {
+      return {
+        score: 0,
+        eligible: false,
+        vehicleId: null,
+        reason: `Driver already has ${activeAssignments} active shipment${activeAssignments === 1 ? '' : 's'} or pending offer${activeAssignments === 1 ? '' : 's'}.`,
+      };
+    }
     const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
     const averageRating = driver.driverReviews.length
       ? driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length

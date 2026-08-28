@@ -479,9 +479,9 @@ export class ShipmentsService {
     await this.expireStaleAssignmentOffers(shipmentId);
     const driverId = body.driverId ?? 'preview-driver';
 
-    let shipment, escrowRows, driver;
+    let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment;
     try {
-      [shipment, escrowRows, driver] = await Promise.all([
+      [shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment] = await Promise.all([
         this.prisma.shipment.findUnique({ where: { id: shipmentId } }),
         this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
           'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
@@ -490,6 +490,19 @@ export class ShipmentsService {
         this.prisma.user.findUnique({
           where: { id: driverId },
           include: { profile: true, driverVehicles: { where: { isActive: true } } },
+        }),
+        this.prisma.driverAssignment.findFirst({
+          where: { shipmentId, status: { in: ['OFFERED', 'ACCEPTED'] } },
+          select: { id: true, driverId: true, status: true },
+        }),
+        this.prisma.driverAssignment.findFirst({
+          where: {
+            driverId,
+            status: { in: ['OFFERED', 'ACCEPTED'] },
+            shipmentId: { not: shipmentId },
+            shipment: { status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+          },
+          select: { id: true, shipmentId: true, status: true },
         }),
       ]);
     } catch {
@@ -510,6 +523,16 @@ export class ShipmentsService {
     }
     if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');
+    }
+    if (activeShipmentAssignment) {
+      throw new BadRequestException(
+        activeShipmentAssignment.status === 'ACCEPTED'
+          ? 'This shipment already has an accepted driver.'
+          : 'This shipment already has a driver offer awaiting response.',
+      );
+    }
+    if (activeDriverAssignment) {
+      throw new BadRequestException('This driver already has an active shipment or pending offer. Select another driver.');
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const eligibleVehicles = [...driver.driverVehicles]
@@ -737,7 +760,7 @@ export class ShipmentsService {
             .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0))[0];
           return { driver, vehicle, activeAssignments: driver.driverAssignments.length };
         })
-        .filter((candidate) => Boolean(candidate.vehicle))
+        .filter((candidate) => Boolean(candidate.vehicle) && candidate.activeAssignments === 0)
         .sort((left, right) => left.activeAssignments - right.activeAssignments);
       const next = ranked[0];
       if (!next?.vehicle) return null;

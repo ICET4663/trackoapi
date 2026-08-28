@@ -235,3 +235,58 @@ describe('ShipmentsService.listAssignments access control', () => {
     );
   });
 });
+
+describe('ShipmentsService.offerAssignment conflict protection', () => {
+  function buildService(activeShipmentAssignment: unknown, activeDriverAssignment: unknown) {
+    const driverAssignment = {
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn()
+        .mockResolvedValueOnce(activeShipmentAssignment)
+        .mockResolvedValueOnce(activeDriverAssignment),
+      create: jest.fn(),
+    };
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '15' }) },
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'shipment-1', adminApproved: true, cargoWeightKg: 8000 }),
+      },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'driver-1', role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED',
+          profile: { fullName: 'Driver One' },
+          driverVehicles: [{ id: 'vehicle-1', capacityKg: 10000, isActive: true }],
+        }),
+      },
+      driverAssignment,
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ status: 'FUNDED' }]),
+    } as unknown as PrismaService;
+    return {
+      service: new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService),
+      driverAssignment,
+    };
+  }
+
+  it('refuses to create a second live offer for the same shipment', async () => {
+    const { service, driverAssignment } = buildService(
+      { id: 'assignment-existing', driverId: 'driver-2', status: 'OFFERED' },
+      null,
+    );
+
+    await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
+      'already has a driver offer',
+    );
+    expect(driverAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses to offer another shipment to a busy driver', async () => {
+    const { service, driverAssignment } = buildService(
+      null,
+      { id: 'assignment-busy', shipmentId: 'shipment-2', status: 'ACCEPTED' },
+    );
+
+    await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
+      'already has an active shipment',
+    );
+    expect(driverAssignment.create).not.toHaveBeenCalled();
+  });
+});

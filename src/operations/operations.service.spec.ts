@@ -211,6 +211,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
 
     expect(queue.drivers[0]).toMatchObject({ activeAssignments: 0, completedTrips: 5, averageRating: 5 });
     expect(bestMatches['shipment-1']).toMatchObject({ eligible: true, vehicleId: 'truck-fit' });
+    expect(busyMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
     expect(bestMatches['shipment-1'].score).toBeGreaterThan(busyMatches['shipment-1'].score);
     expect(smallMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
   });
