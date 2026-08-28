@@ -304,11 +304,11 @@ describe('ShipmentsService.cancelAssignment', () => {
     const auditCreate = jest.fn().mockResolvedValue(undefined);
     const prisma = {
       driverAssignment: {
-        findUnique: jest.fn().mockResolvedValue(assignment),
-        update: jest.fn().mockResolvedValue(updated),
+        findUnique: jest.fn().mockResolvedValueOnce(assignment).mockResolvedValueOnce(updated),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findMany: jest.fn().mockResolvedValue([]),
       },
-      shipment: { findUnique: jest.fn().mockResolvedValue({ cargoWeightKg: 8000 }) },
+      shipment: { findUnique: jest.fn().mockResolvedValue({ cargoWeightKg: 8000 }), update: jest.fn().mockResolvedValue(undefined) },
       user: { findMany: jest.fn().mockResolvedValue([]) },
       platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '15' }) },
       auditLog: { create: auditCreate },
@@ -319,12 +319,33 @@ describe('ShipmentsService.cancelAssignment', () => {
     const result = await service.cancelAssignment('assignment-1', 'dispatcher-1', 'DISPATCHER');
 
     expect(result).toMatchObject({ id: 'assignment-1', status: 'CANCELLED', nextAssignment: null });
-    expect(prisma.driverAssignment.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'assignment-1' },
+    expect(prisma.driverAssignment.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'assignment-1', status: 'OFFERED' },
       data: expect.objectContaining({ status: 'CANCELLED' }),
     }));
     expect(auditCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ actorId: 'dispatcher-1', action: 'DRIVER_ASSIGNMENT_CANCELLED' }),
     }));
+  });
+
+  it('does not overwrite a driver response that won the race first', async () => {
+    const assignment = {
+      id: 'assignment-1', shipmentId: 'shipment-1', driverId: 'driver-1', status: 'OFFERED',
+      offeredAt: new Date(), shipment: { id: 'shipment-1', customerId: 'customer-1' },
+    };
+    const shipmentUpdate = jest.fn();
+    const prisma = {
+      driverAssignment: {
+        findUnique: jest.fn().mockResolvedValue(assignment),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      shipment: { update: shipmentUpdate },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.cancelAssignment('assignment-1', 'dispatcher-1', 'DISPATCHER')).rejects.toThrow(
+      'already handled by another action',
+    );
+    expect(shipmentUpdate).not.toHaveBeenCalled();
   });
 });

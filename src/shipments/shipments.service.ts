@@ -609,30 +609,37 @@ export class ShipmentsService {
         throw new BadRequestException('This load offer has expired. Dispatch will send the shipment to another eligible driver.');
       }
 
-      const updated = await this.prisma.driverAssignment.update({
-        where: { id: assignmentId },
+      const claimed = await this.prisma.driverAssignment.updateMany({
+        where: { id: assignmentId, driverId, status: 'OFFERED' },
         data: {
           status,
           acceptedAt: action === 'ACCEPT' ? new Date() : undefined,
           rejectedAt: action === 'REJECT' ? new Date() : undefined,
-          shipment: {
-            update: {
+        },
+      });
+      if (!claimed.count) throw new BadRequestException('This assignment was already handled by another action.');
+
+      await this.prisma.shipment.update({
+        where: { id: assignment.shipmentId },
+        data: {
+          status: shipmentStatus,
+          timeline: {
+            create: {
               status: shipmentStatus,
-              timeline: {
-                create: {
-                  status: shipmentStatus,
-                  note: action === 'ACCEPT' ? 'Driver accepted the shipment.' : 'Driver rejected the shipment.',
-                },
-              },
+              note: action === 'ACCEPT' ? 'Driver accepted the shipment.' : 'Driver rejected the shipment.',
             },
           },
         },
+      });
+      const updated = await this.prisma.driverAssignment.findUnique({
+        where: { id: assignmentId },
         include: {
           driver: { include: { profile: true } },
           vehicle: true,
           shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
         },
       });
+      if (!updated) throw new InternalServerErrorException('The assignment changed but could not be reloaded.');
 
       await this.notifications.create({
         userId: updated.shipment.customerId,
@@ -654,7 +661,8 @@ export class ShipmentsService {
       };
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      return this.previewAssignment({ id: assignmentId, driverId, status });
+      this.logger.error(`respondToAssignment(${assignmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new InternalServerErrorException('Could not update this driver assignment. Please try again.');
     }
   }
 
@@ -672,29 +680,36 @@ export class ShipmentsService {
       throw new BadRequestException('Only a pending driver offer can be cancelled.');
     }
 
-    const updated = await this.prisma.driverAssignment.update({
-      where: { id: assignmentId },
+    const claimed = await this.prisma.driverAssignment.updateMany({
+      where: { id: assignmentId, status: 'OFFERED' },
       data: {
         status: 'CANCELLED',
         rejectedAt: new Date(),
-        shipment: {
-          update: {
+      },
+    });
+    if (!claimed.count) throw new BadRequestException('This assignment was already handled by another action.');
+
+    await this.prisma.shipment.update({
+      where: { id: assignment.shipmentId },
+      data: {
+        status: 'QUOTED',
+        timeline: {
+          create: {
             status: 'QUOTED',
-            timeline: {
-              create: {
-                status: 'QUOTED',
-                note: `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
-              },
-            },
+            note: `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
           },
         },
       },
+    });
+    const updated = await this.prisma.driverAssignment.findUnique({
+      where: { id: assignmentId },
       include: {
         driver: { include: { profile: true } },
         vehicle: true,
         shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
       },
     });
+    if (!updated) throw new InternalServerErrorException('The assignment changed but could not be reloaded.');
 
     await Promise.all([
       this.notifications.create({
