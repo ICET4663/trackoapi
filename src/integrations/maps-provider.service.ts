@@ -167,14 +167,28 @@ export class MapsProviderService {
     weightTons?: number;
   }) {
     const adjustments = await this.pricingAdjustments();
+    const originLatitude = Number(input.originLatitude ?? 6.5244);
+    const originLongitude = Number(input.originLongitude ?? 3.3792);
+    const destinationLatitude = Number(input.destinationLatitude ?? 9.0765);
+    const destinationLongitude = Number(input.destinationLongitude ?? 7.3986);
+    const googleKey = this.config.get<string>('GOOGLE_MAPS_API_KEY');
+    const liveRoute = googleKey && [originLatitude, originLongitude, destinationLatitude, destinationLongitude].every(Number.isFinite)
+      ? await this.googleRoute(
+          originLatitude,
+          originLongitude,
+          destinationLatitude,
+          destinationLongitude,
+          googleKey,
+        ).catch(() => null)
+      : null;
     const straightKm = this.distanceKm(
-      Number(input.originLatitude ?? 6.5244),
-      Number(input.originLongitude ?? 3.3792),
-      Number(input.destinationLatitude ?? 9.0765),
-      Number(input.destinationLongitude ?? 7.3986),
+      originLatitude,
+      originLongitude,
+      destinationLatitude,
+      destinationLongitude,
     );
-    const distanceKm = Math.max(1, straightKm * ROAD_FACTOR);
-    const durationMinutes = Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
+    const distanceKm = liveRoute?.distanceKm ?? Math.max(1, straightKm * ROAD_FACTOR);
+    const durationMinutes = liveRoute?.durationMinutes ?? Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
     const profile = this.truckProfile(input.truckType);
     const safeWeight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0
       ? Number(input.weightTons)
@@ -196,12 +210,12 @@ export class MapsProviderService {
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     return {
-      provider: 'coordinate',
+      provider: liveRoute ? 'google' : 'coordinate',
       distanceKm: roundedDistanceKm,
       durationMinutes,
       quotedPriceKobo,
       currency: 'NGN',
-      pricingMode: 'coordinate_estimate',
+      pricingMode: liveRoute ? 'live_road_route' : 'coordinate_estimate',
       pricingVersion: PRICING_VERSION,
       quoteValidMinutes: adjustments.pricingQuoteValidityMinutes,
       pricingBreakdown: {
@@ -212,7 +226,8 @@ export class MapsProviderService {
         tollAllowanceKobo: tollAllowanceNgn * 100,
         demandSurgeKobo: demandSurgeNgn * 100,
         perKmRateKobo: profile.perKmRateNgn * 100,
-        roadFactor: ROAD_FACTOR,
+        roadFactor: liveRoute ? 1 : ROAD_FACTOR,
+        routeSource: liveRoute ? 'google_routes' : 'coordinate_factor',
         averageSpeedKmh: AVERAGE_SPEED_KMH,
         weightTons: safeWeight,
         weightMultiplier: Number(weightMultiplier.toFixed(2)),
@@ -242,6 +257,47 @@ export class MapsProviderService {
         return [key, Number.isFinite(value) ? value : fallback];
       }),
     ) as Record<keyof typeof PRICING_SETTING_DEFAULTS, number>;
+  }
+
+  private async googleRoute(
+    originLatitude: number,
+    originLongitude: number,
+    destinationLatitude: number,
+    destinationLongitude: number,
+    key: string,
+  ) {
+    const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration',
+      },
+      body: JSON.stringify({
+        origin: { location: { latLng: { latitude: originLatitude, longitude: originLongitude } } },
+        destination: { location: { latLng: { latitude: destinationLatitude, longitude: destinationLongitude } } },
+        travelMode: 'DRIVE',
+        routingPreference: 'TRAFFIC_AWARE',
+        computeAlternativeRoutes: false,
+        languageCode: 'en-NG',
+        units: 'METRIC',
+      }),
+      signal: AbortSignal.timeout(4500),
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as {
+      routes?: Array<{ distanceMeters?: number; duration?: string }>;
+    };
+    const route = payload.routes?.[0];
+    const distanceMeters = Number(route?.distanceMeters);
+    const durationSeconds = Number.parseFloat(String(route?.duration ?? '').replace(/s$/, ''));
+    if (!Number.isFinite(distanceMeters) || distanceMeters <= 0 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      return null;
+    }
+    return {
+      distanceKm: Number((distanceMeters / 1000).toFixed(1)),
+      durationMinutes: Math.max(1, Math.round(durationSeconds / 60)),
+    };
   }
 
   private truckProfile(truckType = '') {
