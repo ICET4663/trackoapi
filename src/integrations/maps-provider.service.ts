@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '../prisma/prisma.service';
 
 type PlaceSuggestion = {
   id: string;
@@ -77,8 +78,15 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
 
 const ROAD_FACTOR = 1.29;
 const AVERAGE_SPEED_KMH = 58;
-const SERVICE_FEE_RATE = 0.035;
-const PRICING_VERSION = '2026-08-mvp-1';
+const PRICING_VERSION = '2026-08-admin-1';
+
+const PRICING_SETTING_DEFAULTS = {
+  pricingServiceFeePercent: 3.5,
+  pricingFuelSurchargePercent: 0,
+  pricingTollAllowanceNgn: 0,
+  pricingDemandSurgePercent: 0,
+  pricingQuoteValidityMinutes: 30,
+} as const;
 
 type TruckPricingProfile = {
   label: string;
@@ -98,7 +106,10 @@ const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
 
 @Injectable()
 export class MapsProviderService {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   status() {
     const configured = Boolean(this.config.get<string>('GOOGLE_MAPS_API_KEY'));
@@ -147,7 +158,7 @@ export class MapsProviderService {
     return { provider: 'mock', result };
   }
 
-  routeEstimate(input: {
+  async routeEstimate(input: {
     originLatitude?: number;
     originLongitude?: number;
     destinationLatitude?: number;
@@ -155,6 +166,7 @@ export class MapsProviderService {
     truckType?: string;
     weightTons?: number;
   }) {
+    const adjustments = await this.pricingAdjustments();
     const straightKm = this.distanceKm(
       Number(input.originLatitude ?? 6.5244),
       Number(input.originLongitude ?? 3.3792),
@@ -174,8 +186,12 @@ export class MapsProviderService {
     const weightMultiplier = 0.75 + 0.35 * Math.min(loadUtilization, 1);
     const distancePricing = this.distancePricing(distanceKm);
     const linehaulNgn = distanceKm * profile.perKmRateNgn * distancePricing.multiplier * weightMultiplier;
-    const subtotalNgn = profile.baseFareNgn + linehaulNgn;
-    const serviceFeeNgn = Math.round(subtotalNgn * SERVICE_FEE_RATE);
+    const fuelSurchargeNgn = Math.round(linehaulNgn * (adjustments.pricingFuelSurchargePercent / 100));
+    const tollAllowanceNgn = adjustments.pricingTollAllowanceNgn;
+    const preSurgeSubtotalNgn = profile.baseFareNgn + linehaulNgn + fuelSurchargeNgn + tollAllowanceNgn;
+    const demandSurgeNgn = Math.round(preSurgeSubtotalNgn * (adjustments.pricingDemandSurgePercent / 100));
+    const subtotalNgn = preSurgeSubtotalNgn + demandSurgeNgn;
+    const serviceFeeNgn = Math.round(subtotalNgn * (adjustments.pricingServiceFeePercent / 100));
     const quotedPriceKobo = Math.max(profile.minimumFareNgn * 100, Math.round((subtotalNgn + serviceFeeNgn) * 100));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
@@ -187,11 +203,14 @@ export class MapsProviderService {
       currency: 'NGN',
       pricingMode: 'coordinate_estimate',
       pricingVersion: PRICING_VERSION,
-      quoteValidMinutes: 30,
+      quoteValidMinutes: adjustments.pricingQuoteValidityMinutes,
       pricingBreakdown: {
         baseFareKobo: profile.baseFareNgn * 100,
         linehaulKobo: Math.round(linehaulNgn * 100),
         escrowFeeKobo: serviceFeeNgn * 100,
+        fuelSurchargeKobo: fuelSurchargeNgn * 100,
+        tollAllowanceKobo: tollAllowanceNgn * 100,
+        demandSurgeKobo: demandSurgeNgn * 100,
         perKmRateKobo: profile.perKmRateNgn * 100,
         roadFactor: ROAD_FACTOR,
         averageSpeedKmh: AVERAGE_SPEED_KMH,
@@ -203,9 +222,26 @@ export class MapsProviderService {
         loadUtilization: Number(loadUtilization.toFixed(3)),
         distanceBand: distancePricing.band,
         distanceMultiplier: distancePricing.multiplier,
-        serviceFeeRate: SERVICE_FEE_RATE,
+        serviceFeeRate: adjustments.pricingServiceFeePercent / 100,
+        fuelSurchargeRate: adjustments.pricingFuelSurchargePercent / 100,
+        demandSurgeRate: adjustments.pricingDemandSurgePercent / 100,
       },
     };
+  }
+
+  private async pricingAdjustments() {
+    const keys = Object.keys(PRICING_SETTING_DEFAULTS);
+    const rows = await this.prisma.platformSetting.findMany({
+      where: { key: { in: keys } },
+      select: { key: true, value: true },
+    }).catch(() => []);
+    const configured = new Map(rows.map((row) => [row.key, Number(row.value)]));
+    return Object.fromEntries(
+      Object.entries(PRICING_SETTING_DEFAULTS).map(([key, fallback]) => {
+        const value = configured.get(key);
+        return [key, Number.isFinite(value) ? value : fallback];
+      }),
+    ) as Record<keyof typeof PRICING_SETTING_DEFAULTS, number>;
   }
 
   private truckProfile(truckType = '') {

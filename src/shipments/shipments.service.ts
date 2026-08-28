@@ -94,7 +94,7 @@ export class ShipmentsService {
     // Price, distance, and duration are always recomputed server-side from the
     // same formula the client previewed with — a client can never dictate what
     // it gets charged by sending a different quotedPriceKobo in the request body.
-    const quote = this.mapsProvider.routeEstimate({
+    const quote = await this.mapsProvider.routeEstimate({
       originLatitude: normalized.pickupLatitude ?? undefined,
       originLongitude: normalized.pickupLongitude ?? undefined,
       destinationLatitude: normalized.destinationLatitude ?? undefined,
@@ -1102,7 +1102,7 @@ export class ShipmentsService {
       weightTons?: number;
       pricingVersion?: string;
       quoteValidMinutes?: number;
-      pricingBreakdown?: ReturnType<MapsProviderService['routeEstimate']>['pricingBreakdown'];
+      pricingBreakdown?: Awaited<ReturnType<MapsProviderService['routeEstimate']>>['pricingBreakdown'];
     } = {},
   ) {
     return {
@@ -1139,7 +1139,7 @@ export class ShipmentsService {
   private async recordQuoteSnapshot(
     customerId: string,
     shipmentId: string,
-    quote: ReturnType<MapsProviderService['routeEstimate']>,
+    quote: Awaited<ReturnType<MapsProviderService['routeEstimate']>>,
   ) {
     await this.prisma.auditLog.create({
       data: {

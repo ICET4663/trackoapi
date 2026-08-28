@@ -1533,8 +1533,15 @@ export class SettingsService {
     defaultValue: string;
     helper: string;
     type: 'number' | 'text' | 'boolean';
+    min?: number;
+    max?: number;
   }[] = [
     { key: 'fee', title: 'Platform fee', description: 'Default platform commission applied to new shipments.', label: 'Fee (%)', defaultValue: '7.5', helper: 'Applies to newly created shipments only; shipments already in progress keep their original rate.', type: 'number' },
+    { key: 'pricingServiceFeePercent', title: 'Quote service fee', description: 'Service and escrow fee included in new customer quotes.', label: 'Service fee (%)', defaultValue: '3.5', helper: 'Allowed range: 0-20%. Existing shipment quotes remain unchanged.', type: 'number', min: 0, max: 20 },
+    { key: 'pricingFuelSurchargePercent', title: 'Fuel surcharge', description: 'Fuel adjustment applied to the distance-based line-haul charge.', label: 'Fuel surcharge (%)', defaultValue: '0', helper: 'Allowed range: 0-50%. Set to 0 when no surcharge is required.', type: 'number', min: 0, max: 50 },
+    { key: 'pricingTollAllowanceNgn', title: 'Toll allowance', description: 'Flat toll and route allowance included in every new quote.', label: 'Allowance (NGN)', defaultValue: '0', helper: 'Allowed range: NGN 0-500,000 per shipment.', type: 'number', min: 0, max: 500000 },
+    { key: 'pricingDemandSurgePercent', title: 'Demand adjustment', description: 'Temporary network demand adjustment applied to new quotes.', label: 'Demand adjustment (%)', defaultValue: '0', helper: 'Allowed range: 0-50%. Keep at 0 during normal demand.', type: 'number', min: 0, max: 50 },
+    { key: 'pricingQuoteValidityMinutes', title: 'Quote validity', description: 'How long a customer quote remains valid before it must be recalculated.', label: 'Validity (minutes)', defaultValue: '30', helper: 'Allowed range: 5-240 minutes.', type: 'number', min: 5, max: 240 },
     { key: 'payout', title: 'Payout schedule', description: 'How often driver payout requests are reviewed for release.', label: 'Schedule', defaultValue: 'weekly', helper: 'Accepted values: daily, weekly, biweekly, monthly.', type: 'text' },
     { key: 'escrow', title: 'Escrow release window', description: 'Days after delivery confirmation before escrow auto-releases if undisputed.', label: 'Days', defaultValue: '3', helper: 'Customers can still confirm delivery earlier to release funds sooner.', type: 'number' },
     { key: 'manualDriverVerification', title: 'Manual driver verification', description: 'Require an admin to manually review every driver KYC submission.', label: 'Manual driver verification', defaultValue: 'true', helper: 'Recorded for reference - KYC review is currently always manual regardless of this flag.', type: 'boolean' },
@@ -1564,6 +1571,12 @@ export class SettingsService {
     }
     if (definition.type === 'number' && (!value.trim() || Number.isNaN(Number(value)))) {
       throw new BadRequestException(`${definition.title} must be a number.`);
+    }
+    if (definition.type === 'number' && definition.min !== undefined && Number(value) < definition.min) {
+      throw new BadRequestException(`${definition.title} must be at least ${definition.min}.`);
+    }
+    if (definition.type === 'number' && definition.max !== undefined && Number(value) > definition.max) {
+      throw new BadRequestException(`${definition.title} must not exceed ${definition.max}.`);
     }
 
     try {
@@ -1713,5 +1726,4 @@ export class SettingsService {
     return `${Math.round(hours / 24)}d ago`;
   }
 }
-
 
