@@ -3,6 +3,9 @@ import { SettingsService } from './settings.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
 import type { ConfigService } from '@nestjs/config';
+import type { AuthService } from '../auth/auth.service';
+
+const noopAuthService = {} as unknown as AuthService;
 
 // sendEmergencyAlert()/reportSafetyIncident() both go through createSafetyTicket(), whose
 // catch block used to swallow ANY failure - a broken DB connection, a failed insert,
@@ -26,7 +29,7 @@ describe('SettingsService safety alerts never fake success on failure', () => {
     } as unknown as PrismaService;
     const notifications = { create: notificationsCreate } as unknown as NotificationsService;
     const config = { get: jest.fn() } as unknown as ConfigService;
-    service = new SettingsService(prisma, notifications, config);
+    service = new SettingsService(prisma, notifications, config, noopAuthService);
   });
 
   it('throws a real error instead of a fake success when the SupportTicket insert fails', async () => {
@@ -81,7 +84,7 @@ describe('SettingsService.requestDriverWithdrawal never validates against the fa
     } as unknown as PrismaService;
     const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
     const config = { get: jest.fn() } as unknown as ConfigService;
-    service = new SettingsService(prisma, notifications, config);
+    service = new SettingsService(prisma, notifications, config, noopAuthService);
   });
 
   it('throws instead of silently falling back to the fake balance when the real computation fails', async () => {
@@ -135,7 +138,7 @@ describe('SettingsService platform settings are actually persisted', () => {
     } as unknown as PrismaService;
     const notifications = {} as unknown as NotificationsService;
     const config = { get: jest.fn() } as unknown as ConfigService;
-    service = new SettingsService(prisma, notifications, config);
+    service = new SettingsService(prisma, notifications, config, noopAuthService);
   });
 
   it('falls back to catalog defaults for settings that have never been changed', async () => {

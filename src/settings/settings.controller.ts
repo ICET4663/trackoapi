@@ -46,6 +46,22 @@ export class SettingsController {
     return this.settingsService.requestAccountDeletion(user.sub, body);
   }
 
+  @Get('admin/deletion-requests')
+  async pendingAccountDeletionRequests(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN']);
+    return this.settingsService.pendingAccountDeletionRequests();
+  }
+
+  @Post('admin/deletion-requests/:userId/review')
+  async reviewAccountDeletionRequest(
+    @Param('userId') userId: string,
+    @Body() body: { decision?: string; note?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const reviewer = await this.requestUser.requireRole(authorization, ['ADMIN']);
+    return this.settingsService.reviewAccountDeletionRequest(userId, reviewer.sub, body);
+  }
+
   @Get('settings/notification-preferences')
   async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);

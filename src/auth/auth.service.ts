@@ -1,7 +1,7 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { OtpPurpose, UserRole } from '@prisma/client';
+import { OtpPurpose, Prisma, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomInt, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -279,8 +279,48 @@ export class AuthService {
     const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
     if (!passwordOk) throw new UnauthorizedException('Password confirmation is incorrect.');
 
+    const deletedAt = await this.anonymizeAccount(userId, {
+      actorId: userId,
+      action: 'ACCOUNT_DELETION_REQUESTED',
+      metadata: { reason: dto.reason ?? null, selfService: true },
+    });
+
+    return {
+      deleted: true,
+      requestedAt: deletedAt.toISOString(),
+      retainedData:
+        'Operational records may be retained where required for safety, fraud prevention, dispute resolution, or legal compliance.',
+    };
+  }
+
+  // Executes a deletion request that a user submitted for review (SettingsService.
+  // requestAccountDeletion / POST /v1/account/deletion-request) - that flow only ever
+  // wrote an audit-log entry and notified staff; nothing anywhere actually called this
+  // method, so every "reviewed" deletion request went into a black hole no admin action
+  // could ever resolve. No password check here - the account owner isn't the caller, an
+  // admin who has already reviewed the request is, which is exactly what the ADMIN-only
+  // route this backs requires.
+  async adminExecuteAccountDeletion(userId: string, reviewerId: string, note?: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Account not found.');
+    if (!user.isActive) throw new BadRequestException('This account has already been deleted.');
+
+    const deletedAt = await this.anonymizeAccount(userId, {
+      actorId: reviewerId,
+      action: 'ACCOUNT_DELETION_APPROVED',
+      metadata: { reviewedUserId: userId, note: note ?? null },
+    });
+
+    return { deleted: true, executedAt: deletedAt.toISOString() };
+  }
+
+  private async anonymizeAccount(
+    userId: string,
+    auditEntry: { actorId: string; action: string; metadata: Record<string, unknown> },
+  ) {
     const deletedAt = new Date();
-    const deletedMarker = `deleted_${user.id}`;
+    const deletedMarker = `deleted_${userId}`;
+    const randomPasswordHash = await bcrypt.hash(randomUUID(), 12);
 
     await this.prisma.$transaction([
       this.prisma.refreshToken.updateMany({
@@ -291,11 +331,11 @@ export class AuthService {
       this.prisma.profile.deleteMany({ where: { userId } }),
       this.prisma.auditLog.create({
         data: {
-          actorId: userId,
-          action: 'ACCOUNT_DELETION_REQUESTED',
+          actorId: auditEntry.actorId,
+          action: auditEntry.action,
           entity: 'User',
           entityId: userId,
-          metadata: { reason: dto.reason ?? null },
+          metadata: auditEntry.metadata as Prisma.InputJsonValue,
         },
       }),
       this.prisma.user.update({
@@ -303,19 +343,14 @@ export class AuthService {
         data: {
           email: `${deletedMarker}@deleted.tracko.local`,
           phone: deletedMarker,
-          passwordHash: await bcrypt.hash(randomUUID(), 12),
+          passwordHash: randomPasswordHash,
           isActive: false,
           availableRoles: [],
         },
       }),
     ]);
 
-    return {
-      deleted: true,
-      requestedAt: deletedAt.toISOString(),
-      retainedData:
-        'Operational records may be retained where required for safety, fraud prevention, dispute resolution, or legal compliance.',
-    };
+    return deletedAt;
   }
 
   private async createSession(userId: string, requestedRole?: UserRole) {

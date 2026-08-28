@@ -148,3 +148,49 @@ describe('AuthService.refresh rotates tokens and detects reuse', () => {
     expect((prisma.refreshToken.updateMany as jest.Mock)).not.toHaveBeenCalled();
   });
 });
+
+// SettingsService.requestAccountDeletion() (the in-app "Request account deletion" flow)
+// only ever wrote an audit-log entry and notified staff - nothing anywhere called this
+// method, so every reviewed deletion request went into a black hole no admin action could
+// resolve. These tests pin down that an admin decision actually executes the deletion.
+describe('AuthService.adminExecuteAccountDeletion', () => {
+  function buildService(user: { id: string; isActive: boolean } | null) {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const jwt = {} as unknown as JwtService;
+    const transaction = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      user: { findUnique: jest.fn().mockResolvedValue(user), update: jest.fn().mockResolvedValue(undefined) },
+      refreshToken: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      otpCode: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      profile: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const users = {} as unknown as UsersService;
+    const rateLimit = {} as unknown as RateLimitService;
+    return { service: new AuthService(config, jwt, prisma, rateLimit, users), prisma, transaction };
+  }
+
+  it('actually anonymizes the account via a real transaction, not just an audit-log note', async () => {
+    const { service, transaction } = buildService({ id: 'user-1', isActive: true });
+
+    const result = await service.adminExecuteAccountDeletion('user-1', 'admin-1', 'Confirmed by phone');
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(result.deleted).toBe(true);
+  });
+
+  it('rejects executing deletion for an account that was already deleted', async () => {
+    const { service, transaction } = buildService({ id: 'user-1', isActive: false });
+
+    await expect(service.adminExecuteAccountDeletion('user-1', 'admin-1')).rejects.toThrow('already been deleted');
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects executing deletion for an account that does not exist', async () => {
+    const { service, transaction } = buildService(null);
+
+    await expect(service.adminExecuteAccountDeletion('ghost-user', 'admin-1')).rejects.toThrow('not found');
+    expect(transaction).not.toHaveBeenCalled();
+  });
+});

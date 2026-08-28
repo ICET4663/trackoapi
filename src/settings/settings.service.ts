@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, InternalServerErrorException, NotFound
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import { AuthService } from '../auth/auth.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -102,6 +103,7 @@ export class SettingsService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    private readonly auth: AuthService,
   ) {}
 
   async accountOverview(role: Role, userId = 'preview-user', authRole?: Role) {
@@ -318,6 +320,10 @@ export class SettingsService {
     const id = `account-deletion-${Date.now()}`;
     const reason = String(input.reason ?? 'User requested account deletion from app.');
 
+    // The audit log entry IS the request - it's what pendingAccountDeletionRequests()
+    // below reads to build the admin review queue. If this insert fails, the request was
+    // never actually recorded and no admin will ever see it, so this must surface as a
+    // real failure rather than the honest-sounding "received" message it used to fake.
     try {
       await this.prisma.auditLog.create({
         data: {
@@ -333,39 +339,109 @@ export class SettingsService {
           },
         },
       });
-
-      await this.notifications.create({
-        role: 'ADMIN',
-        title: 'Account deletion request',
-        body: 'A user requested account deletion from inside the app.',
-        tone: 'WARNING',
-        entity: 'User',
-        entityId: userId,
-        actionUrl: '/admin/audit-logs',
-      });
-
-      await this.notifications.create({
-        userId,
-        title: 'Deletion request received',
-        body: 'Tracko will review your account deletion request and follow up according to our retention policy.',
-        tone: 'INFO',
-        entity: 'User',
-        entityId: userId,
-        actionUrl: '/customer/legal-document?id=account-deletion',
-      });
-
-      return {
-        id,
-        status: 'PENDING_REVIEW',
-        message: 'Account deletion request received. Tracko will review and follow up.',
-      };
-    } catch {
-      return {
-        id,
-        status: 'PENDING_REVIEW',
-        message: 'Account deletion request received in preview.',
-      };
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not submit your deletion request. Please try again: ${this.errorMessage(error)}`);
     }
+
+    await this.notifications.create({
+      role: 'ADMIN',
+      title: 'Account deletion request',
+      body: 'A user requested account deletion from inside the app.',
+      tone: 'WARNING',
+      entity: 'User',
+      entityId: userId,
+      actionUrl: '/admin/deletion-requests',
+    });
+
+    await this.notifications.create({
+      userId,
+      title: 'Deletion request received',
+      body: 'Tracko will review your account deletion request and follow up according to our retention policy.',
+      tone: 'INFO',
+      entity: 'User',
+      entityId: userId,
+      actionUrl: '/customer/legal-document?id=account-deletion',
+    });
+
+    return {
+      id,
+      status: 'PENDING_REVIEW',
+      message: 'Account deletion request received. Tracko will review and follow up.',
+    };
+  }
+
+  // The admin-facing counterpart to requestAccountDeletion() above - previously nothing
+  // ever read these requests back out, so every one went into a black hole no admin action
+  // could resolve. A request is "pending" while the target account is still active and no
+  // later APPROVED/REJECTED entry exists for it yet.
+  async pendingAccountDeletionRequests() {
+    return this.prisma.$queryRawUnsafe<
+      { id: string; userId: string; requestedAt: Date; reason: string | null; email: string; phone: string; fullName: string | null }[]
+    >(
+      `select al."id", al."entityId" as "userId", al."createdAt" as "requestedAt",
+              al.metadata->>'reason' as "reason", u."email", u."phone", p."fullName"
+       from "AuditLog" al
+       join "User" u on u."id" = al."entityId"
+       left join "Profile" p on p."userId" = u."id"
+       where al.action = 'ACCOUNT_DELETION_REQUESTED'
+         and u."isActive" = true
+         and not exists (
+           select 1 from "AuditLog" al2
+           where al2."entityId" = al."entityId"
+             and al2.action in ('ACCOUNT_DELETION_APPROVED', 'ACCOUNT_DELETION_REJECTED')
+             and al2."createdAt" > al."createdAt"
+         )
+       order by al."createdAt" desc
+       limit 100`,
+    ).then((rows) => rows.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      requestedAt: row.requestedAt.toISOString(),
+      reason: row.reason,
+      email: row.email,
+      phone: row.phone,
+      fullName: row.fullName ?? row.email,
+    })));
+  }
+
+  async reviewAccountDeletionRequest(userId: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const decision = String(input.decision ?? '').toUpperCase();
+    if (decision !== 'APPROVE' && decision !== 'REJECT') {
+      throw new BadRequestException('Use APPROVE or REJECT as the deletion decision.');
+    }
+
+    if (decision === 'APPROVE') {
+      const result = await this.auth.adminExecuteAccountDeletion(userId, reviewerId, input.note);
+      return { userId, decision: 'APPROVED', ...result };
+    }
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: reviewerId,
+          action: 'ACCOUNT_DELETION_REJECTED',
+          entity: 'User',
+          entityId: userId,
+          metadata: { note: input.note ?? null },
+        },
+      });
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not record this decision. Please try again: ${this.errorMessage(error)}`);
+    }
+
+    await this.notifications.create({
+      userId,
+      title: 'Deletion request update',
+      body: input.note
+        ? `Tracko reviewed your account deletion request: ${input.note}`
+        : 'Tracko reviewed your account deletion request and your account was not deleted. Contact support for details.',
+      tone: 'INFO',
+      entity: 'User',
+      entityId: userId,
+      actionUrl: '/customer/support',
+    });
+
+    return { userId, decision: 'REJECTED' };
   }
 
   private toProfileRecord(user: {
