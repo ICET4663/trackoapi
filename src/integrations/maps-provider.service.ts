@@ -342,8 +342,16 @@ export class MapsProviderService {
   }
 
   private quoteSignature(encodedPayload: string) {
+    // 'JWT_SECRET' here was never a real configured variable anywhere in this codebase
+    // (the actual one is JWT_ACCESS_SECRET) - so in any environment without a dedicated
+    // QUOTE_SIGNING_SECRET, this always fell through to the hardcoded fallback string,
+    // which is sitting in plaintext in the public repo. That defeats the entire point of
+    // signing: anyone reading the source could compute a valid signature for a tampered
+    // quote (e.g. an artificially low price) themselves. Falling back to the real,
+    // already-required JWT_ACCESS_SECRET keeps this genuinely unguessable even before a
+    // dedicated QUOTE_SIGNING_SECRET is provisioned.
     const secret = this.config.get<string>('QUOTE_SIGNING_SECRET')
-      ?? this.config.get<string>('JWT_SECRET')
+      ?? this.config.get<string>('JWT_ACCESS_SECRET')
       ?? 'tracko-development-quote-secret';
     return createHmac('sha256', secret).update(encodedPayload).digest('base64url');
   }

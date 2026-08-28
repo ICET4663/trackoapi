@@ -1746,6 +1746,61 @@ export class SettingsService {
     }
   }
 
+  async pricingReport() {
+    const periodEnd = new Date();
+    const periodStart = new Date(periodEnd.getTime() - 30 * 24 * 60 * 60 * 1000);
+    let logs;
+    try {
+      logs = await this.prisma.auditLog.findMany({
+        where: {
+          action: 'SHIPMENT_QUOTE_ACCEPTED',
+          createdAt: { gte: periodStart },
+        },
+        include: { actor: { include: { profile: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      });
+    } catch {
+      throw new InternalServerErrorException('Could not load the pricing report. Please try again.');
+    }
+
+    const quotes = logs.map((log) => {
+      const metadata = (log.metadata ?? {}) as Record<string, unknown>;
+      const breakdown = metadata.pricingBreakdown && typeof metadata.pricingBreakdown === 'object'
+        ? metadata.pricingBreakdown as Record<string, unknown>
+        : {};
+      const amountKobo = this.reportNumber(metadata.quotedPriceKobo);
+      const distanceKm = this.reportNumber(metadata.distanceKm);
+      return {
+        id: log.id,
+        shipmentId: log.entityId ?? undefined,
+        customer: log.actor?.profile?.fullName ?? log.actor?.email ?? 'Customer',
+        acceptedAt: log.createdAt.toISOString(),
+        amountKobo,
+        distanceKm,
+        ratePerKmKobo: distanceKm > 0 ? Math.round(amountKobo / distanceKm) : 0,
+        truckType: String(breakdown.truckType ?? 'Truck'),
+        provider: String(metadata.provider ?? 'coordinate'),
+        pricingMode: String(metadata.pricingMode ?? 'coordinate_estimate'),
+        pricingVersion: String(metadata.pricingVersion ?? 'unknown'),
+      };
+    });
+    const totalQuoteValueKobo = quotes.reduce((total, quote) => total + quote.amountKobo, 0);
+    const totalDistanceKm = quotes.reduce((total, quote) => total + quote.distanceKm, 0);
+    const liveRouteCount = quotes.filter((quote) => quote.provider === 'google' || quote.pricingMode === 'live_road_route').length;
+
+    return {
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      acceptedQuoteCount: quotes.length,
+      totalQuoteValueKobo,
+      averageQuoteKobo: quotes.length ? Math.round(totalQuoteValueKobo / quotes.length) : 0,
+      averageRatePerKmKobo: totalDistanceKm > 0 ? Math.round(totalQuoteValueKobo / totalDistanceKm) : 0,
+      liveRoutePercent: quotes.length ? Math.round((liveRouteCount / quotes.length) * 100) : 0,
+      latestQuotes: quotes.slice(0, 20),
+    };
+  }
+
   async auditLog(id: string) {
     try {
       const log = await this.prisma.auditLog.findUnique({ where: { id } });
@@ -1817,5 +1872,10 @@ export class SettingsService {
     const hours = Math.round(minutes / 60);
     if (hours < 24) return `${hours}h ago`;
     return `${Math.round(hours / 24)}d ago`;
+  }
+
+  private reportNumber(value: unknown) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : 0;
   }
 }

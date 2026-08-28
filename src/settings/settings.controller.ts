@@ -317,6 +317,12 @@ export class SettingsController {
     return this.settingsService.auditLogs(category);
   }
 
+  @Get('admin/pricing-report')
+  async pricingReport(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.pricingReport();
+  }
+
   @Get('admin/audit-logs/:id')
   async auditLog(@Param('id') id: string, @Headers('authorization') authorization?: string) {
     await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);

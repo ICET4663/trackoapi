@@ -210,3 +210,60 @@ describe('SettingsService platform settings are actually persisted', () => {
     );
   });
 });
+
+describe('SettingsService pricing report uses accepted quote audit records', () => {
+  it('summarizes quote value, weighted route rate, and live-route usage', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      {
+        id: 'audit-quote-1',
+        entityId: 'shipment-1',
+        createdAt: new Date('2026-08-20T10:00:00.000Z'),
+        actor: { email: 'customer@tracko.ng', profile: { fullName: 'Tracko Customer' } },
+        metadata: {
+          quotedPriceKobo: 30_000_000,
+          distanceKm: 300,
+          provider: 'google',
+          pricingMode: 'live_road_route',
+          pricingVersion: '2026.08',
+          pricingBreakdown: { truckType: 'Flatbed' },
+        },
+      },
+      {
+        id: 'audit-quote-2',
+        entityId: 'shipment-2',
+        createdAt: new Date('2026-08-19T10:00:00.000Z'),
+        actor: { email: 'second@tracko.ng', profile: null },
+        metadata: {
+          quotedPriceKobo: 10_000_000,
+          distanceKm: 100,
+          provider: 'coordinate',
+          pricingMode: 'coordinate_estimate',
+          pricingVersion: '2026.08',
+          pricingBreakdown: { truckType: 'Box truck' },
+        },
+      },
+    ]);
+    const prisma = { auditLog: { findMany } } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      {} as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+
+    const report = await service.pricingReport();
+
+    expect(report).toMatchObject({
+      acceptedQuoteCount: 2,
+      totalQuoteValueKobo: 40_000_000,
+      averageQuoteKobo: 20_000_000,
+      averageRatePerKmKobo: 100_000,
+      liveRoutePercent: 50,
+    });
+    expect(report.latestQuotes[0]).toMatchObject({
+      shipmentId: 'shipment-1',
+      customer: 'Tracko Customer',
+      truckType: 'Flatbed',
+    });
+  });
+});
