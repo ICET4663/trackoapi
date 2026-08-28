@@ -75,6 +75,20 @@ describe('MapsProviderService route pricing', () => {
     expect(quote.pricingBreakdown.routeSource).toBe('google_routes');
   });
 
+  it('uses the persisted rate card for the selected truck type', async () => {
+    const quote = await createService({
+      settings: [
+        { key: 'pricingFlatbedBaseFareNgn', value: '80000' },
+        { key: 'pricingFlatbedPerKmRateNgn', value: '1200' },
+        { key: 'pricingFlatbedMinimumFareNgn', value: '150000' },
+      ],
+    }).routeEstimate(routeInput);
+
+    expect(quote.pricingBreakdown.baseFareKobo).toBe(8_000_000);
+    expect(quote.pricingBreakdown.perKmRateKobo).toBe(120_000);
+    expect(quote.quotedPriceKobo).toBeGreaterThanOrEqual(15_000_000);
+  });
+
   it('rejects cargo that exceeds the selected truck capacity', async () => {
     await expect(createService().routeEstimate({ ...routeInput, weightTons: 31 })).rejects.toBeInstanceOf(
       BadRequestException,

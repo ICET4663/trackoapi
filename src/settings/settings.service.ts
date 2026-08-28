@@ -1618,6 +1618,21 @@ export class SettingsService {
     { key: 'pricingTollAllowanceNgn', title: 'Toll allowance', description: 'Flat toll and route allowance included in every new quote.', label: 'Allowance (NGN)', defaultValue: '0', helper: 'Allowed range: NGN 0-500,000 per shipment.', type: 'number', min: 0, max: 500000 },
     { key: 'pricingDemandSurgePercent', title: 'Demand adjustment', description: 'Temporary network demand adjustment applied to new quotes.', label: 'Demand adjustment (%)', defaultValue: '0', helper: 'Allowed range: 0-50%. Keep at 0 during normal demand.', type: 'number', min: 0, max: 50 },
     { key: 'pricingQuoteValidityMinutes', title: 'Quote validity', description: 'How long a customer quote remains valid before it must be recalculated.', label: 'Validity (minutes)', defaultValue: '30', helper: 'Allowed range: 5-240 minutes.', type: 'number', min: 5, max: 240 },
+    { key: 'pricingFlatbedBaseFareNgn', title: 'Flatbed base fare', description: 'Starting charge for a flatbed shipment.', label: 'Base fare (NGN)', defaultValue: '55000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingFlatbedPerKmRateNgn', title: 'Flatbed kilometre rate', description: 'Distance rate for flatbed shipments.', label: 'Rate per km (NGN)', defaultValue: '720', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
+    { key: 'pricingFlatbedMinimumFareNgn', title: 'Flatbed minimum fare', description: 'Lowest permitted quote for a flatbed shipment.', label: 'Minimum fare (NGN)', defaultValue: '95000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingBoxBaseFareNgn', title: 'Box truck base fare', description: 'Starting charge for a box truck shipment.', label: 'Base fare (NGN)', defaultValue: '50000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingBoxPerKmRateNgn', title: 'Box truck kilometre rate', description: 'Distance rate for box truck shipments.', label: 'Rate per km (NGN)', defaultValue: '680', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
+    { key: 'pricingBoxMinimumFareNgn', title: 'Box truck minimum fare', description: 'Lowest permitted quote for a box truck shipment.', label: 'Minimum fare (NGN)', defaultValue: '90000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingTipperBaseFareNgn', title: 'Tipper base fare', description: 'Starting charge for a tipper shipment.', label: 'Base fare (NGN)', defaultValue: '60000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingTipperPerKmRateNgn', title: 'Tipper kilometre rate', description: 'Distance rate for tipper shipments.', label: 'Rate per km (NGN)', defaultValue: '760', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
+    { key: 'pricingTipperMinimumFareNgn', title: 'Tipper minimum fare', description: 'Lowest permitted quote for a tipper shipment.', label: 'Minimum fare (NGN)', defaultValue: '100000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingTankerBaseFareNgn', title: 'Tanker base fare', description: 'Starting charge for a tanker shipment.', label: 'Base fare (NGN)', defaultValue: '70000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingTankerPerKmRateNgn', title: 'Tanker kilometre rate', description: 'Distance rate for tanker shipments.', label: 'Rate per km (NGN)', defaultValue: '820', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
+    { key: 'pricingTankerMinimumFareNgn', title: 'Tanker minimum fare', description: 'Lowest permitted quote for a tanker shipment.', label: 'Minimum fare (NGN)', defaultValue: '115000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingStandardBaseFareNgn', title: 'Standard truck base fare', description: 'Starting charge for a standard truck shipment.', label: 'Base fare (NGN)', defaultValue: '50000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    { key: 'pricingStandardPerKmRateNgn', title: 'Standard truck kilometre rate', description: 'Distance rate for standard truck shipments.', label: 'Rate per km (NGN)', defaultValue: '700', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
+    { key: 'pricingStandardMinimumFareNgn', title: 'Standard truck minimum fare', description: 'Lowest permitted quote for a standard truck shipment.', label: 'Minimum fare (NGN)', defaultValue: '90000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
     { key: 'payout', title: 'Payout schedule', description: 'How often driver payout requests are reviewed for release.', label: 'Schedule', defaultValue: 'weekly', helper: 'Accepted values: daily, weekly, biweekly, monthly.', type: 'text' },
     { key: 'escrow', title: 'Escrow release window', description: 'Days after delivery confirmation before escrow auto-releases if undisputed.', label: 'Days', defaultValue: '3', helper: 'Customers can still confirm delivery earlier to release funds sooner.', type: 'number' },
     { key: 'manualDriverVerification', title: 'Manual driver verification', description: 'Require an admin to manually review every driver KYC submission.', label: 'Manual driver verification', defaultValue: 'true', helper: 'Recorded for reference - KYC review is currently always manual regardless of this flag.', type: 'boolean' },
@@ -1681,7 +1696,9 @@ export class SettingsService {
   private toPlatformSetting(definition: (typeof this.platformSettingCatalog)[number], storedValue?: string) {
     const value = storedValue ?? definition.defaultValue;
     const displayValue = definition.type === 'boolean' ? (value === 'true' ? 'On' : 'Off')
-      : definition.type === 'number' && definition.key === 'fee' ? `${value}%`
+      : definition.type === 'number' && (definition.key === 'fee' || definition.key.endsWith('Percent')) ? `${value}%`
+      : definition.type === 'number' && definition.key.endsWith('Ngn') ? `NGN ${Number(value).toLocaleString('en-US')}`
+      : definition.key === 'pricingQuoteValidityMinutes' ? `${value} minutes`
       : definition.key === 'payout' ? value.charAt(0).toUpperCase() + value.slice(1)
       : value;
     return {
@@ -1802,4 +1819,3 @@ export class SettingsService {
     return `${Math.round(hours / 24)}d ago`;
   }
 }
-

@@ -86,6 +86,21 @@ const PRICING_SETTING_DEFAULTS = {
   pricingTollAllowanceNgn: 0,
   pricingDemandSurgePercent: 0,
   pricingQuoteValidityMinutes: 30,
+  pricingFlatbedBaseFareNgn: 55_000,
+  pricingFlatbedPerKmRateNgn: 720,
+  pricingFlatbedMinimumFareNgn: 95_000,
+  pricingBoxBaseFareNgn: 50_000,
+  pricingBoxPerKmRateNgn: 680,
+  pricingBoxMinimumFareNgn: 90_000,
+  pricingTipperBaseFareNgn: 60_000,
+  pricingTipperPerKmRateNgn: 760,
+  pricingTipperMinimumFareNgn: 100_000,
+  pricingTankerBaseFareNgn: 70_000,
+  pricingTankerPerKmRateNgn: 820,
+  pricingTankerMinimumFareNgn: 115_000,
+  pricingStandardBaseFareNgn: 50_000,
+  pricingStandardPerKmRateNgn: 700,
+  pricingStandardMinimumFareNgn: 90_000,
 } as const;
 
 type TruckPricingProfile = {
@@ -189,7 +204,7 @@ export class MapsProviderService {
     );
     const distanceKm = liveRoute?.distanceKm ?? Math.max(1, straightKm * ROAD_FACTOR);
     const durationMinutes = liveRoute?.durationMinutes ?? Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
-    const profile = this.truckProfile(input.truckType);
+    const profile = this.truckProfile(input.truckType, adjustments);
     const safeWeight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0
       ? Number(input.weightTons)
       : 1;
@@ -256,7 +271,7 @@ export class MapsProviderService {
         const value = configured.get(key);
         return [key, Number.isFinite(value) ? value : fallback];
       }),
-    ) as Record<keyof typeof PRICING_SETTING_DEFAULTS, number>;
+    ) as Record<string, number>;
   }
 
   private async googleRoute(
@@ -300,9 +315,17 @@ export class MapsProviderService {
     };
   }
 
-  private truckProfile(truckType = '') {
-    const key = Object.keys(TRUCK_PRICING).find((candidate) => truckType.toLowerCase().includes(candidate)) ?? 'truck';
-    return TRUCK_PRICING[key];
+  private truckProfile(truckType: string | undefined, adjustments: Record<string, number>) {
+    const normalizedTruckType = truckType ?? '';
+    const key = Object.keys(TRUCK_PRICING).find((candidate) => normalizedTruckType.toLowerCase().includes(candidate)) ?? 'truck';
+    const prefix = key === 'truck' ? 'Standard' : key.charAt(0).toUpperCase() + key.slice(1);
+    const defaults = TRUCK_PRICING[key];
+    return {
+      ...defaults,
+      baseFareNgn: adjustments[`pricing${prefix}BaseFareNgn`] ?? defaults.baseFareNgn,
+      perKmRateNgn: adjustments[`pricing${prefix}PerKmRateNgn`] ?? defaults.perKmRateNgn,
+      minimumFareNgn: adjustments[`pricing${prefix}MinimumFareNgn`] ?? defaults.minimumFareNgn,
+    };
   }
 
   private distancePricing(distanceKm: number) {
