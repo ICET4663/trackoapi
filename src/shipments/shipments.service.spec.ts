@@ -111,3 +111,47 @@ describe('ShipmentsService.autoReleaseEligibleEscrows', () => {
     ]);
   });
 });
+
+// "Maintenance mode" used to be pure copy on the admin platform settings screen despite
+// its own description explicitly promising it would block new shipment creation.
+describe('ShipmentsService.create is actually gated by the maintenanceMode platform setting', () => {
+  function buildService(maintenanceValue: string | null) {
+    const findUnique = jest.fn().mockResolvedValue(maintenanceValue === null ? null : { key: 'maintenanceMode', value: maintenanceValue });
+    const shipmentCreate = jest.fn();
+    const queryRawUnsafe = jest.fn();
+    const prisma = {
+      platformSetting: { findUnique },
+      $queryRawUnsafe: queryRawUnsafe,
+      shipment: { create: shipmentCreate },
+    } as unknown as PrismaService;
+    const notifications = {} as unknown as NotificationsService;
+    const mapsProvider = { routeEstimate: jest.fn() } as unknown as MapsProviderService;
+    const service = new ShipmentsService(prisma, notifications, mapsProvider);
+    return { service, findUnique, shipmentCreate, queryRawUnsafe };
+  }
+
+  it('refuses to create a shipment while in maintenance mode, before even checking the customer account', async () => {
+    const { service, shipmentCreate, queryRawUnsafe } = buildService('true');
+
+    await expect(service.create('cust-1', {} as never)).rejects.toThrow('maintenance mode');
+
+    expect(shipmentCreate).not.toHaveBeenCalled();
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('is not gated when the setting is off, unset, or unreadable (fails open on a read error)', async () => {
+    for (const maintenanceValue of ['false', null]) {
+      const { service } = buildService(maintenanceValue);
+      await expect(service.create('cust-1', {} as never)).rejects.not.toThrow('maintenance mode');
+    }
+
+    const throwingFindUnique = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const prisma = {
+      platformSetting: { findUnique: throwingFindUnique },
+      $queryRawUnsafe: jest.fn(),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.create('cust-1', {} as never)).rejects.not.toThrow('maintenance mode');
+  });
+});

@@ -90,6 +90,7 @@ export class ShipmentsService {
   ) {}
 
   async create(customerId: string, dto: CreateShipmentDto) {
+    await this.assertNotInMaintenanceMode();
     await this.assertCustomerCanCreateShipment(customerId);
 
     const normalized = this.normalizeShipmentDto(dto);
@@ -196,6 +197,23 @@ export class ShipmentsService {
     }
     if (customer.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Complete KYC approval before creating a shipment.');
+    }
+  }
+
+  // "Maintenance mode" was pure copy on the admin platform settings screen - its own
+  // description promised it would "block new shipment creation network-wide", but nothing
+  // ever checked the flag. Fails open (not in maintenance) on a read error, same as the
+  // other platform-setting gates added this session - an unrelated DB hiccup must never
+  // block every shipment.
+  private async assertNotInMaintenanceMode() {
+    let setting: { value: string } | null = null;
+    try {
+      setting = await this.prisma.platformSetting.findUnique({ where: { key: 'maintenanceMode' } });
+    } catch {
+      // Read failure - fail open, see above.
+    }
+    if (setting?.value === 'true') {
+      throw new BadRequestException('Tracko is temporarily in maintenance mode. New shipments cannot be created right now - please try again shortly.');
     }
   }
 
