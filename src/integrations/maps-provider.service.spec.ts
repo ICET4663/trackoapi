@@ -89,6 +89,35 @@ describe('MapsProviderService route pricing', () => {
     expect(quote.quotedPriceKobo).toBeGreaterThanOrEqual(15_000_000);
   });
 
+  it('verifies the exact signed quote that the customer previewed', async () => {
+    const service = createService();
+    const quote = await service.routeEstimate(routeInput);
+
+    const accepted = service.verifyQuoteToken(quote.quoteToken, routeInput);
+
+    expect(accepted.quotedPriceKobo).toBe(quote.quotedPriceKobo);
+    expect(accepted.pricingVersion).toBe(quote.pricingVersion);
+    expect(accepted.quoteExpiresAt).toBe(quote.quoteExpiresAt);
+  });
+
+  it('rejects a signed quote after shipment details change', async () => {
+    const service = createService();
+    const quote = await service.routeEstimate(routeInput);
+
+    expect(() => service.verifyQuoteToken(quote.quoteToken, { ...routeInput, weightTons: 16 })).toThrow(
+      'Shipment details changed',
+    );
+  });
+
+  it('rejects a quote token whose signature was altered', async () => {
+    const service = createService();
+    const quote = await service.routeEstimate(routeInput);
+    const [payload, signature] = quote.quoteToken.split('.');
+    const tampered = `${payload}.${signature.slice(0, -1)}${signature.endsWith('a') ? 'b' : 'a'}`;
+
+    expect(() => service.verifyQuoteToken(tampered, routeInput)).toThrow('quote is invalid');
+  });
+
   it('rejects cargo that exceeds the selected truck capacity', async () => {
     await expect(createService().routeEstimate({ ...routeInput, weightTons: 31 })).rejects.toBeInstanceOf(
       BadRequestException,

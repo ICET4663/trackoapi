@@ -93,5 +93,9 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  quoteToken?: string;
+
+  @IsOptional()
+  @IsString()
   pickupContactPhone?: string;
 }

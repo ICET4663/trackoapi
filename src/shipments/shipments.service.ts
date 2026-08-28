@@ -94,14 +94,17 @@ export class ShipmentsService {
     // Price, distance, and duration are always recomputed server-side from the
     // same formula the client previewed with — a client can never dictate what
     // it gets charged by sending a different quotedPriceKobo in the request body.
-    const quote = await this.mapsProvider.routeEstimate({
+    const quoteInput = {
       originLatitude: normalized.pickupLatitude ?? undefined,
       originLongitude: normalized.pickupLongitude ?? undefined,
       destinationLatitude: normalized.destinationLatitude ?? undefined,
       destinationLongitude: normalized.destinationLongitude ?? undefined,
       truckType: normalized.truckType,
       weightTons: normalized.weightTons,
-    });
+    };
+    const quote = dto.quoteToken
+      ? this.mapsProvider.verifyQuoteToken(dto.quoteToken, quoteInput)
+      : await this.mapsProvider.routeEstimate(quoteInput);
 
     try {
       const shipment = await this.prisma.shipment.create({

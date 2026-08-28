@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 type PlaceSuggestion = {
@@ -111,6 +112,47 @@ type TruckPricingProfile = {
   minimumFareNgn: number;
 };
 
+type RouteEstimateInput = {
+  originLatitude?: number;
+  originLongitude?: number;
+  destinationLatitude?: number;
+  destinationLongitude?: number;
+  truckType?: string;
+  weightTons?: number;
+};
+
+type NormalizedQuoteInput = {
+  originLatitude: number;
+  originLongitude: number;
+  destinationLatitude: number;
+  destinationLongitude: number;
+  truckType: string;
+  weightTons: number;
+};
+
+type RouteQuoteCore = {
+  provider: string;
+  distanceKm: number;
+  durationMinutes: number;
+  quotedPriceKobo: number;
+  currency: string;
+  pricingMode: string;
+  pricingVersion: string;
+  quoteValidMinutes: number;
+  pricingBreakdown: Record<string, string | number>;
+};
+
+type RouteQuote = RouteQuoteCore & {
+  quoteToken: string;
+  quoteExpiresAt: string;
+};
+
+type SignedQuotePayload = {
+  input: NormalizedQuoteInput;
+  quote: RouteQuoteCore;
+  expiresAt: string;
+};
+
 const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
   flatbed: { label: 'Flatbed', capacityTons: 30, baseFareNgn: 55_000, perKmRateNgn: 720, minimumFareNgn: 95_000 },
   box: { label: 'Box truck', capacityTons: 15, baseFareNgn: 50_000, perKmRateNgn: 680, minimumFareNgn: 90_000 },
@@ -173,19 +215,10 @@ export class MapsProviderService {
     return { provider: 'mock', result };
   }
 
-  async routeEstimate(input: {
-    originLatitude?: number;
-    originLongitude?: number;
-    destinationLatitude?: number;
-    destinationLongitude?: number;
-    truckType?: string;
-    weightTons?: number;
-  }) {
+  async routeEstimate(input: RouteEstimateInput): Promise<RouteQuote> {
     const adjustments = await this.pricingAdjustments();
-    const originLatitude = Number(input.originLatitude ?? 6.5244);
-    const originLongitude = Number(input.originLongitude ?? 3.3792);
-    const destinationLatitude = Number(input.destinationLatitude ?? 9.0765);
-    const destinationLongitude = Number(input.destinationLongitude ?? 7.3986);
+    const normalizedInput = this.normalizeQuoteInput(input);
+    const { originLatitude, originLongitude, destinationLatitude, destinationLongitude } = normalizedInput;
     const googleKey = this.config.get<string>('GOOGLE_MAPS_API_KEY');
     const liveRoute = googleKey && [originLatitude, originLongitude, destinationLatitude, destinationLongitude].every(Number.isFinite)
       ? await this.googleRoute(
@@ -204,10 +237,8 @@ export class MapsProviderService {
     );
     const distanceKm = liveRoute?.distanceKm ?? Math.max(1, straightKm * ROAD_FACTOR);
     const durationMinutes = liveRoute?.durationMinutes ?? Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
-    const profile = this.truckProfile(input.truckType, adjustments);
-    const safeWeight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0
-      ? Number(input.weightTons)
-      : 1;
+    const profile = this.truckProfile(normalizedInput.truckType, adjustments);
+    const safeWeight = normalizedInput.weightTons;
     if (safeWeight > profile.capacityTons) {
       throw new BadRequestException(`${profile.label} supports up to ${profile.capacityTons} tons. Select a larger truck or reduce the cargo weight.`);
     }
@@ -224,7 +255,7 @@ export class MapsProviderService {
     const quotedPriceKobo = Math.max(profile.minimumFareNgn * 100, Math.round((subtotalNgn + serviceFeeNgn) * 100));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
-    return {
+    const quote: RouteQuoteCore = {
       provider: liveRoute ? 'google' : 'coordinate',
       distanceKm: roundedDistanceKm,
       durationMinutes,
@@ -257,6 +288,64 @@ export class MapsProviderService {
         demandSurgeRate: adjustments.pricingDemandSurgePercent / 100,
       },
     };
+    const quoteExpiresAt = new Date(Date.now() + adjustments.pricingQuoteValidityMinutes * 60_000).toISOString();
+    return {
+      ...quote,
+      quoteExpiresAt,
+      quoteToken: this.signQuote({ input: normalizedInput, quote, expiresAt: quoteExpiresAt }),
+    };
+  }
+
+  verifyQuoteToken(token: string, input: RouteEstimateInput): RouteQuote {
+    const [encodedPayload, suppliedSignature] = token.split('.');
+    if (!encodedPayload || !suppliedSignature) throw new BadRequestException('This quote is invalid. Request a new quote.');
+    const expectedSignature = this.quoteSignature(encodedPayload);
+    const supplied = Buffer.from(suppliedSignature, 'base64url');
+    const expected = Buffer.from(expectedSignature, 'base64url');
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      throw new BadRequestException('This quote is invalid. Request a new quote.');
+    }
+    let payload: SignedQuotePayload;
+    try {
+      payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as SignedQuotePayload;
+    } catch {
+      throw new BadRequestException('This quote is invalid. Request a new quote.');
+    }
+    if (!payload.expiresAt || new Date(payload.expiresAt).getTime() <= Date.now()) {
+      throw new BadRequestException('This quote has expired. Request a new quote.');
+    }
+    if (JSON.stringify(payload.input) !== JSON.stringify(this.normalizeQuoteInput(input))) {
+      throw new BadRequestException('Shipment details changed after the quote. Request a new quote.');
+    }
+    if (!payload.quote || !Number.isFinite(payload.quote.quotedPriceKobo) || payload.quote.quotedPriceKobo <= 0) {
+      throw new BadRequestException('This quote is invalid. Request a new quote.');
+    }
+    return { ...payload.quote, quoteExpiresAt: payload.expiresAt, quoteToken: token };
+  }
+
+  private normalizeQuoteInput(input: RouteEstimateInput): NormalizedQuoteInput {
+    const normalizeCoordinate = (value: number | undefined, fallback: number) => Number(Number(value ?? fallback).toFixed(6));
+    const weight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0 ? Number(input.weightTons) : 1;
+    return {
+      originLatitude: normalizeCoordinate(input.originLatitude, 6.5244),
+      originLongitude: normalizeCoordinate(input.originLongitude, 3.3792),
+      destinationLatitude: normalizeCoordinate(input.destinationLatitude, 9.0765),
+      destinationLongitude: normalizeCoordinate(input.destinationLongitude, 7.3986),
+      truckType: String(input.truckType ?? 'truck').trim().toLowerCase(),
+      weightTons: Number(weight.toFixed(3)),
+    };
+  }
+
+  private signQuote(payload: SignedQuotePayload) {
+    const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    return `${encodedPayload}.${this.quoteSignature(encodedPayload)}`;
+  }
+
+  private quoteSignature(encodedPayload: string) {
+    const secret = this.config.get<string>('QUOTE_SIGNING_SECRET')
+      ?? this.config.get<string>('JWT_SECRET')
+      ?? 'tracko-development-quote-secret';
+    return createHmac('sha256', secret).update(encodedPayload).digest('base64url');
   }
 
   private async pricingAdjustments() {
