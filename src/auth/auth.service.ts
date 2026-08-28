@@ -28,6 +28,7 @@ export class AuthService {
     if (!PUBLIC_ROLES.includes(dto.role)) {
       throw new BadRequestException('This role cannot self-register.');
     }
+    await this.assertRegistrationsNotPaused();
 
     const code = this.generateOtpCode();
     const codeHash = await bcrypt.hash(code, 10);
@@ -182,6 +183,9 @@ export class AuthService {
     if (!PUBLIC_ROLES.includes(dto.role)) {
       throw new BadRequestException('This role cannot self-register.');
     }
+    // Also gated here, not just in requestRegistrationCode() - a code requested before
+    // registrations were paused would otherwise still let the account get created.
+    await this.assertRegistrationsNotPaused();
 
     await this.verifyOtp(dto.email, dto.phone, dto.code, OtpPurpose.REGISTER);
     const passwordHash = await bcrypt.hash(dto.password, 12);
@@ -490,6 +494,23 @@ export class AuthService {
   // accounts the caller doesn't own) to any environment where NODE_ENV is merely unset.
   private exposeDevOtp() {
     return this.config.get<string>('EXPOSE_DEV_OTP') === 'true';
+  }
+
+  // The "Pause new registrations" platform setting used to be pure copy - an admin could
+  // flip it during an incident (fraud wave, abuse spike) and nothing would actually stop
+  // new accounts from being created, which is exactly the moment a silently-fake control
+  // is most dangerous. Fails open (unpaused) on a read error rather than blocking every
+  // signup because of an unrelated DB hiccup.
+  private async assertRegistrationsNotPaused() {
+    let setting: { value: string } | null = null;
+    try {
+      setting = await this.prisma.platformSetting.findUnique({ where: { key: 'pauseRegistrations' } });
+    } catch {
+      // Read failure (including a misconfigured/mocked client) - fail open, see above.
+    }
+    if (setting?.value === 'true') {
+      throw new BadRequestException('New registrations are temporarily paused. Please try again later.');
+    }
   }
 
   // Was `this.config.get('MOCK_OTP_CODE') ?? '123456'`, unconditionally, for both

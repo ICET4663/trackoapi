@@ -93,6 +93,66 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
   });
 });
 
+// "Pause new registrations" used to be pure copy on the platform settings screen -
+// flipping it during an incident (fraud wave, abuse spike) didn't actually stop anyone
+// from signing up.
+describe('AuthService registration is actually gated by the pauseRegistrations platform setting', () => {
+  function buildService(pauseValue: string | null, rateLimit: { assertAllowed: jest.Mock } = { assertAllowed: jest.fn().mockResolvedValue(undefined) }) {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const findUnique = jest.fn().mockResolvedValue(pauseValue === null ? null : { key: 'pauseRegistrations', value: pauseValue });
+    const otpCreate = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      platformSetting: { findUnique },
+      otpCode: { create: otpCreate, findFirst: jest.fn().mockResolvedValue(null) },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const users = { findByEmailOrPhone: jest.fn().mockResolvedValue(null) } as unknown as UsersService;
+    return { service: new AuthService(config, {} as JwtService, prisma, rateLimit as unknown as RateLimitService, users), findUnique, otpCreate, rateLimit };
+  }
+
+  it('requestRegistrationCode() refuses outright when paused, before hitting the rate limiter or creating an OTP', async () => {
+    const { service, otpCreate, rateLimit } = buildService('true');
+
+    await expect(service.requestRegistrationCode({
+      email: 'new@tracko.ng', phone: '+2348030000001', role: 'CUSTOMER' as never,
+    } as never)).rejects.toThrow('temporarily paused');
+
+    expect(rateLimit.assertAllowed).not.toHaveBeenCalled();
+    expect(otpCreate).not.toHaveBeenCalled();
+  });
+
+  it('register() refuses outright when paused, even with an otherwise-valid OTP code', async () => {
+    const { service } = buildService('true');
+
+    await expect(service.register({
+      email: 'new@tracko.ng', phone: '+2348030000001', fullName: 'New User', password: 'password123', code: '123456', role: 'CUSTOMER' as never,
+    } as never)).rejects.toThrow('temporarily paused');
+  });
+
+  it('is not gated when the setting is off, unset, or unreadable (fails open on a read error)', async () => {
+    for (const pauseValue of ['false', null]) {
+      const { service, findUnique } = buildService(pauseValue);
+      await expect(service.register({
+        email: 'new@tracko.ng', phone: '+2348030000001', fullName: 'New User', password: 'password123', code: '123456', role: 'CUSTOMER' as never,
+      } as never)).rejects.not.toThrow('temporarily paused');
+      expect(findUnique).toHaveBeenCalledWith({ where: { key: 'pauseRegistrations' } });
+    }
+
+    const throwingFindUnique = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const prisma = {
+      platformSetting: { findUnique: throwingFindUnique },
+      otpCode: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const users = { findByEmailOrPhone: jest.fn().mockResolvedValue(null) } as unknown as UsersService;
+    const service = new AuthService(config, {} as JwtService, prisma, { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService, users);
+
+    await expect(service.register({
+      email: 'new@tracko.ng', phone: '+2348030000001', fullName: 'New User', password: 'password123', code: '123456', role: 'CUSTOMER' as never,
+    } as never)).rejects.not.toThrow('temporarily paused');
+  });
+});
+
 // refresh() previously never revoked the token it was given - every call just minted a
 // new session, so a stolen refresh token stayed valid for its full 30-day lifetime no
 // matter how many times the real user also refreshed. These tests pin down rotation
