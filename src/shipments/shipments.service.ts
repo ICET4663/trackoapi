@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
@@ -81,6 +81,8 @@ type AssignmentRecordInput = {
 
 @Injectable()
 export class ShipmentsService {
+  private readonly logger = new Logger(ShipmentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -713,6 +715,12 @@ export class ShipmentsService {
     if (escrow.status === 'REFUNDED') throw new BadRequestException('Escrow has already been refunded.');
     if (escrow.status === 'RELEASED') return this.toEscrowRecord(escrow);
 
+    // The status update is the actual point of this call - money moving from held to
+    // released. This used to swallow ANY failure here (a real DB error, a connection
+    // drop) into a fabricated "released" response that was never actually persisted -
+    // the caller (a human admin, or the automated dispute-window auto-release job) has
+    // to see a real error, not a false confirmation that money moved when it didn't.
+    let releasedEscrow: ReturnType<ShipmentsService['toEscrowRecord']>;
     try {
       const rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
         `update "Escrow"
@@ -728,22 +736,81 @@ export class ShipmentsService {
                    "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
         shipmentId,
       );
-
-      await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
-      const releasedEscrow = this.toEscrowRecord(rows[0] ?? { ...escrow, status: 'RELEASED' });
-      await this.notifyAssignedDriverOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
-      return releasedEscrow;
-    } catch {
-      return this.toEscrowRecord({
-        ...escrow,
-        status: 'RELEASED',
-        arrivalConfirmed: true,
-        proofOfDeliveryUploaded: true,
-        customerDeliveryConfirmed: true,
-        disputeWindowClear: true,
-        platformApproved: true,
-      });
+      releasedEscrow = this.toEscrowRecord(rows[0] ?? { ...escrow, status: 'RELEASED' });
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Could not release escrow. Please try again: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+
+    // Timeline note and driver notification are both already best-effort/non-throwing
+    // internally - supplementary to the release itself, which already succeeded above.
+    await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
+    await this.notifyAssignedDriverOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
+    return releasedEscrow;
+  }
+
+  // The admin "Escrow release window" platform setting used to be pure copy - nothing
+  // ever checked elapsed time and auto-released anything, so a driver could go unpaid on
+  // an otherwise-fine delivery indefinitely if the customer never confirmed delivery and
+  // never disputed it. Called on a schedule (see CronController) rather than exposed to
+  // any client directly.
+  async autoReleaseEligibleEscrows() {
+    const windowDaysRaw = await this.prisma.platformSetting.findUnique({ where: { key: 'escrow' } }).catch(() => null);
+    const windowDays = Math.max(1, Number(windowDaysRaw?.value ?? 3) || 3);
+
+    let candidates: { shipmentId: string; deliveredAt: Date }[];
+    try {
+      candidates = await this.prisma.$queryRawUnsafe<{ shipmentId: string; deliveredAt: Date }[]>(
+        `select s."id" as "shipmentId", dt."deliveredAt"
+         from "Shipment" s
+         join "Escrow" e on e."shipmentId" = s."id"
+         join lateral (
+           select max(t."createdAt") as "deliveredAt"
+           from "ShipmentTimeline" t
+           where t."shipmentId" = s."id" and t."status" = 'DELIVERED'::"ShipmentStatus"
+         ) dt on dt."deliveredAt" is not null
+         where s."status" = 'DELIVERED'::"ShipmentStatus"
+           and e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")
+           and dt."deliveredAt" <= now() - ($1 || ' days')::interval
+           and not exists (
+             select 1 from "Dispute" d
+             where d."shipmentId" = s."id" and d."status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")
+           )
+         order by dt."deliveredAt" asc
+         limit 100`,
+        String(windowDays),
+      );
+    } catch (error) {
+      this.logger.error(`autoReleaseEligibleEscrows() failed to query candidates: ${error instanceof Error ? error.message : String(error)}`);
+      throw new InternalServerErrorException('Could not run the escrow auto-release check.');
+    }
+
+    const results: { shipmentId: string; released: boolean; error?: string }[] = [];
+    for (const candidate of candidates) {
+      try {
+        await this.releaseEscrow(
+          candidate.shipmentId,
+          'ADMIN',
+          `Escrow auto-released - delivered ${windowDays}+ days ago with no dispute filed.`,
+        );
+        results.push({ shipmentId: candidate.shipmentId, released: true });
+      } catch (error) {
+        // One shipment failing to release (e.g. a race with a dispute filed moments ago)
+        // must never stop the rest of the batch from being checked.
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`autoReleaseEligibleEscrows() failed to release escrow for shipment ${candidate.shipmentId}: ${message}`);
+        results.push({ shipmentId: candidate.shipmentId, released: false, error: message });
+      }
+    }
+
+    return {
+      windowDays,
+      checkedAt: new Date().toISOString(),
+      candidateCount: candidates.length,
+      releasedCount: results.filter((result) => result.released).length,
+      results,
+    };
   }
 
   async submitReview(shipmentId: string, customerId: string, input: { rating?: number; comment?: string }) {

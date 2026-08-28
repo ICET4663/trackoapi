@@ -55,6 +55,14 @@ export class DeploymentConfigService {
         mode: this.hasValue('GOOGLE_MAPS_API_KEY') ? 'configured' : 'mock',
         missing: this.missing(['GOOGLE_MAPS_API_KEY']),
       },
+      {
+        // GET /v1/cron/escrow-auto-release (see vercel.json) always refuses every request
+        // when this is unset, rather than silently running unauthenticated or no-op - so
+        // "mock" here genuinely means the scheduled auto-release job cannot run at all yet.
+        name: 'scheduledEscrowAutoRelease',
+        mode: this.hasValue('CRON_SECRET') ? 'configured' : 'mock',
+        missing: this.missing(['CRON_SECRET']),
+      },
     ];
   }
 

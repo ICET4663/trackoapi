@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "api/index.ts"
     }
+  ],
+  "crons": [
+    {
+      "path": "/v1/cron/escrow-auto-release",
+      "schedule": "0 3 * * *"
+    }
   ]
 }
