@@ -21,6 +21,9 @@ type ShipmentRecordInput = {
   destinationLongitude?: number | null;
   cargoDescription?: string | null;
   cargoWeightKg?: number | null;
+  quotedPriceKobo?: number | null;
+  distanceKm?: number | null;
+  durationMinutes?: number | null;
   pickupContactPhone?: string | null;
   timeline?: TimelineRecordInput[];
 };
@@ -127,6 +130,8 @@ export class ShipmentsService {
         include: { timeline: true },
       });
 
+      await this.recordQuoteSnapshot(customerId, shipment.id, quote);
+
       const escrow = await this.createEscrowRecord(
         shipment.id,
         quote.quotedPriceKobo,
@@ -151,6 +156,9 @@ export class ShipmentsService {
         quantity: normalized.quantity,
         truckType: normalized.truckType,
         weightTons: normalized.weightTons,
+        pricingVersion: quote.pricingVersion,
+        quoteValidMinutes: quote.quoteValidMinutes,
+        pricingBreakdown: quote.pricingBreakdown,
       });
     } catch {
       return this.previewShipment({
@@ -1092,6 +1100,9 @@ export class ShipmentsService {
       quantity?: string;
       truckType?: string;
       weightTons?: number;
+      pricingVersion?: string;
+      quoteValidMinutes?: number;
+      pricingBreakdown?: ReturnType<MapsProviderService['routeEstimate']>['pricingBreakdown'];
     } = {},
   ) {
     return {
@@ -1112,11 +1123,44 @@ export class ShipmentsService {
       weightTons: options.weightTons ?? (shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0),
       truckType: options.truckType ?? 'Truck',
       pickupContactPhone: shipment.pickupContactPhone ?? '+234 800 000 0000',
+      quotedPriceKobo: shipment.quotedPriceKobo ?? undefined,
+      distanceKm: shipment.distanceKm ?? undefined,
+      durationMinutes: shipment.durationMinutes ?? undefined,
+      pricingVersion: options.pricingVersion,
+      quoteValidMinutes: options.quoteValidMinutes,
+      pricingBreakdown: options.pricingBreakdown,
       status: shipment.status ?? 'DRAFT',
       escrowId: options.escrowId ?? `escrow-${shipment.id}`,
       media: options.media ?? [],
       timeline: (shipment.timeline ?? []).map((event) => this.toTimelineRecord(event)),
     };
+  }
+
+  private async recordQuoteSnapshot(
+    customerId: string,
+    shipmentId: string,
+    quote: ReturnType<MapsProviderService['routeEstimate']>,
+  ) {
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: customerId,
+        action: 'SHIPMENT_QUOTE_ACCEPTED',
+        entity: 'Shipment',
+        entityId: shipmentId,
+        metadata: JSON.parse(JSON.stringify({
+          pricingVersion: quote.pricingVersion,
+          acceptedAt: new Date().toISOString(),
+          quoteValidMinutes: quote.quoteValidMinutes,
+          provider: quote.provider,
+          pricingMode: quote.pricingMode,
+          currency: quote.currency,
+          quotedPriceKobo: quote.quotedPriceKobo,
+          distanceKm: quote.distanceKm,
+          durationMinutes: quote.durationMinutes,
+          pricingBreakdown: quote.pricingBreakdown,
+        })),
+      },
+    });
   }
 
   private toTimelineRecord(event: TimelineRecordInput) {
