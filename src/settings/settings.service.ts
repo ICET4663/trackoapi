@@ -1436,9 +1436,9 @@ export class SettingsService {
   async driverDocuments(userId = 'preview-driver') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<
-        { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string }[]
+        { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string; reviewNote?: string | null }[]
       >(
-        'select "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl" from "DriverDocument" where "userId" = $1 order by "createdAt" desc',
+        'select "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl", "reviewNote" from "DriverDocument" where "userId" = $1 order by "createdAt" desc',
         userId,
       );
       if (rows.length) {
@@ -1484,13 +1484,16 @@ export class SettingsService {
         { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string }[]
       >(
         `insert into "DriverDocument" ("id", "userId", "title", "meta", "state", "expires", "number", "fileUrl", "updatedAt")
-         values ($1, $2, $3, $4, 'EXPIRING'::"DriverDocumentState", $5, $6, $7, current_timestamp)
+         values ($1, $2, $3, $4, 'PENDING_REVIEW'::"DriverDocumentState", $5, $6, $7, current_timestamp)
          on conflict ("id") do update
          set "meta" = excluded."meta",
-             "state" = 'EXPIRING'::"DriverDocumentState",
+             "state" = 'PENDING_REVIEW'::"DriverDocumentState",
              "expires" = excluded."expires",
              "number" = excluded."number",
              "fileUrl" = excluded."fileUrl",
+             "reviewNote" = null,
+             "reviewedAt" = null,
+             "reviewedById" = null,
              "updatedAt" = current_timestamp
          returning "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl"`,
         id,
@@ -1519,21 +1522,111 @@ export class SettingsService {
         tone: 'WARNING',
         entity: 'DriverDocument',
         entityId: id,
-        actionUrl: '/admin/verifications',
+        actionUrl: '/admin/driver-documents',
       });
 
       return {
         uploaded: true,
         message: 'Driver document uploaded for review.',
-        document: rows[0] ?? { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'expiring', fileUrl },
+        document: rows[0] ?? { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'pending_review', fileUrl },
       };
-    } catch {
-      return {
-        uploaded: true,
-        message: 'Driver document uploaded in preview.',
-        document: { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'expiring', fileUrl },
-      };
+    } catch (error) {
+      // The insert IS the upload - a driver who believes their license photo was saved
+      // when it never persisted has no real document on file, silently. Same
+      // fake-success-on-failure pattern this session has repeatedly fixed elsewhere.
+      throw new InternalServerErrorException(`Could not save this document. Please try again: ${this.errorMessage(error)}`);
     }
+  }
+
+  // The admin-facing counterpart to uploadDriverDocument() above - previously nothing
+  // anywhere ever read PENDING_REVIEW documents back out or set a document to VERIFIED,
+  // so a driver's uploaded license/insurance could never actually pass review; the "state"
+  // shown was always the wrong hardcoded value regardless of what an admin did (nothing,
+  // since there was no admin action to take).
+  async pendingDriverDocuments() {
+    return this.prisma.$queryRawUnsafe<
+      { id: string; userId: string; title: string; meta: string; number: string | null; expires: Date | null; fileUrl: string | null; createdAt: Date; email: string; phone: string; fullName: string | null }[]
+    >(
+      `select d."id", d."userId", d."title", d."meta", d."number", d."expires", d."fileUrl", d."createdAt",
+              u."email", u."phone", p."fullName"
+       from "DriverDocument" d
+       join "User" u on u."id" = d."userId"
+       left join "Profile" p on p."userId" = u."id"
+       where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
+       order by d."createdAt" asc
+       limit 100`,
+    ).then((rows) => rows.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      title: row.title,
+      meta: row.meta,
+      number: row.number,
+      expires: row.expires?.toISOString() ?? null,
+      fileUrl: row.fileUrl,
+      submittedAt: row.createdAt.toISOString(),
+      email: row.email,
+      phone: row.phone,
+      fullName: row.fullName ?? row.email,
+    })));
+  }
+
+  async reviewDriverDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const decision = String(input.decision ?? '').toUpperCase();
+    if (decision !== 'APPROVE' && decision !== 'REJECT') {
+      throw new BadRequestException('Use APPROVE or REJECT as the document decision.');
+    }
+    const nextState = decision === 'APPROVE' ? 'VERIFIED' : 'REJECTED';
+
+    let updated;
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<
+        { id: string; userId: string; title: string; state: string }[]
+      >(
+        `update "DriverDocument"
+         set "state" = $1::"DriverDocumentState",
+             "issued" = case when $1 = 'VERIFIED' then current_timestamp else "issued" end,
+             "reviewNote" = $2,
+             "reviewedAt" = current_timestamp,
+             "reviewedById" = $3,
+             "updatedAt" = current_timestamp
+         where "id" = $4 and "state" = 'PENDING_REVIEW'::"DriverDocumentState"
+         returning "id", "userId", "title", lower("state"::text) as "state"`,
+        nextState,
+        input.note ?? null,
+        reviewerId,
+        documentId,
+      );
+      updated = rows[0];
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not record this decision. Please try again: ${this.errorMessage(error)}`);
+    }
+    if (!updated) throw new NotFoundException('No pending document found for this decision - it may have already been reviewed.');
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: reviewerId,
+        action: decision === 'APPROVE' ? 'DRIVER_DOCUMENT_APPROVED' : 'DRIVER_DOCUMENT_REJECTED',
+        entity: 'DriverDocument',
+        entityId: documentId,
+        metadata: { note: input.note ?? null },
+      },
+    }).catch(() => null);
+
+    await this.notifications.create({
+      userId: updated.userId,
+      title: decision === 'APPROVE' ? `${updated.title} verified` : `${updated.title} needs attention`,
+      body: decision === 'APPROVE'
+        ? `Your ${updated.title.toLowerCase()} has been verified.`
+        : input.note
+          ? `Your ${updated.title.toLowerCase()} was not approved: ${input.note}`
+          : `Your ${updated.title.toLowerCase()} was not approved. Please upload a clearer copy.`,
+      tone: decision === 'APPROVE' ? 'SUCCESS' : 'DANGER',
+      entity: 'DriverDocument',
+      entityId: documentId,
+      actionUrl: '/driver/documents',
+    });
+
+    return { id: updated.id, state: updated.state, decision };
   }
 
   async safetySettings(userId = 'preview-driver') {

@@ -349,3 +349,91 @@ describe('SettingsService pricing report uses accepted quote audit records', () 
     });
   });
 });
+
+// Driver documents (license, insurance, etc.) previously landed on a hardcoded state
+// regardless of upload, and nothing anywhere ever set one to VERIFIED - there was no real
+// review workflow at all, unlike KYC which already had one. These pin down the real
+// upload-then-review lifecycle: uploadDriverDocument() throws instead of faking success on
+// a write failure, and reviewDriverDocument() actually transitions PENDING_REVIEW ->
+// VERIFIED/REJECTED with a real, race-safe conditional update.
+describe('SettingsService driver document review is a real workflow, not a fake state', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    const auditLogCreate = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      auditLog: { create: auditLogCreate },
+    } as unknown as PrismaService;
+    const notificationsCreate = jest.fn().mockResolvedValue({ id: 'notif-1' });
+    const notifications = { create: notificationsCreate } as unknown as NotificationsService;
+    const config = { get: jest.fn() } as unknown as ConfigService;
+    const service = new SettingsService(prisma, notifications, config, noopAuthService);
+    return { service, auditLogCreate, notificationsCreate };
+  }
+
+  it('uploadDriverDocument throws a real error instead of a fake success when the write fails', async () => {
+    const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const { service } = buildService(queryRawUnsafe);
+
+    await expect(
+      service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'https://example.com/license.jpg' }),
+    ).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('a genuinely successful upload lands the document on PENDING_REVIEW, not a fake verified/expiring state', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([
+      { id: 'license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'https://example.com/license.jpg' },
+    ]);
+    const { service } = buildService(queryRawUnsafe);
+
+    const result = await service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'https://example.com/license.jpg' });
+
+    expect(result.document.state).toBe('pending_review');
+  });
+
+  it('reviewDriverDocument approves a pending document to VERIFIED and notifies the driver', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([
+      { id: 'doc-1', userId: 'driver-1', title: 'License', state: 'verified' },
+    ]);
+    const { service, auditLogCreate, notificationsCreate } = buildService(queryRawUnsafe);
+
+    const result = await service.reviewDriverDocument('doc-1', 'admin-1', { decision: 'APPROVE' });
+
+    expect(result).toMatchObject({ id: 'doc-1', state: 'verified', decision: 'APPROVE' });
+    expect(auditLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ actorId: 'admin-1', action: 'DRIVER_DOCUMENT_APPROVED' }),
+    }));
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', tone: 'SUCCESS' }));
+  });
+
+  it('reviewDriverDocument rejects a pending document with a note and notifies the driver why', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([
+      { id: 'doc-1', userId: 'driver-1', title: 'License', state: 'rejected' },
+    ]);
+    const { service, notificationsCreate } = buildService(queryRawUnsafe);
+
+    await service.reviewDriverDocument('doc-1', 'admin-1', { decision: 'REJECT', note: 'Photo is blurry' });
+
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'driver-1',
+      tone: 'DANGER',
+      body: expect.stringContaining('Photo is blurry'),
+    }));
+  });
+
+  it('rejects reviewing a document that is not actually pending (already reviewed, or race-lost)', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const { service } = buildService(queryRawUnsafe);
+
+    await expect(service.reviewDriverDocument('doc-1', 'admin-1', { decision: 'APPROVE' })).rejects.toThrow(
+      'already been reviewed',
+    );
+  });
+
+  it('rejects an invalid decision value', async () => {
+    const { service } = buildService(jest.fn());
+
+    await expect(service.reviewDriverDocument('doc-1', 'admin-1', { decision: 'MAYBE' })).rejects.toThrow(
+      'APPROVE or REJECT',
+    );
+  });
+});
