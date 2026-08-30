@@ -205,9 +205,12 @@ export class SettingsController {
   }
 
   @Get('customer/billing-history')
-  async billingHistory(@Headers('authorization') authorization?: string) {
+  async billingHistory(
+    @Query('paymentMethodId') paymentMethodId?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
-    return this.settingsService.billingHistory(user.sub);
+    return this.settingsService.billingHistory(user.sub, paymentMethodId);
   }
 
   @Get('driver/payout-account')

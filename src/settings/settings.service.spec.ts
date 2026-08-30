@@ -437,3 +437,59 @@ describe('SettingsService driver document review is a real workflow, not a fake 
     );
   });
 });
+
+describe('SettingsService.billingHistory is real per-account/per-card data, not fabricated invoices', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      {} as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+    return { service };
+  }
+
+  it('returns an honest empty list - not the old hardcoded fake invoices - when the user genuinely has no charges', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const { service } = buildService(queryRawUnsafe);
+
+    const result = await service.billingHistory('customer-1');
+
+    expect(result).toEqual([]);
+  });
+
+  it('returns an honest empty list, not fake invoices, when the query itself fails', async () => {
+    const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const { service } = buildService(queryRawUnsafe);
+
+    const result = await service.billingHistory('customer-1');
+
+    expect(result).toEqual([]);
+  });
+
+  it('filters by paymentMethodId when viewing one card\'s billing history, instead of returning every card\'s charges', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'bill-1', ref: 'TRK-1', date: 'Jan 1, 2026', amount: 'N1,000' }]);
+    const { service } = buildService(queryRawUnsafe);
+
+    await service.billingHistory('customer-1', 'card-1');
+
+    expect(queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining('"paymentMethodId" = $2'),
+      'customer-1',
+      'card-1',
+    );
+  });
+
+  it('does not filter by paymentMethodId when none is given', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const { service } = buildService(queryRawUnsafe);
+
+    await service.billingHistory('customer-1');
+
+    expect(queryRawUnsafe).toHaveBeenCalledWith(
+      expect.not.stringContaining('paymentMethodId'),
+      'customer-1',
+    );
+  });
+});

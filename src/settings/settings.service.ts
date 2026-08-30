@@ -988,21 +988,26 @@ export class SettingsService {
     return { deleted: true };
   }
 
-  async billingHistory(userId = 'preview-customer') {
+  // paymentMethodId was accepted by the frontend and dropped on the floor here - every card's
+  // "Billing history" screen actually showed every card's charges. And on a query failure OR a
+  // genuinely empty history, this used to fall back to 2 hardcoded fake invoices ("TRK-1024",
+  // "TRK-1008"), so a real customer/driver with zero charges saw invoices that never happened.
+  async billingHistory(userId: string, paymentMethodId?: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
-        'select "id", "ref", "dateLabel" as "date", "amount" from "BillingCharge" where "userId" = $1 order by "createdAt" desc',
-        userId,
-      );
-      if (rows.length) return rows;
+      return paymentMethodId
+        ? await this.prisma.$queryRawUnsafe<unknown[]>(
+            'select "id", "ref", "dateLabel" as "date", "amount" from "BillingCharge" where "userId" = $1 and "paymentMethodId" = $2 order by "createdAt" desc',
+            userId,
+            paymentMethodId,
+          )
+        : await this.prisma.$queryRawUnsafe<unknown[]>(
+            'select "id", "ref", "dateLabel" as "date", "amount" from "BillingCharge" where "userId" = $1 order by "createdAt" desc',
+            userId,
+          );
     } catch {
-      // Preview fallback below.
+      // Real infra failure: an honest empty list, never fabricated charges.
+      return [];
     }
-
-    return [
-      { id: 'bill-1', ref: 'TRK-1024', date: 'Jul 21, 2026', amount: 'N240,000' },
-      { id: 'bill-2', ref: 'TRK-1008', date: 'Jul 18, 2026', amount: 'N180,000' },
-    ];
   }
 
   async bankAccount(userId = 'preview-driver') {

@@ -118,3 +118,108 @@ describe('PaymentProviderService webhook signature verification is constant-time
     expect(result.verified).toBe(false);
   });
 });
+
+// A successful card charge used to save the reusable card as a PaymentMethod, and record the
+// BillingCharge, as two independent steps - so every BillingCharge row had a NULL
+// paymentMethodId, and the frontend's per-card "Billing history" screen (which does send a
+// paymentMethodId filter) had no real way to know which saved card a charge belonged to.
+describe('PaymentProviderService charge.success attributes the BillingCharge to the saved card', () => {
+  const secretKey = 'sk_test_fake_webhook_secret';
+  const authorization = {
+    authorization_code: 'AUTH_abc123',
+    card_type: 'visa',
+    last4: '4242',
+    exp_month: '08',
+    exp_year: '2030',
+    channel: 'card',
+    reusable: true,
+  };
+  const rawBody = JSON.stringify({
+    event: 'charge.success',
+    data: {
+      status: 'success',
+      reference: 'ref-1',
+      amount: 500000,
+      currency: 'NGN',
+      metadata: { shipmentId: 'ship-1' },
+      authorization,
+    },
+  });
+
+  function buildService() {
+    const config = {
+      get: jest.fn((key: string) => (key === 'PAYSTACK_SECRET_KEY' ? secretKey : undefined)),
+    } as unknown as ConfigService;
+    const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
+    const paymentMethodCreate = jest.fn().mockResolvedValue({ id: 'pm-99' });
+    const prisma = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      $executeRawUnsafe: executeRawUnsafe,
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'ship-1',
+          customerId: 'cust-1',
+          quotedPriceKobo: 500000,
+          reference: 'TRK-1',
+        }),
+        update: jest.fn().mockResolvedValue(undefined),
+      },
+      paymentMethod: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
+        create: paymentMethodCreate,
+      },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const service = new PaymentProviderService(config, prisma, notifications);
+    return { service, executeRawUnsafe, paymentMethodCreate };
+  }
+
+  it('saves the card, then inserts the BillingCharge tagged with that card\'s id', async () => {
+    const { service, executeRawUnsafe, paymentMethodCreate } = buildService();
+    const signature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), signature, rawBody);
+
+    expect(result.escrowUpdated).toBe(true);
+    expect(paymentMethodCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: 'cust-1', maskedNumber: '**** 4242' }),
+    }));
+    expect(executeRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining('"paymentMethodId"'),
+      expect.any(String),
+      'cust-1',
+      'pm-99',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it('leaves paymentMethodId null for a non-card (e.g. bank transfer) charge, instead of guessing', async () => {
+    const bankBody = JSON.stringify({
+      event: 'charge.success',
+      data: {
+        status: 'success', reference: 'ref-2', amount: 500000, currency: 'NGN',
+        metadata: { shipmentId: 'ship-1' },
+        authorization: { channel: 'bank_transfer', reusable: false },
+      },
+    });
+    const { service, executeRawUnsafe, paymentMethodCreate } = buildService();
+    const signature = createHmac('sha512', secretKey).update(bankBody).digest('hex');
+
+    await service.recordWebhook('paystack', 'charge.success', JSON.parse(bankBody), signature, bankBody);
+
+    expect(paymentMethodCreate).not.toHaveBeenCalled();
+    expect(executeRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining('"paymentMethodId"'),
+      expect.any(String),
+      'cust-1',
+      null,
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+});

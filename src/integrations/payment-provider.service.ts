@@ -154,8 +154,8 @@ export class PaymentProviderService {
           payment.currency,
           provider,
           payment.reference,
+          payment.authorization,
         );
-        if (escrowUpdated) await this.savePaymentMethodFromAuthorization(payment.shipmentId, payment.authorization);
       }
     }
 
@@ -239,9 +239,8 @@ export class PaymentProviderService {
     const payment = this.extractPaymentEvent({ event: 'charge.success', data: payload.data });
     const verified = Boolean(response.ok && payload.status && payload.data?.status === 'success');
     const escrowUpdated = verified && payment.shipmentId
-      ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference)
+      ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference, payment.authorization)
       : false;
-    if (escrowUpdated && payment.shipmentId) await this.savePaymentMethodFromAuthorization(payment.shipmentId, payment.authorization);
 
     try {
       await this.prisma.auditLog.create({
@@ -378,7 +377,23 @@ export class PaymentProviderService {
     }
   }
 
-  private async markEscrowFunded(shipmentId: string, amount?: number, currency?: string, provider = 'paystack', reference?: string) {
+  private async markEscrowFunded(
+    shipmentId: string,
+    amount?: number,
+    currency?: string,
+    provider = 'paystack',
+    reference?: string,
+    authorization?: {
+      authorization_code?: string;
+      card_type?: string;
+      bank?: string;
+      last4?: string;
+      exp_month?: string;
+      exp_year?: string;
+      channel?: string;
+      reusable?: boolean;
+    },
+  ) {
     try {
       await this.prisma.$queryRawUnsafe(
         `update "Escrow"
@@ -403,14 +418,19 @@ export class PaymentProviderService {
           },
         },
       });
-      await this.recordSuccessfulPayment(shipmentId, amount, currency, provider, reference);
+      // Resolve/save the card *before* recording the charge, so the charge can be
+      // attributed to it - the two used to run independently, leaving every BillingCharge
+      // row with a NULL paymentMethodId and every "billing history for this card" screen
+      // silently showing nothing (or, before that, everything).
+      const paymentMethodId = await this.savePaymentMethodFromAuthorization(shipmentId, authorization);
+      await this.recordSuccessfulPayment(shipmentId, amount, currency, provider, reference, paymentMethodId);
       return true;
     } catch {
       return false;
     }
   }
 
-  private async recordSuccessfulPayment(shipmentId: string, amount?: number, currency = 'NGN', provider = 'paystack', reference?: string) {
+  private async recordSuccessfulPayment(shipmentId: string, amount?: number, currency = 'NGN', provider = 'paystack', reference?: string, paymentMethodId?: string) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id: shipmentId },
       include: { customer: true },
@@ -423,11 +443,12 @@ export class PaymentProviderService {
     const amountLabel = this.formatMoney(amountKobo, currency);
 
     await this.prisma.$executeRawUnsafe(
-      `insert into "BillingCharge" ("id", "userId", "ref", "dateLabel", "amount")
-       values ($1, $2, $3, $4, $5)
+      `insert into "BillingCharge" ("id", "userId", "paymentMethodId", "ref", "dateLabel", "amount")
+       values ($1, $2, $3, $4, $5, $6)
        on conflict ("id") do nothing`,
       `bill-${ref}`.slice(0, 120),
       shipment.customerId,
+      paymentMethodId ?? null,
       shipment.reference,
       new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       amountLabel,
@@ -524,6 +545,9 @@ export class PaymentProviderService {
   // saved automatically the first time they fund escrow with one, same as most apps
   // built on Paystack. Bank transfer/USSD charges are not reusable, so those never
   // create a saved "payment method" here.
+  // Returns the resolved PaymentMethod id (new or already-saved) so the caller can
+  // attribute the BillingCharge row to it - without this, per-card billing history
+  // had no way to know which saved card a charge actually belonged to.
   private async savePaymentMethodFromAuthorization(
     shipmentId: string,
     authorization?: {
@@ -536,20 +560,20 @@ export class PaymentProviderService {
       channel?: string;
       reusable?: boolean;
     },
-  ) {
-    if (!authorization?.reusable || !authorization.authorization_code || authorization.channel !== 'card') return;
+  ): Promise<string | undefined> {
+    if (!authorization?.reusable || !authorization.authorization_code || authorization.channel !== 'card') return undefined;
 
     try {
       const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId }, select: { customerId: true } });
-      if (!shipment) return;
+      if (!shipment) return undefined;
 
       const detail = `auth:${authorization.authorization_code}`;
       const existing = await this.prisma.paymentMethod.findFirst({ where: { userId: shipment.customerId, detail } });
-      if (existing) return;
+      if (existing) return existing.id;
 
       const isFirstMethod = (await this.prisma.paymentMethod.count({ where: { userId: shipment.customerId } })) === 0;
 
-      await this.prisma.paymentMethod.create({
+      const created = await this.prisma.paymentMethod.create({
         data: {
           userId: shipment.customerId,
           brand: authorization.card_type ?? authorization.bank ?? 'Card',
@@ -560,9 +584,11 @@ export class PaymentProviderService {
           expiry: authorization.exp_month && authorization.exp_year ? `${authorization.exp_month}/${authorization.exp_year.slice(-2)}` : undefined,
         },
       });
+      return created.id;
     } catch {
       // Saving the card for reuse is a convenience on top of a successful payment -
       // the escrow funding itself must not be treated as failed if this part errors.
+      return undefined;
     }
   }
 
