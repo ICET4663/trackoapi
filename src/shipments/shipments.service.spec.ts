@@ -409,3 +409,93 @@ describe('ShipmentsService.cancelAssignment', () => {
     expect(shipmentUpdate).not.toHaveBeenCalled();
   });
 });
+
+// getEscrow() used to fall back to a fabricated "amount 240000, status HELD" record
+// whenever no Escrow row existed yet (i.e. every fresh shipment, before the customer had
+// paid anything) or the query failed. The escrow payment screen reads status HELD as
+// already-funded and disables the "Pay & hold in escrow" button - so a customer who had
+// never paid a naira would see "Escrow funded" and be unable to start payment.
+describe('ShipmentsService.getEscrow never fakes an already-funded escrow', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    return new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+  }
+
+  it('throws NotFoundException instead of a fake HELD/240000 record when no escrow exists yet', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const service = buildService(queryRawUnsafe);
+
+    await expect(service.getEscrow('shp-fresh')).rejects.toThrow('Escrow record not found');
+  });
+
+  it('throws instead of a fake record when the query fails', async () => {
+    const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const service = buildService(queryRawUnsafe);
+
+    await expect(service.getEscrow('shp-1')).rejects.toThrow();
+  });
+
+  it('returns the real record when one exists', async () => {
+    const escrowRow = {
+      id: 'escrow-1', shipmentId: 'shp-1', amount: 500000, currency: 'NGN', status: 'PENDING',
+      arrivalConfirmed: false, proofOfDeliveryUploaded: false, customerDeliveryConfirmed: false,
+      disputeWindowClear: false, platformApproved: false,
+    };
+    const queryRawUnsafe = jest.fn().mockResolvedValue([escrowRow]);
+    const service = buildService(queryRawUnsafe);
+
+    const result = await service.getEscrow('shp-1');
+
+    expect(result.status).toBe('PENDING');
+    expect(result.amount).toBe(500000);
+  });
+});
+
+// confirmEscrowCheck() used to fall back to a fabricated "RELEASE_READY, every check
+// true" record whenever the UPDATE failed or matched no row - so the release checklist
+// could show every box ticked, and the shipment marked ready for payout, even though
+// nothing was actually confirmed in the database.
+describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that did not happen', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    return new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+  }
+
+  it('throws a real error instead of a fake RELEASE_READY record when the update fails', async () => {
+    const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const service = buildService(queryRawUnsafe);
+
+    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('throws NotFoundException instead of fabricating success when there is no Escrow row for this shipment', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const service = buildService(queryRawUnsafe);
+
+    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER')).rejects.toThrow('Escrow record not found');
+  });
+
+  it('returns the real updated record on genuine success', async () => {
+    const escrowRow = {
+      id: 'escrow-1', shipmentId: 'shp-1', amount: 500000, currency: 'NGN', status: 'FUNDED',
+      arrivalConfirmed: true, proofOfDeliveryUploaded: false, customerDeliveryConfirmed: false,
+      disputeWindowClear: false, platformApproved: false,
+    };
+    const queryRawUnsafe = jest.fn().mockResolvedValue([escrowRow]);
+    const service = buildService(queryRawUnsafe);
+
+    const result = await service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER');
+
+    expect(result.releaseChecks.arrivalConfirmed).toBe(true);
+  });
+
+  it('still enforces the role gate before ever touching the database', async () => {
+    const queryRawUnsafe = jest.fn();
+    const service = buildService(queryRawUnsafe);
+
+    await expect(service.confirmEscrowCheck('shp-1', 'platformApproved', 'CUSTOMER')).rejects.toThrow(
+      'cannot complete that escrow release check',
+    );
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
+});

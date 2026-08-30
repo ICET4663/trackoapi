@@ -990,29 +990,16 @@ export class ShipmentsService {
     };
   }
 
+  // This used to fall back to a fabricated escrow record - amount 240000, status
+  // 'HELD' - whenever no Escrow row existed yet (i.e. on every fresh shipment, before
+  // the customer had paid anything) OR the query genuinely failed. The escrow payment
+  // screen reads that fake "HELD" status as already-funded: it disables the "Pay & hold
+  // in escrow" button and shows "Escrow funded" to a customer who had not paid a thing.
+  // Real absence (or a real infra failure) must surface as a real 404/500, which the
+  // frontend already handles correctly by treating the escrow as not-yet-created.
   async getEscrow(shipmentId: string) {
-    try {
-      const rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
-        `select "id", "shipmentId", "amount", "currency", "status"::text as "status",
-                "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"
-         from "Escrow"
-         where "shipmentId" = $1
-         limit 1`,
-        shipmentId,
-      );
-      if (rows[0]) return this.toEscrowRecord(rows[0]);
-    } catch {
-      // Preview fallback below.
-    }
-
-    return {
-      id: `escrow-${shipmentId}`,
-      shipmentId,
-      amount: 240000,
-      currency: 'NGN',
-      status: 'HELD',
-      releaseChecks: this.releaseChecks(),
-    };
+    const row = await this.findEscrowOrThrow(shipmentId);
+    return this.toEscrowRecord(row);
   }
 
   // Funded shipments awaiting admin sign-off before dispatch can assign a driver.
@@ -1273,61 +1260,46 @@ export class ShipmentsService {
     ]);
 
     this.assertEscrowCheckRole(check, actorRole);
+    // assertEscrowCheckRole already throws BadRequestException for any check outside
+    // this set, so reaching here means check is one of the 5 known columns.
+    if (!allowedChecks.has(check)) throw new BadRequestException('Unknown escrow release check.');
 
-    if (allowedChecks.has(check)) {
-      try {
-        const rows = await this.prisma.$queryRawUnsafe<
-          {
-            id: string;
-            shipmentId: string;
-            amount: number;
-            currency: string;
-            status: string;
-            arrivalConfirmed: boolean;
-            proofOfDeliveryUploaded: boolean;
-            customerDeliveryConfirmed: boolean;
-            disputeWindowClear: boolean;
-            platformApproved: boolean;
-          }[]
-        >(
-          `update "Escrow"
-           set "${check}" = true,
-               "status" = case
-                 when "status" = 'DISPUTED'::"EscrowStatus" then "status"
-                 when "status" = 'REFUNDED'::"EscrowStatus" then "status"
-                 when "status" = 'RELEASED'::"EscrowStatus" then "status"
-                 when ("arrivalConfirmed" = true or $2 = 'arrivalConfirmed')
-                  and ("proofOfDeliveryUploaded" = true or $2 = 'proofOfDeliveryUploaded')
-                  and ("customerDeliveryConfirmed" = true or $2 = 'customerDeliveryConfirmed')
-                  and ("disputeWindowClear" = true or $2 = 'disputeWindowClear')
-                  and ("platformApproved" = true or $2 = 'platformApproved')
-                 then 'RELEASE_READY'::"EscrowStatus"
-                 else "status"
-               end,
-               "updatedAt" = current_timestamp
-           where "shipmentId" = $1
-           returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
-                     "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
-          shipmentId,
-          check,
-        );
-        if (rows[0]) return this.toEscrowRecord(rows[0]);
-      } catch {
-        // Preview fallback below.
-      }
+    // This used to fall back to a fabricated "RELEASE_READY, every check true" record
+    // whenever the UPDATE failed (a real DB error) or the shipment had no Escrow row -
+    // so the release checklist on the shipment screen could show every box ticked, and
+    // the shipment marked ready for payout, even though nothing was actually confirmed
+    // in the database. A confirmation that didn't really happen must surface as a real
+    // error, the same way releaseEscrow() itself already does.
+    let rows: EscrowRow[];
+    try {
+      rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
+        `update "Escrow"
+         set "${check}" = true,
+             "status" = case
+               when "status" = 'DISPUTED'::"EscrowStatus" then "status"
+               when "status" = 'REFUNDED'::"EscrowStatus" then "status"
+               when "status" = 'RELEASED'::"EscrowStatus" then "status"
+               when ("arrivalConfirmed" = true or $2 = 'arrivalConfirmed')
+                and ("proofOfDeliveryUploaded" = true or $2 = 'proofOfDeliveryUploaded')
+                and ("customerDeliveryConfirmed" = true or $2 = 'customerDeliveryConfirmed')
+                and ("disputeWindowClear" = true or $2 = 'disputeWindowClear')
+                and ("platformApproved" = true or $2 = 'platformApproved')
+               then 'RELEASE_READY'::"EscrowStatus"
+               else "status"
+             end,
+             "updatedAt" = current_timestamp
+         where "shipmentId" = $1
+         returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
+                   "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
+        shipmentId,
+        check,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not record this confirmation. Please try again: ${this.errorMessage(error)}`);
     }
 
-    return {
-      id: `escrow-${shipmentId}`,
-      shipmentId,
-      amount: 240000,
-      currency: 'NGN',
-      status: 'RELEASE_READY',
-      releaseChecks: {
-        ...this.releaseChecks(),
-        [check]: true,
-      },
-    };
+    if (!rows[0]) throw new NotFoundException('Escrow record not found for this shipment.');
+    return this.toEscrowRecord(rows[0]);
   }
 
   private assertEscrowCheckRole(check: string, actorRole: UserRole) {
@@ -1413,6 +1385,10 @@ export class ShipmentsService {
     } catch {
       // Escrow release should not fail because notification delivery failed.
     }
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private formatMoney(amountKobo?: number | null, currency = 'NGN') {
