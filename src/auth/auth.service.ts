@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OtpPurpose, Prisma, UserRole } from '@prisma/client';
@@ -40,6 +40,14 @@ export class AuthService {
       label: 'Registration OTP',
     });
 
+    // This used to swallow a genuine OTP-row insert failure with only a comment about
+    // "preview mode" (a leftover from before the OTP system was real), then proceed to
+    // claim `sent: true` and email out a code anyway. Unlike requestPasswordReset() below
+    // - where masking a failure is a deliberate choice to avoid revealing whether an
+    // account exists - there's no such privacy reason here: registration is inherently
+    // for a brand-new account. A real DB failure left new users with no valid OTP row to
+    // verify against, stuck unable to register at all, with a false "sent: true" and no
+    // error telling them why.
     try {
       await this.prisma.otpCode.create({
         data: {
@@ -50,14 +58,15 @@ export class AuthService {
           purpose: OtpPurpose.REGISTER,
         },
       });
-      await this.audit('REGISTRATION_OTP_REQUESTED', 'OtpCode', undefined, {
-        email,
-        phone,
-        role: dto.role,
-      });
-    } catch {
-      // Preview mode: keep mock OTP usable while local Prisma/DB setup is being finalized.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not start registration. Please try again: ${error instanceof Error ? error.message : String(error)}`);
     }
+    // audit() already never throws on its own failure - safe to await plainly.
+    await this.audit('REGISTRATION_OTP_REQUESTED', 'OtpCode', undefined, {
+      email,
+      phone,
+      role: dto.role,
+    });
 
     const delivery = await this.sendOtpEmail({
       to: email,

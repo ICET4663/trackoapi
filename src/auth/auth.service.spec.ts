@@ -254,3 +254,39 @@ describe('AuthService.adminExecuteAccountDeletion', () => {
     expect(transaction).not.toHaveBeenCalled();
   });
 });
+
+// This used to swallow a genuine OTP-row insert failure with only a "preview mode"
+// comment - a leftover from before the OTP system was real - then proceed to claim
+// `sent: true` and email a code out anyway. A real DB failure left new users with no
+// valid OTP row to ever verify against: stuck unable to register, told it worked.
+describe('AuthService.requestRegistrationCode never claims success when the OTP was not saved', () => {
+  function buildService(otpCreate: jest.Mock) {
+    const config = { get: jest.fn() } as unknown as ConfigService;
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      otpCode: { create: otpCreate },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
+    const service = new AuthService(config, {} as JwtService, prisma, rateLimit, {} as UsersService);
+    return { service };
+  }
+
+  it('throws instead of a fake "sent: true" when the OTP insert fails', async () => {
+    const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.requestRegistrationCode({
+      email: 'new@tracko.ng', phone: '+2348030000001', role: 'CUSTOMER' as never,
+    } as never)).rejects.toThrow('Could not start registration');
+  });
+
+  it('still returns sent: true on genuine success', async () => {
+    const { service } = buildService(jest.fn().mockResolvedValue(undefined));
+
+    const result = await service.requestRegistrationCode({
+      email: 'new@tracko.ng', phone: '+2348030000001', role: 'CUSTOMER' as never,
+    } as never);
+
+    expect(result.sent).toBe(true);
+  });
+});
