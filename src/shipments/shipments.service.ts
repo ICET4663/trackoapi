@@ -943,16 +943,17 @@ export class ShipmentsService {
       throw new ForbiddenException('You do not have access to this shipment.');
     }
 
+    // This used to fall back to a fabricated timeline entry - claiming the shipment had
+    // advanced to nextStatus - on ANY failure of either the timeline insert or the
+    // shipment status update. This is the actual mechanism shipments progress through
+    // their whole trip lifecycle (pickup, in transit, arrived, delivered): the UI could
+    // show "delivered" while the real shipment row silently stayed at its old status,
+    // desyncing everything downstream that reads the real status (escrow release checks,
+    // dispatcher views, notifications) from what the customer/driver were shown.
+    const nextStatus = String(event.status ?? shipment.status ?? 'IN_TRANSIT');
+    let rows: { id: string; status: string; note: string | null; createdAt: Date }[];
     try {
-      const nextStatus = String(event.status ?? shipment.status ?? 'IN_TRANSIT');
-      const rows = await this.prisma.$queryRawUnsafe<
-        {
-          id: string;
-          status: string;
-          note: string | null;
-          createdAt: Date;
-        }[]
-      >(
+      rows = await this.prisma.$queryRawUnsafe(
         `insert into "ShipmentTimeline" ("id", "shipmentId", "status", "note")
          values ($1, $2, cast($3 as "ShipmentStatus"), $4)
          returning "id", "status"::text as "status", "note", "createdAt"`,
@@ -973,21 +974,12 @@ export class ShipmentsService {
         shipmentId,
         nextStatus,
       );
-
-      if (rows[0]) return this.toTimelineRecord(rows[0]);
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
     }
 
-    return {
-      id: `timeline-${Date.now()}`,
-      status: String(event.status ?? 'IN_TRANSIT'),
-      label: String(event.label ?? event.note ?? 'Shipment updated'),
-      actorRole: String(event.actorRole ?? 'SYSTEM'),
-      note: event.note ? String(event.note) : undefined,
-      shipmentId,
-      createdAt: new Date().toISOString(),
-    };
+    if (!rows[0]) throw new InternalServerErrorException('Could not update this shipment\'s status. Please try again.');
+    return this.toTimelineRecord(rows[0]);
   }
 
   // This used to fall back to a fabricated escrow record - amount 240000, status
