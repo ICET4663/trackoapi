@@ -17,6 +17,9 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
   let notifications: NotificationsService;
   let service: PaymentProviderService;
   let fetchMock: jest.Mock;
+  const originalFetch = global.fetch;
+
+  afterEach(() => { global.fetch = originalFetch; });
 
   beforeEach(() => {
     config = {

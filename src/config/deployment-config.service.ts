@@ -15,6 +15,11 @@ export class DeploymentConfigService {
     const required = ['DATABASE_URL', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'];
     const missingRequired = required.filter((key) => !this.hasValue(key));
     const integrations = this.integrations();
+    // Env-var presence only, kept fast and synchronous like every other entry here - this
+    // runs on every cold boot (see create-app.ts). Whether Resend's sending domain is
+    // actually *verified* (vs. just an API key existing, which still only sends to your
+    // own inbox in sandbox mode) needs a live Resend API call - see emailDomainStatus()
+    // below, called separately by the health/readiness endpoints only.
 
     return {
       environment: this.config.get<string>('NODE_ENV') ?? 'development',
@@ -63,7 +68,53 @@ export class DeploymentConfigService {
         mode: this.hasValue('CRON_SECRET') ? 'configured' : 'mock',
         missing: this.missing(['CRON_SECRET']),
       },
+      {
+        // "configured" here only means the API key exists and OTP/notification emails can
+        // be sent at all - Resend still runs in sandbox mode (deliverable only to the
+        // account owner's own inbox) until a sending domain is added and verified. See
+        // emailDomainStatus() for the real, live answer to "can this actually reach users".
+        name: 'email',
+        mode: this.hasValue('RESEND_API_KEY') ? 'configured' : 'mock',
+        missing: this.missing(['RESEND_API_KEY']),
+      },
     ];
+  }
+
+  // A live call to Resend's own API - env vars alone can't tell you whether a domain has
+  // actually finished DNS verification, only whether an API key exists. Called on-demand
+  // by the health/readiness endpoints, never at bootstrap (an external API call has no
+  // place blocking every cold start for a non-critical status check).
+  async emailDomainStatus(): Promise<{
+    checked: boolean;
+    verifiedDomains: string[];
+    pendingDomains: string[];
+    message: string;
+  }> {
+    const apiKey = this.config.get<string>('RESEND_API_KEY');
+    if (!apiKey) {
+      return { checked: false, verifiedDomains: [], pendingDomains: [], message: 'RESEND_API_KEY is not set.' };
+    }
+
+    try {
+      const response = await fetch('https://api.resend.com/domains', {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      const payload = (await response.json().catch(() => null)) as { data?: { name: string; status: string }[] } | null;
+      if (!response.ok || !payload?.data) {
+        return { checked: false, verifiedDomains: [], pendingDomains: [], message: `Resend API returned ${response.status}.` };
+      }
+
+      const verifiedDomains = payload.data.filter((domain) => domain.status === 'verified').map((domain) => domain.name);
+      const pendingDomains = payload.data.filter((domain) => domain.status !== 'verified').map((domain) => domain.name);
+      const message = verifiedDomains.length
+        ? `Sending as ${verifiedDomains.join(', ')} - real emails can reach any recipient.`
+        : pendingDomains.length
+          ? `${pendingDomains.join(', ')} added but not yet verified - still sandbox-only (your own inbox) until DNS records are confirmed.`
+          : 'No domain added yet in Resend - still sandbox-only (your own inbox).';
+      return { checked: true, verifiedDomains, pendingDomains, message };
+    } catch (error) {
+      return { checked: false, verifiedDomains: [], pendingDomains: [], message: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private missing(keys: string[]) {

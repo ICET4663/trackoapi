@@ -15,6 +15,7 @@ export class DemoReadinessController {
   async readiness() {
     const deployment = this.deploymentConfig.summary();
     const database = await this.databaseStatus();
+    const email = await this.deploymentConfig.emailDomainStatus();
 
     return {
       ok: database.connected && deployment.required.ok,
@@ -77,6 +78,17 @@ export class DemoReadinessController {
           'GET /v1/maps/places?query=...',
           'GET /v1/maps/geocode?address=...',
           'POST /v1/maps/route-estimate',
+        ],
+      },
+      email: {
+        status: email.checked ? (email.verifiedDomains.length ? 'domain_verified' : 'sandbox_only') : 'not_configured',
+        provider: this.integrationMode(deployment.integrations, 'email'),
+        verifiedDomains: email.verifiedDomains,
+        pendingDomains: email.pendingDomains,
+        message: email.message,
+        endpoints: [
+          'POST /v1/auth/register/request',
+          'POST /v1/auth/password-reset/request',
         ],
       },
       frontendConnection: {

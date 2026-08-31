@@ -20,7 +20,12 @@ describe('TranslationProviderService.status', () => {
 // translation/transcript - on any failure, since callers treat null as "not available"
 // and fall back to showing only the original text/nothing.
 describe('TranslationProviderService never fabricates a result on failure', () => {
-  afterEach(() => { jest.restoreAllMocks(); });
+  // A plain `global.fetch = jest.fn()` assignment (not jest.spyOn) leaks across test
+  // files sharing a worker process - jest.restoreAllMocks() does not undo it, only spies.
+  // Confirmed this was actually happening: it broke an unrelated file's tests
+  // (maps-provider.service.spec.ts) when both ran in the same worker.
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
 
   it('translate() returns null, not a fake translation, when unconfigured', async () => {
     const service = buildService(undefined);
