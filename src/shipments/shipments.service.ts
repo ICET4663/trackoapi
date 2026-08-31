@@ -489,7 +489,13 @@ export class ShipmentsService {
         ),
         this.prisma.user.findUnique({
           where: { id: driverId },
-          include: { profile: true, driverVehicles: { where: { isActive: true } } },
+          include: {
+            profile: true,
+            driverVehicles: {
+              where: { isActive: true },
+              include: { documents: { select: { type: true, state: true, expires: true } } },
+            },
+          },
         }),
         this.prisma.driverAssignment.findFirst({
           where: { shipmentId, status: { in: ['OFFERED', 'ACCEPTED'] } },
@@ -553,6 +559,9 @@ export class ShipmentsService {
     }
     if (cargoWeightKg && (selectedVehicle.capacityKg ?? 0) < cargoWeightKg) {
       throw new BadRequestException('The selected truck does not have enough capacity for this cargo.');
+    }
+    if (!this.isVehicleAssignmentReady(selectedVehicle)) {
+      throw new BadRequestException('The selected truck cannot receive loads until registration, insurance, and roadworthiness documents are verified and current.');
     }
 
     const assignment = await this.prisma.driverAssignment.create({
@@ -836,7 +845,10 @@ export class ShipmentsService {
         this.prisma.user.findMany({
           where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
           include: {
-            driverVehicles: { where: { isActive: true } },
+            driverVehicles: {
+              where: { isActive: true },
+              include: { documents: { select: { type: true, state: true, expires: true } } },
+            },
             driverAssignments: {
               where: { status: { in: ['OFFERED', 'ACCEPTED'] } },
               select: { id: true },
@@ -865,6 +877,7 @@ export class ShipmentsService {
         .filter((driver) => !excluded.has(driver.id) && availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
+            .filter((candidate) => this.isVehicleAssignmentReady(candidate))
             .filter((candidate) => !cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)
             .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0))[0];
           const availability = availabilityByDriver.get(driver.id);
@@ -917,6 +930,17 @@ export class ShipmentsService {
     const haversine = Math.sin(latitudeDelta / 2) ** 2
       + Math.cos(originLatitude) * Math.cos(destinationLatitude) * Math.sin(longitudeDelta / 2) ** 2;
     return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+  }
+
+  private isVehicleAssignmentReady(vehicle: { documents?: Array<{ type: string; state: string; expires: Date | string | null }> }) {
+    const required = ['REGISTRATION', 'INSURANCE', 'ROADWORTHINESS'];
+    const now = Date.now();
+    const documents = vehicle.documents ?? [];
+    return required.every((type) => documents.some((document) =>
+      document.type === type
+      && document.state === 'VERIFIED'
+      && (!document.expires || new Date(document.expires).getTime() > now),
+    ));
   }
 
   private async assignmentOfferValidityMinutes() {

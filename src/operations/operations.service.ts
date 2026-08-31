@@ -39,7 +39,10 @@ type AssignmentQueueShipmentRow = {
 type DriverMatchInput = {
   id: string;
   verificationStatus: string;
-  driverVehicles: Array<{ id: string; plateNumber: string; type: string; capacityKg: number | null }>;
+  driverVehicles: Array<{
+    id: string; plateNumber: string; type: string; capacityKg: number | null;
+    documents: Array<{ type: string; state: string; expires: Date | string | null }>;
+  }>;
   driverAssignments: Array<{ status: string; shipment: { status: string } }>;
   driverReviews: Array<{ rating: number }>;
   lastKnownLatitude?: number | null;
@@ -174,7 +177,10 @@ export class OperationsService {
           },
           include: {
             profile: true,
-            driverVehicles: { where: { isActive: true } },
+            driverVehicles: {
+              where: { isActive: true },
+              include: { documents: { select: { type: true, state: true, expires: true } } },
+            },
             driverAssignments: {
               select: { status: true, shipment: { select: { status: true } } },
               orderBy: { offeredAt: 'desc' },
@@ -247,6 +253,7 @@ export class OperationsService {
             plateNumber: vehicle.plateNumber,
             type: vehicle.type,
             capacityKg: vehicle.capacityKg,
+            readiness: this.vehicleReadiness(vehicle),
           })),
           matches: Object.fromEntries(shipments.map((shipment) => [shipment.id, this.matchDriver(driver, shipment)])),
         })),
@@ -295,10 +302,15 @@ export class OperationsService {
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const vehicles = [...driver.driverVehicles].sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
+    const readyVehicles = vehicles.filter((candidate) => this.vehicleReadiness(candidate).ready);
     const vehicle = cargoWeightKg > 0
-      ? vehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
-      : vehicles[vehicles.length - 1];
+      ? readyVehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
+      : readyVehicles[readyVehicles.length - 1];
     if (!vehicle) {
+      const capacityVehicle = cargoWeightKg > 0
+        ? vehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
+        : vehicles[vehicles.length - 1];
+      if (capacityVehicle) return { score: 0, eligible: false, vehicleId: capacityVehicle.id, reason: 'Truck documents are incomplete, pending review, rejected, or expired.' };
       return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck has enough capacity for this cargo.' };
     }
 
@@ -373,6 +385,29 @@ export class OperationsService {
     return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
   }
 
+  private vehicleReadiness(vehicle: { documents?: Array<{ type: string; state: string; expires: Date | string | null }> }) {
+    const required = ['REGISTRATION', 'INSURANCE', 'ROADWORTHINESS'];
+    const now = Date.now();
+    const documents = vehicle.documents ?? [];
+    const verified = required.filter((type) => documents.some((document) =>
+      document.type === type
+      && document.state === 'VERIFIED'
+      && (!document.expires || new Date(document.expires).getTime() > now),
+    ));
+    const nextExpiry = documents
+      .filter((document) => document.expires && document.state === 'VERIFIED')
+      .map((document) => new Date(document.expires!).getTime())
+      .filter((value) => Number.isFinite(value) && value > now)
+      .sort((left, right) => left - right)[0];
+    return {
+      ready: verified.length === required.length,
+      verifiedRequired: verified.length,
+      totalRequired: required.length,
+      nextExpiry: nextExpiry ? new Date(nextExpiry).toISOString() : null,
+      label: verified.length === required.length ? 'Verified for assignment' : `${verified.length}/${required.length} documents verified`,
+    };
+  }
+
   // Real operational alerts computed from actual trip data - deliberately narrower than
   // a typical "alerts" screen: only flags what can honestly be derived from data that
   // exists (GPS ping recency, elapsed time vs. quoted duration). No route-deviation
@@ -393,7 +428,7 @@ export class OperationsService {
     const DELAY_BUFFER = 1.25;
 
     try {
-      const shipments = await this.prisma.shipment.findMany({
+      const [shipments, expiringDocuments] = await Promise.all([this.prisma.shipment.findMany({
         where: { status: { in: ACTIVE_STATUSES } },
         include: {
           timeline: { orderBy: { createdAt: 'asc' } },
@@ -401,10 +436,32 @@ export class OperationsService {
         },
         orderBy: { updatedAt: 'desc' },
         take: 100,
-      });
+      }), this.prisma.$queryRawUnsafe<Array<{
+        id: string; vehicleId: string; title: string; expires: Date; plateNumber: string;
+      }>>(
+        `select d."id", d."vehicleId", d."title", d."expires", v."plateNumber"
+         from "VehicleDocument" d join "Vehicle" v on v."id" = d."vehicleId"
+         where d."state" in ('VERIFIED'::"DriverDocumentState", 'EXPIRING'::"DriverDocumentState")
+           and d."expires" is not null and d."expires" <= current_timestamp + interval '30 days'
+         order by d."expires" asc limit 100`,
+      ).catch(() => [])]);
 
       const now = Date.now();
-      const alerts: Array<{ id: string; type: 'delayed' | 'stale_gps'; icon: string; title: string; detail: string; shipmentId: string; createdAt: string }> = [];
+      const alerts: Array<{ id: string; type: 'delayed' | 'stale_gps' | 'document_expiry'; icon: string; title: string; detail: string; shipmentId?: string; vehicleId?: string; targetUrl?: string; createdAt: string }> = [];
+
+      for (const document of expiringDocuments) {
+        const days = Math.ceil((new Date(document.expires).getTime() - now) / 86_400_000);
+        alerts.push({
+          id: `vehicle-doc-${document.id}`,
+          type: 'document_expiry',
+          icon: days < 0 ? 'error-outline' : 'event-busy',
+          title: days < 0 ? 'Vehicle document expired' : 'Vehicle document expiring',
+          detail: `${document.plateNumber} · ${document.title} · ${days < 0 ? `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} overdue` : `${days} day${days === 1 ? '' : 's'} remaining`}`,
+          vehicleId: document.vehicleId,
+          targetUrl: '/dispatcher/vehicle-documents',
+          createdAt: new Date(document.expires).toISOString(),
+        });
+      }
 
       for (const shipment of shipments) {
         const latestPing = shipment.locationPings[0];

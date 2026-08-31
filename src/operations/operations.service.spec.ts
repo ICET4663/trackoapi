@@ -6,6 +6,16 @@ import type { ShipmentsService } from '../shipments/shipments.service';
 
 type OperationActor = { sub: string; role: 'ADMIN' | 'DISPATCHER' | 'DRIVER' | 'CUSTOMER' | 'TRUCK_OWNER'; email?: string };
 
+// A real vehicle needs all 3 required documents VERIFIED (see vehicleReadiness()) to be
+// assignment-ready. Mock vehicles across this file use this by default so that tests
+// about ranking/capacity/workload/distance aren't accidentally also (mis)testing document
+// readiness, which has its own dedicated coverage below.
+const verifiedDocuments = [
+  { type: 'REGISTRATION', state: 'VERIFIED', expires: null },
+  { type: 'INSURANCE', state: 'VERIFIED', expires: null },
+  { type: 'ROADWORTHINESS', state: 'VERIFIED', expires: null },
+];
+
 // progressTrip previously let any authenticated driver account advance (including
 // marking DELIVERED/COMPLETED, which feeds escrow release) a shipment they were never
 // assigned to - it only checked the caller's role, not that a DRIVER caller actually
@@ -174,14 +184,14 @@ describe('OperationsService.assignmentQueue driver matching', () => {
           {
             id: 'driver-best', email: 'best@tracko.ng', phone: '+2341', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Best Driver' },
-            driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000 }],
+            driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000, documents: verifiedDocuments }],
             driverAssignments: Array.from({ length: 5 }, () => ({ status: 'ACCEPTED', shipment: { status: 'COMPLETED' } })),
             driverReviews: [{ rating: 5 }, { rating: 5 }],
           },
           {
             id: 'driver-busy', email: 'busy@tracko.ng', phone: '+2342', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Busy Driver' },
-            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000 }],
+            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, documents: verifiedDocuments }],
             driverAssignments: [
               { status: 'ACCEPTED', shipment: { status: 'IN_TRANSIT' } },
               { status: 'OFFERED', shipment: { status: 'DRIVER_ASSIGNED' } },
@@ -191,7 +201,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
           {
             id: 'driver-small', email: 'small@tracko.ng', phone: '+2343', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Small Truck Driver' },
-            driverVehicles: [{ id: 'truck-small', plateNumber: 'SML-1', type: 'Van', capacityKg: 5000 }],
+            driverVehicles: [{ id: 'truck-small', plateNumber: 'SML-1', type: 'Van', capacityKg: 5000, documents: verifiedDocuments }],
             driverAssignments: [],
             driverReviews: [{ rating: 5 }],
           },
@@ -236,7 +246,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     const driver = (id: string) => ({
       id, email: `${id}@tracko.ng`, phone: '+2341', verificationStatus: 'VERIFIED',
       profile: { fullName: id },
-      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000 }],
+      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000, documents: verifiedDocuments }],
       driverAssignments: [], driverReviews: [],
     });
     const prisma = {
@@ -274,7 +284,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     });
     const driver = (id: string) => ({
       id, email: `${id}@tracko.ng`, phone: '+2341', verificationStatus: 'VERIFIED', profile: { fullName: id },
-      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000 }],
+      driverVehicles: [{ id: `truck-${id}`, plateNumber: id, type: 'Flatbed', capacityKg: 10000, documents: verifiedDocuments }],
       driverAssignments: [], driverReviews: [{ rating: 5 }],
     });
     const service = new OperationsService(

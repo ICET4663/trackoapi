@@ -4,6 +4,15 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
 import type { MapsProviderService } from '../integrations/maps-provider.service';
 
+// A vehicle only counts as assignment-ready once all 3 required document types are
+// verified and unexpired (see ShipmentsService.isVehicleAssignmentReady) - these mocks
+// give reassignment-eligible test vehicles that ready state so they aren't filtered out.
+const verifiedDocuments = [
+  { type: 'REGISTRATION', state: 'VERIFIED', expires: null },
+  { type: 'INSURANCE', state: 'VERIFIED', expires: null },
+  { type: 'ROADWORTHINESS', state: 'VERIFIED', expires: null },
+];
+
 // releaseEscrow() used to swallow ANY failure of the actual money-moving UPDATE into a
 // fabricated "released" response - the caller (a human admin, or the automated
 // dispute-window auto-release job added alongside these tests) would believe escrow had
@@ -183,7 +192,7 @@ describe('ShipmentsService driver assignment offer expiry', () => {
         findMany: jest.fn().mockResolvedValue([
           {
             id: 'driver-2',
-            driverVehicles: [{ id: 'vehicle-2', capacityKg: 10000, isActive: true }],
+            driverVehicles: [{ id: 'vehicle-2', capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
             driverAssignments: [],
           },
         ]),
@@ -226,7 +235,7 @@ describe('ShipmentsService driver assignment offer expiry', () => {
     };
     const driver = (id: string) => ({
       id,
-      driverVehicles: [{ id: `vehicle-${id}`, capacityKg: 10000, isActive: true }],
+      driverVehicles: [{ id: `vehicle-${id}`, capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
       driverAssignments: [],
     });
     const prisma = {
