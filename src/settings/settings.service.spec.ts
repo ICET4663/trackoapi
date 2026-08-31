@@ -1,4 +1,4 @@
-import { InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { SettingsService } from './settings.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -540,5 +540,41 @@ describe('SettingsService.billingHistory is real per-account/per-card data, not 
       expect.not.stringContaining('paymentMethodId'),
       'customer-1',
     );
+  });
+});
+
+describe('SettingsService.updatePreferredLanguage', () => {
+  function buildService(userUpdate: jest.Mock) {
+    const prisma = { user: { update: userUpdate } } as unknown as PrismaService;
+    const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
+    return { service };
+  }
+
+  it('rejects an unsupported language code', async () => {
+    const { service } = buildService(jest.fn());
+
+    await expect(service.updatePreferredLanguage('user-1', 'fr')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a missing language', async () => {
+    const { service } = buildService(jest.fn());
+
+    await expect(service.updatePreferredLanguage('user-1', undefined)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('throws a real error instead of a silent no-op when the write fails', async () => {
+    const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.updatePreferredLanguage('user-1', 'yo')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('saves a supported language on success', async () => {
+    const userUpdate = jest.fn().mockResolvedValue(undefined);
+    const { service } = buildService(userUpdate);
+
+    const result = await service.updatePreferredLanguage('user-1', 'yo');
+
+    expect(userUpdate).toHaveBeenCalledWith({ where: { id: 'user-1' }, data: { preferredLanguage: 'yo' } });
+    expect(result).toEqual({ preferredLanguage: 'yo' });
   });
 });

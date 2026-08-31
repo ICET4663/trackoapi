@@ -527,6 +527,24 @@ export class SettingsService {
     }
   }
 
+  private static readonly SUPPORTED_LANGUAGES = ['en', 'ha', 'yo', 'ig'];
+
+  // Drives CommunicationService.translateForRecipient - the app UI's own language switch
+  // is purely on-device (see the frontend's src/i18n/locale-context.tsx); this is the only
+  // copy of "what language does this user read" the backend has, so translation quietly
+  // does nothing useful until the frontend actually calls this on every language change.
+  async updatePreferredLanguage(userId: string, language?: string) {
+    if (!language || !SettingsService.SUPPORTED_LANGUAGES.includes(language)) {
+      throw new BadRequestException(`Language must be one of: ${SettingsService.SUPPORTED_LANGUAGES.join(', ')}.`);
+    }
+    try {
+      await this.prisma.user.update({ where: { id: userId }, data: { preferredLanguage: language } });
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not save this language preference. Please try again: ${this.errorMessage(error)}`);
+    }
+    return { preferredLanguage: language };
+  }
+
   supportIndex() {
     return {
       topics: [

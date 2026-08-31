@@ -127,6 +127,18 @@ export class SettingsController {
     return this.settingsService.updateNotificationPreference(user.sub, role, body);
   }
 
+  // Drives which language incoming message translations target for this user (see
+  // CommunicationService.translateForRecipient) - separate from the app's own UI
+  // language, which is purely on-device and never sent to the backend.
+  @Patch('settings/language')
+  async updateLanguagePreference(
+    @Body() body: { language?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.settingsService.updatePreferredLanguage(user.sub, body.language);
+  }
+
   @Get('support')
   supportIndex() {
     return this.settingsService.supportIndex();

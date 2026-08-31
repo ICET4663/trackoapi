@@ -1,8 +1,9 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import type { AuthUser } from '../common/types/auth-user';
+import { TranslationProviderService } from '../integrations/translation-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -12,10 +13,13 @@ import { TypingStatusDto } from './dto/typing-status.dto';
 
 @Injectable()
 export class CommunicationService {
+  private readonly logger = new Logger(CommunicationService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly translationProvider: TranslationProviderService,
   ) {}
 
   // A conversation created with a customerId/driverId is scoped: only those two
@@ -115,61 +119,61 @@ export class CommunicationService {
     }
   }
 
+  // This used to fall back to a fabricated "Preview conversation is ready" thread on ANY
+  // read failure - a real DB error looked identical to a genuinely-empty new thread, and
+  // the two participants could believe they were looking at their real conversation when
+  // they were not. A read failure now surfaces as a real error instead.
   async listMessages(conversationId: string, user: AuthUser) {
+    let conversation;
     try {
-      const conversation = await this.prisma.conversation.upsert({
+      conversation = await this.prisma.conversation.upsert({
         where: { id: conversationId },
         update: {},
         create: { id: conversationId, subject: 'Tracko conversation' },
       });
-      await this.assertConversationAccess(conversation, user);
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load this conversation. Please try again: ${this.errorMessage(error)}`);
+    }
+    await this.assertConversationAccess(conversation, user);
 
-      const messages = await this.prisma.message.findMany({
+    let messages;
+    try {
+      messages = await this.prisma.message.findMany({
         where: { conversationId },
         include: { sender: { include: { profile: true } } },
         orderBy: { createdAt: 'asc' },
       });
-
-      return {
-        conversation,
-        typingUserIds: [],
-        messages: messages.map((message) => this.toMessageRecord(message)),
-      };
     } catch (error) {
-      if (error instanceof ForbiddenException) throw error;
-      return {
-        conversation: {
-          id: conversationId,
-          name: 'Tracko conversation',
-          subtitle: 'Preview thread',
-          initial: 'T',
-        },
-        typingUserIds: [],
-        messages: [
-          {
-            id: 'msg-preview',
-            conversationId,
-            senderId: 'preview-system',
-            kind: 'SYSTEM',
-            body: 'Preview conversation is ready.',
-            createdAt: new Date().toISOString(),
-            deliveryStatus: 'SENT',
-          },
-        ],
-      };
+      throw new InternalServerErrorException(`Could not load messages. Please try again: ${this.errorMessage(error)}`);
     }
+
+    return {
+      conversation,
+      typingUserIds: [],
+      messages: messages.map((message) => this.toMessageRecord(message)),
+    };
   }
 
+  // This used to fall back to a fabricated "sent" message on ANY failure of the actual
+  // insert - the sender saw their message appear as delivered while the recipient never
+  // received anything, since nothing was ever saved. The core write now fails loudly.
+  // Translation is layered on afterward as a genuinely best-effort side effect: it must
+  // never block or fail the send itself.
   async sendMessage(conversationId: string, senderId: string, dto: SendMessageDto, user: AuthUser) {
-    try {
-      const conversation = await this.prisma.conversation.upsert({
-        where: { id: conversationId },
-        update: { updatedAt: new Date() },
-        create: { id: conversationId, subject: 'Tracko conversation' },
-      });
-      await this.assertConversationAccess(conversation, user);
+    const conversation = await this.prisma.conversation.upsert({
+      where: { id: conversationId },
+      update: { updatedAt: new Date() },
+      create: { id: conversationId, subject: 'Tracko conversation' },
+    }).catch((error) => {
+      throw new InternalServerErrorException(`Could not open this conversation. Please try again: ${this.errorMessage(error)}`);
+    });
+    await this.assertConversationAccess(conversation, user);
 
-      const message = await this.prisma.message.create({
+    const translation = await this.translateForRecipient(conversation, senderId, dto).catch(() => null);
+
+    let message;
+    try {
+      message = await this.prisma.message.create({
         data: {
           id: dto.id,
           conversationId,
@@ -179,31 +183,60 @@ export class CommunicationService {
           attachmentUrl: dto.attachmentUrl ?? dto.attachmentUri,
           transcript: dto.transcript,
           durationSeconds: dto.durationSeconds,
+          translatedText: translation?.translatedText,
+          translatedLanguage: translation?.translatedLanguage,
+          sourceLanguage: translation?.sourceLanguage,
         },
         include: { sender: { include: { profile: true } } },
       });
-
-      await this.prisma.conversation.update({
-        where: { id: conversationId },
-        data: { updatedAt: new Date() },
-      });
-
-      return this.toMessageRecord(message);
     } catch (error) {
-      if (error instanceof ForbiddenException) throw error;
-      return {
-        id: dto.id ?? `msg-${Date.now()}`,
-        conversationId,
-        senderId,
-        kind: dto.kind,
-        body: dto.body,
-        attachmentUrl: dto.attachmentUrl ?? dto.attachmentUri,
-        transcript: dto.transcript,
-        durationSeconds: dto.durationSeconds,
-        createdAt: new Date().toISOString(),
-        deliveryStatus: 'SENT',
-      };
+      throw new InternalServerErrorException(`Could not send this message. Please try again: ${this.errorMessage(error)}`);
     }
+
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() },
+    }).catch((error) => {
+      this.logger.error(`Could not bump conversation ${conversationId} after a real message was saved: ${this.errorMessage(error)}`);
+    });
+
+    return this.toMessageRecord(message);
+  }
+
+  // Translates dto.body (TEXT) or dto.transcript (VOICE) into whichever language the
+  // *other* participant has set as their preferred app language, when that's known and
+  // actually differs from the sender's. Never throws - a translation failure (unconfigured
+  // provider, API error, unsupported language pair) must never block the message itself;
+  // callers already wrap this in .catch(() => null).
+  private async translateForRecipient(
+    conversation: { customerId: string | null; driverId: string | null },
+    senderId: string,
+    dto: SendMessageDto,
+  ): Promise<{ translatedText: string; translatedLanguage: string; sourceLanguage?: string } | null> {
+    const text = (dto.kind === 'VOICE' ? dto.transcript : dto.body)?.trim();
+    if (!text) return null;
+
+    const recipientId = conversation.customerId === senderId ? conversation.driverId : conversation.customerId;
+    if (!recipientId) return null;
+
+    const [sender, recipient] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: senderId }, select: { preferredLanguage: true } }),
+      this.prisma.user.findUnique({ where: { id: recipientId }, select: { preferredLanguage: true } }),
+    ]);
+    const recipientLanguage = recipient?.preferredLanguage ?? 'en';
+    // Same-language heuristic to skip a pointless API call in the common case - if the
+    // sender's own language happens to differ from what they actually typed/spoke, the
+    // real translate() call below still runs whenever the languages differ, and its
+    // detectedSourceLanguage (not this assumption) is what actually gets stored.
+    if (recipientLanguage === (sender?.preferredLanguage ?? 'en')) return null;
+
+    const result = await this.translationProvider.translate(text, recipientLanguage);
+    if (!result) return null;
+    return {
+      translatedText: result.translatedText,
+      translatedLanguage: recipientLanguage,
+      sourceLanguage: result.detectedSourceLanguage ?? sender?.preferredLanguage,
+    };
   }
 
   updateTypingStatus(conversationId: string, userId: string, dto: TypingStatusDto) {
@@ -217,11 +250,23 @@ export class CommunicationService {
     };
   }
 
-  transcribeVoiceNote(dto: TranscribeVoiceDto) {
+  async transcribeVoiceNote(dto: TranscribeVoiceDto) {
+    if (dto.base64) {
+      const result = await this.translationProvider.transcribe(dto.base64, dto.mimeType ?? 'audio/webm', dto.languageHint);
+      if (result) {
+        return {
+          transcript: result.transcript,
+          detectedLanguage: result.detectedLanguage,
+          durationSeconds: dto.durationSeconds,
+        };
+      }
+    }
     return {
       transcript: '',
       durationSeconds: dto.durationSeconds,
-      unavailableReason: 'Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.',
+      unavailableReason: this.translationProvider.status().transcriptionEnabled
+        ? 'Could not transcribe this recording. Use Chrome or Edge browser speech recognition for live transcript instead.'
+        : 'Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.',
     };
   }
 
@@ -379,6 +424,9 @@ export class CommunicationService {
     attachmentUrl: string | null;
     transcript: string | null;
     durationSeconds: number | null;
+    translatedText?: string | null;
+    translatedLanguage?: string | null;
+    sourceLanguage?: string | null;
     deliveryStatus: string;
     readAt: Date | null;
     createdAt: Date;
@@ -392,9 +440,16 @@ export class CommunicationService {
       attachmentUrl: message.attachmentUrl,
       transcript: message.transcript,
       durationSeconds: message.durationSeconds,
+      translatedText: message.translatedText,
+      translatedLanguage: message.translatedLanguage,
+      sourceLanguage: message.sourceLanguage,
       deliveryStatus: message.deliveryStatus,
       readAt: message.readAt?.toISOString(),
       createdAt: message.createdAt.toISOString(),
     };
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 }

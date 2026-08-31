@@ -5,6 +5,7 @@ import { RequestUserService } from '../common/request-user.service';
 import { KycProviderService } from './kyc-provider.service';
 import { MapsProviderService } from './maps-provider.service';
 import { PaymentProviderService } from './payment-provider.service';
+import { TranslationProviderService } from './translation-provider.service';
 
 @Controller()
 export class IntegrationsController {
@@ -12,6 +13,7 @@ export class IntegrationsController {
     private readonly kycProvider: KycProviderService,
     private readonly mapsProvider: MapsProviderService,
     private readonly paymentProvider: PaymentProviderService,
+    private readonly translationProvider: TranslationProviderService,
     private readonly requestUser: RequestUserService,
   ) {}
 
@@ -21,6 +23,7 @@ export class IntegrationsController {
       kyc: this.kycProvider.status(),
       payments: this.paymentProvider.status(),
       maps: this.mapsProvider.status(),
+      translation: this.translationProvider.status(),
     };
   }
 

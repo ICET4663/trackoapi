@@ -7,11 +7,12 @@ import { IntegrationsController } from './integrations.controller';
 import { KycProviderService } from './kyc-provider.service';
 import { MapsProviderService } from './maps-provider.service';
 import { PaymentProviderService } from './payment-provider.service';
+import { TranslationProviderService } from './translation-provider.service';
 
 @Module({
   imports: [ConfigModule, PrismaModule, NotificationsModule, RequestUserModule],
   controllers: [IntegrationsController],
-  providers: [KycProviderService, MapsProviderService, PaymentProviderService],
-  exports: [MapsProviderService, PaymentProviderService],
+  providers: [KycProviderService, MapsProviderService, PaymentProviderService, TranslationProviderService],
+  exports: [MapsProviderService, PaymentProviderService, TranslationProviderService],
 })
 export class IntegrationsModule {}

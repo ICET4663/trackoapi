@@ -154,6 +154,9 @@ model User {
   availableRoles     UserRole[]         @default([])
   verificationStatus VerificationStatus @default(PENDING)
   isActive           Boolean            @default(true)
+  // ISO 639-1 code (en/ha/yo/ig) - what the frontend's language switcher last set.
+  // Drives which language incoming messages get translated into for this user.
+  preferredLanguage  String             @default("en")
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -740,6 +743,11 @@ model Message {
   attachmentUrl  String?
   transcript     String?
   durationSeconds Int?
+  // Translation of `body` (TEXT) or `transcript` (VOICE) into the recipient's
+  // preferredLanguage, only populated when it actually differs from sourceLanguage.
+  translatedText     String?
+  translatedLanguage String?
+  sourceLanguage     String?
   deliveryStatus DeliveryStatus @default(SENT)
   readAt         DateTime?
   createdAt      DateTime @default(now())
