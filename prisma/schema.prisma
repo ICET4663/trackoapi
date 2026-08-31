@@ -173,6 +173,7 @@ model User {
   bankAccount   BankAccount?
   driverDocuments DriverDocument[]
   driverDocumentReviews DriverDocument[] @relation("DriverDocumentReviewer")
+  vehicleDocumentReviews VehicleDocument[] @relation("VehicleDocumentReviewer")
   safetySettings SafetySettings?
   notificationPreferences NotificationPreference[]
   kycSubmissions KycSubmission[]
@@ -249,6 +250,30 @@ model Vehicle {
   owner          User @relation("OwnerVehicles", fields: [ownerId], references: [id])
   assignedDriver User? @relation("AssignedDriverVehicles", fields: [assignedDriverId], references: [id])
   assignments    DriverAssignment[]
+  documents      VehicleDocument[]
+}
+
+model VehicleDocument {
+  id           String              @id @default(cuid())
+  vehicleId    String
+  type         String
+  title        String
+  state        DriverDocumentState @default(MISSING)
+  number       String?
+  expires      DateTime?
+  fileUrl      String?
+  reviewNote   String?
+  reviewedAt   DateTime?
+  reviewedById String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  reviewedBy User?   @relation("VehicleDocumentReviewer", fields: [reviewedById], references: [id])
+
+  @@unique([vehicleId, type])
+  @@index([vehicleId])
+  @@index([state])
 }
 
 model Shipment {

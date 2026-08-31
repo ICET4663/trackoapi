@@ -85,11 +85,11 @@ export class DataService {
           // registered truck was rendering with those fields blank. Mapped explicitly
           // below. `documents`/`year` have no backing column yet (no vehicle-document
           // tracking exists), so they get an honest neutral value rather than a fake
-          // "Verified" - this is the one input this collection cannot get right until
-          // that tracking is built.
+          // "Verified". Vehicle-document tracking is now real, so the fleet status is
+          // derived from the three required records rather than a preview label.
           return (await this.prisma.vehicle.findMany({
             where: { ownerId: userId },
-            include: { assignedDriver: { include: { profile: true } } },
+            include: { assignedDriver: { include: { profile: true } }, documents: true },
             orderBy: { createdAt: 'desc' },
           })).map((vehicle) => ({
             id: vehicle.id,
@@ -100,7 +100,13 @@ export class DataService {
             status: vehicle.assignedDriverId ? 'Assigned' : vehicle.isActive ? 'Available' : 'Maintenance',
             base: vehicle.registrationState ?? 'Location pending',
             assignedDriver: vehicle.assignedDriver?.profile?.fullName ?? vehicle.assignedDriver?.email,
-            documents: 'Incomplete',
+            documents: vehicle.documents.length >= 3 && vehicle.documents.every((document) => document.state === 'VERIFIED')
+              ? 'Verified'
+              : vehicle.documents.some((document) => document.state === 'PENDING_REVIEW')
+                ? 'Pending review'
+                : vehicle.documents.some((document) => document.state === 'REJECTED')
+                  ? 'Action required'
+                  : 'Incomplete',
           }));
         case 'driver-vehicles':
           // The truck(s) this driver is currently assigned to drive - not the owner's
@@ -213,6 +219,14 @@ export class DataService {
               registrationState: item.base ? String(item.base) : null,
             },
           });
+          await this.prisma.$executeRawUnsafe(
+            `insert into "VehicleDocument" ("id", "vehicleId", "type", "title", "state") values
+               ($1, $4, 'REGISTRATION', 'Vehicle registration', 'MISSING'::"DriverDocumentState"),
+               ($2, $4, 'INSURANCE', 'Insurance certificate', 'MISSING'::"DriverDocumentState"),
+               ($3, $4, 'ROADWORTHINESS', 'Roadworthiness certificate', 'MISSING'::"DriverDocumentState")
+             on conflict ("vehicleId", "type") do nothing`,
+            `${vehicle.id}-registration`, `${vehicle.id}-insurance`, `${vehicle.id}-roadworthiness`, vehicle.id,
+          );
           return {
             id: vehicle.id,
             reg: vehicle.plateNumber,

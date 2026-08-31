@@ -438,6 +438,55 @@ describe('SettingsService driver document review is a real workflow, not a fake 
   });
 });
 
+describe('SettingsService vehicle document review', () => {
+  function buildService(options?: { vehicle?: { id: string; plateNumber: string } | null; rows?: unknown[] }) {
+    const queryRawUnsafe = jest.fn().mockResolvedValue(options?.rows ?? []);
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      vehicle: { findFirst: jest.fn().mockResolvedValue(options && 'vehicle' in options ? options.vehicle : { id: 'vehicle-1', plateNumber: 'LAG-123-AA' }) },
+    } as unknown as PrismaService;
+    const notificationsCreate = jest.fn().mockResolvedValue({ id: 'notice-1' });
+    const service = new SettingsService(
+      prisma,
+      { create: notificationsCreate } as unknown as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+    return { service, queryRawUnsafe, notificationsCreate };
+  }
+
+  it('does not let one owner inspect another owner\'s truck documents', async () => {
+    const { service } = buildService({ vehicle: null });
+
+    await expect(service.vehicleDocuments('vehicle-1', 'owner-2')).rejects.toThrow('Truck not found');
+  });
+
+  it('uploads a supported document into pending review and alerts operations', async () => {
+    const { service, queryRawUnsafe, notificationsCreate } = buildService({ rows: [{ id: 'doc-1', state: 'pending_review' }] });
+
+    const result = await service.uploadVehicleDocument('vehicle-1', 'owner-1', 'insurance', { fileUrl: 'https://example.com/insurance.jpg' });
+
+    expect(result).toMatchObject({ uploaded: true, document: { state: 'pending_review' } });
+    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('PENDING_REVIEW'), expect.any(String), 'vehicle-1', 'INSURANCE', expect.any(String), null, null, 'https://example.com/insurance.jpg');
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'ADMIN', entity: 'VehicleDocument' }));
+  });
+
+  it('requires an actionable reviewer note when rejecting a vehicle document', async () => {
+    const { service } = buildService();
+
+    await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT' })).rejects.toThrow('reviewer note');
+  });
+
+  it('approves only a pending document and notifies its owner', async () => {
+    const { service, notificationsCreate } = buildService({ rows: [{ id: 'doc-1', vehicleId: 'vehicle-1', title: 'Insurance certificate', ownerId: 'owner-1', plateNumber: 'LAG-123-AA', state: 'verified' }] });
+
+    const result = await service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'APPROVE' });
+
+    expect(result).toMatchObject({ id: 'doc-1', state: 'verified', decision: 'APPROVE' });
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-1', tone: 'SUCCESS' }));
+  });
+});
+
 describe('SettingsService.billingHistory is real per-account/per-card data, not fabricated invoices', () => {
   function buildService(queryRawUnsafe: jest.Mock) {
     const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;

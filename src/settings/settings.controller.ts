@@ -78,6 +78,39 @@ export class SettingsController {
     return this.settingsService.reviewDriverDocument(documentId, reviewer.sub, body);
   }
 
+  @Get('owner/vehicles/:vehicleId/documents')
+  async vehicleDocuments(@Param('vehicleId') vehicleId: string, @Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.fromAuthorizationHeader(authorization, 'TRUCK_OWNER');
+    return this.settingsService.vehicleDocuments(vehicleId, owner.sub);
+  }
+
+  @Post('owner/vehicles/:vehicleId/documents/:type/upload-request')
+  async uploadVehicleDocument(
+    @Param('vehicleId') vehicleId: string,
+    @Param('type') type: string,
+    @Body() body: { fileUrl?: string; url?: string; number?: string; expires?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const owner = await this.requestUser.fromAuthorizationHeader(authorization, 'TRUCK_OWNER');
+    return this.settingsService.uploadVehicleDocument(vehicleId, owner.sub, type, body);
+  }
+
+  @Get('admin/vehicle-documents')
+  async pendingVehicleDocuments(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.pendingVehicleDocuments();
+  }
+
+  @Post('admin/vehicle-documents/:documentId/review')
+  async reviewVehicleDocument(
+    @Param('documentId') documentId: string,
+    @Body() body: { decision?: string; note?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const reviewer = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.reviewVehicleDocument(documentId, reviewer.sub, body);
+  }
+
   @Get('settings/notification-preferences')
   async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);

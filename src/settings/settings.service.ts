@@ -1634,6 +1634,131 @@ export class SettingsService {
     return { id: updated.id, state: updated.state, decision };
   }
 
+  private readonly requiredVehicleDocuments = [
+    { type: 'REGISTRATION', title: 'Vehicle registration' },
+    { type: 'INSURANCE', title: 'Insurance certificate' },
+    { type: 'ROADWORTHINESS', title: 'Roadworthiness certificate' },
+  ] as const;
+
+  async vehicleDocuments(vehicleId: string, ownerId: string) {
+    await this.assertVehicleOwner(vehicleId, ownerId);
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      id: string; type: string; title: string; state: string; number: string | null;
+      expires: Date | null; fileUrl: string | null; reviewNote: string | null;
+    }>>(
+      `select "id", "type", "title", lower("state"::text) as "state", "number", "expires", "fileUrl", "reviewNote"
+       from "VehicleDocument" where "vehicleId" = $1 order by "createdAt" asc`,
+      vehicleId,
+    ).catch(() => []);
+    const byType = new Map(rows.map((row) => [row.type, row]));
+    return this.requiredVehicleDocuments.map((required) => {
+      const row = byType.get(required.type);
+      return row ? { ...row, expires: row.expires?.toISOString() ?? null } : {
+        id: `${vehicleId}-${required.type.toLowerCase()}`,
+        vehicleId,
+        type: required.type,
+        title: required.title,
+        state: 'missing',
+        number: null,
+        expires: null,
+        fileUrl: null,
+        reviewNote: null,
+      };
+    });
+  }
+
+  async uploadVehicleDocument(
+    vehicleId: string,
+    ownerId: string,
+    typeInput: string,
+    input: { fileUrl?: string; url?: string; number?: string; expires?: string },
+  ) {
+    const vehicle = await this.assertVehicleOwner(vehicleId, ownerId);
+    const type = typeInput.trim().toUpperCase();
+    const required = this.requiredVehicleDocuments.find((item) => item.type === type);
+    if (!required) throw new BadRequestException('Unsupported vehicle document type.');
+    const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
+    if (!fileUrl) throw new BadRequestException('Document file URL is required.');
+    const expires = input.expires ? new Date(input.expires) : null;
+    const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
+    const id = `${vehicleId}-${type.toLowerCase()}`;
+
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; state: string }>>(
+      `insert into "VehicleDocument" ("id", "vehicleId", "type", "title", "state", "number", "expires", "fileUrl", "updatedAt")
+       values ($1, $2, $3, $4, 'PENDING_REVIEW'::"DriverDocumentState", $5, $6, $7, current_timestamp)
+       on conflict ("vehicleId", "type") do update set
+         "state" = 'PENDING_REVIEW'::"DriverDocumentState", "number" = excluded."number",
+         "expires" = excluded."expires", "fileUrl" = excluded."fileUrl", "reviewNote" = null,
+         "reviewedAt" = null, "reviewedById" = null, "updatedAt" = current_timestamp
+       returning "id", lower("state"::text) as "state"`,
+      id, vehicleId, type, required.title, input.number ?? null, expiresValue, fileUrl,
+    ).catch((error) => {
+      throw new InternalServerErrorException(`Could not save this vehicle document: ${this.errorMessage(error)}`);
+    });
+
+    await this.notifications.create({
+      role: 'ADMIN', title: 'Vehicle document uploaded',
+      body: `${required.title} for ${vehicle.plateNumber} needs review.`, tone: 'WARNING',
+      entity: 'VehicleDocument', entityId: rows[0]?.id ?? id, actionUrl: '/admin/vehicle-documents',
+    }).catch(() => null);
+    return { uploaded: true, message: 'Vehicle document uploaded for review.', document: rows[0] };
+  }
+
+  async pendingVehicleDocuments() {
+    return this.prisma.$queryRawUnsafe<Array<{
+      id: string; vehicleId: string; type: string; title: string; number: string | null;
+      expires: Date | null; fileUrl: string | null; createdAt: Date; plateNumber: string;
+      ownerId: string; ownerEmail: string; ownerName: string | null;
+    }>>(
+      `select d."id", d."vehicleId", d."type", d."title", d."number", d."expires", d."fileUrl", d."createdAt",
+              v."plateNumber", v."ownerId", u."email" as "ownerEmail", p."fullName" as "ownerName"
+       from "VehicleDocument" d join "Vehicle" v on v."id" = d."vehicleId"
+       join "User" u on u."id" = v."ownerId" left join "Profile" p on p."userId" = u."id"
+       where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
+       order by d."createdAt" asc limit 100`,
+    ).then((rows) => rows.map((row) => ({
+      ...row,
+      ownerName: row.ownerName ?? row.ownerEmail,
+      expires: row.expires?.toISOString() ?? null,
+      submittedAt: row.createdAt.toISOString(),
+    })));
+  }
+
+  async reviewVehicleDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const decision = String(input.decision ?? '').toUpperCase();
+    if (!['APPROVE', 'REJECT'].includes(decision)) throw new BadRequestException('Use APPROVE or REJECT as the document decision.');
+    if (decision === 'REJECT' && !String(input.note ?? '').trim()) throw new BadRequestException('A reviewer note is required when rejecting a document.');
+    const state = decision === 'APPROVE' ? 'VERIFIED' : 'REJECTED';
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; vehicleId: string; title: string; ownerId: string; plateNumber: string; state: string }>>(
+      `update "VehicleDocument" d set "state" = $1::"DriverDocumentState", "reviewNote" = $2,
+         "reviewedAt" = current_timestamp, "reviewedById" = $3, "updatedAt" = current_timestamp
+       from "Vehicle" v where d."id" = $4 and d."vehicleId" = v."id"
+         and d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
+       returning d."id", d."vehicleId", d."title", v."ownerId", v."plateNumber", lower(d."state"::text) as "state"`,
+      state, input.note ?? null, reviewerId, documentId,
+    ).catch((error) => {
+      throw new InternalServerErrorException(`Could not record this vehicle document decision: ${this.errorMessage(error)}`);
+    });
+    const updated = rows[0];
+    if (!updated) throw new NotFoundException('No pending vehicle document found; it may already have been reviewed.');
+    await this.notifications.create({
+      userId: updated.ownerId,
+      title: decision === 'APPROVE' ? `${updated.title} verified` : `${updated.title} needs attention`,
+      body: decision === 'APPROVE'
+        ? `${updated.title} for ${updated.plateNumber} is verified.`
+        : `${updated.title} for ${updated.plateNumber} was rejected: ${input.note}`,
+      tone: decision === 'APPROVE' ? 'SUCCESS' : 'DANGER',
+      entity: 'VehicleDocument', entityId: updated.id, actionUrl: `/owner/vehicle-documents/${updated.vehicleId}`,
+    }).catch(() => null);
+    return { id: updated.id, vehicleId: updated.vehicleId, state: updated.state, decision };
+  }
+
+  private async assertVehicleOwner(vehicleId: string, ownerId: string) {
+    const vehicle = await this.prisma.vehicle.findFirst({ where: { id: vehicleId, ownerId }, select: { id: true, plateNumber: true } });
+    if (!vehicle) throw new NotFoundException('Truck not found for this owner account.');
+    return vehicle;
+  }
+
   async safetySettings(userId = 'preview-driver') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
