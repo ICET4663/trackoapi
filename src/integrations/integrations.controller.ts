@@ -91,9 +91,17 @@ export class IntegrationsController {
   }
 
   // Same as the payment webhook - an external KYC provider callback, no user session.
+  // Verified inside recordWebhook() via a shared secret (x-kyc-webhook-secret against
+  // KYC_WEBHOOK_SECRET) - this had no verification at all before, so anyone could POST a
+  // body claiming any account was KYC-approved.
   @Post('kyc/provider/webhooks/:provider/:event')
   @Public()
-  kycWebhook(@Param('provider') provider: string, @Param('event') event: string, @Body() body: unknown) {
-    return this.kycProvider.recordWebhook(provider, event, body);
+  kycWebhook(
+    @Param('provider') provider: string,
+    @Param('event') event: string,
+    @Body() body: unknown,
+    @Headers('x-kyc-webhook-secret') sharedSecret?: string,
+  ) {
+    return this.kycProvider.recordWebhook(provider, event, body, sharedSecret);
   }
 }

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, VerificationStatus } from '@prisma/client';
+import { timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -21,6 +22,10 @@ export class KycProviderService {
       provider,
       mode: configured ? 'configured' : 'mock',
       realVerificationEnabled: configured,
+      // Surfaced so this doesn't stay an invisible gap the way the missing verification
+      // itself did - false here means the webhook accepts nothing (fails closed), not
+      // that it's open.
+      webhookSecured: Boolean(this.config.get<string>('KYC_WEBHOOK_SECRET')),
       requiredEnv:
         provider === 'dojah'
           ? ['DOJAH_API_KEY', 'DOJAH_APP_ID']
@@ -67,11 +72,28 @@ export class KycProviderService {
     };
   }
 
-  async recordWebhook(provider: string, event: string, body: unknown) {
+  // This had NO signature/secret verification at all - unlike the Paystack webhook right
+  // next to it in the same controller. Since this endpoint is @Public() (no session
+  // required) and directly flips User.verificationStatus to VERIFIED based only on the
+  // request body, anyone who could reach the API could POST
+  // { userId: '<any account>', status: 'approved' } here and grant that account a real
+  // KYC approval - completely bypassing identity verification, including the KYC gate on
+  // funding escrow. Same constant-time shared-secret check as the cron endpoint, but
+  // timing-safe (cron's own `!==` string compare is not).
+  private verifyWebhookSecret(presented?: string) {
+    const expected = this.config.get<string>('KYC_WEBHOOK_SECRET');
+    if (!expected || !presented) return false;
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const presentedBuffer = Buffer.from(presented, 'utf8');
+    return expectedBuffer.length === presentedBuffer.length && timingSafeEqual(expectedBuffer, presentedBuffer);
+  }
+
+  async recordWebhook(provider: string, event: string, body: unknown, sharedSecret?: string) {
+    const verified = this.verifyWebhookSecret(sharedSecret);
     const result = this.extractKycResult(body);
     let updated = false;
 
-    if (result.submissionId || result.userId) {
+    if (verified && (result.submissionId || result.userId)) {
       try {
         const submissionRows = await this.prisma.$queryRawUnsafe<{ id: string; userId: string }[]>(
           `update "KycSubmission"
@@ -108,7 +130,7 @@ export class KycProviderService {
           action: 'KYC_WEBHOOK_RECEIVED',
           entity: 'KycProvider',
           entityId: result.submissionId ?? result.userId,
-          metadata: this.toJson({ provider, event, body, result, updated }),
+          metadata: this.toJson({ provider, event, body, result, verified, updated }),
         },
       });
     } catch {
@@ -119,6 +141,7 @@ export class KycProviderService {
       received: true,
       provider,
       event,
+      verified,
       updated,
       processedAt: new Date().toISOString(),
     };

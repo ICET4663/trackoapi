@@ -1,5 +1,6 @@
 import { Controller, ForbiddenException, Get, Headers } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { timingSafeEqual } from 'crypto';
 import { Public } from '../common/decorators/public.decorator';
 import { ShipmentsService } from './shipments.service';
 
@@ -19,7 +20,7 @@ export class CronController {
   async autoReleaseEscrow(@Headers('authorization') authorization?: string) {
     const expected = this.config.get<string>('CRON_SECRET');
     const presented = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined;
-    if (!expected || presented !== expected) {
+    if (!expected || !presented || !this.secretsMatch(expected, presented)) {
       throw new ForbiddenException('This endpoint is only reachable by the scheduled job.');
     }
 
@@ -28,5 +29,11 @@ export class CronController {
       this.shipments.expireStaleAssignmentOffers(),
     ]);
     return { escrow, assignments, ranAt: new Date().toISOString() };
+  }
+
+  private secretsMatch(expected: string, presented: string) {
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const presentedBuffer = Buffer.from(presented, 'utf8');
+    return expectedBuffer.length === presentedBuffer.length && timingSafeEqual(expectedBuffer, presentedBuffer);
   }
 }
