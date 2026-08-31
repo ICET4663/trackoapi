@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -36,9 +36,18 @@ export class NotificationsService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  // This used to fall back to a fabricated, never-persisted notification on any insert
+  // failure - every caller across the codebase (30+ call sites, most `await`ed with no
+  // .catch()) believed the recipient had been notified when nothing was actually saved,
+  // and it silently never appeared in their real in-app list. create() is deliberately
+  // kept non-throwing here (several callers - see settings.service.ts's emergency-alert
+  // Promise.all - explicitly depend on that contract to avoid a side-effect notification
+  // failure taking down the primary action), but a failure now returns null instead of
+  // fake data. Log the failure so it's actually visible instead of invisible either way.
   async create(input: NotificationInput) {
+    let rows: NotificationRow[];
     try {
-      const rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
+      rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
         `insert into "Notification" ("id", "userId", "role", "title", "body", "tone", "entity", "entityId", "actionUrl")
          values ($1, $2, cast($3 as "UserRole"), $4, $5, cast($6 as "NotificationTone"), $7, $8, $9)
          returning "id", "userId", "role"::text as "role", "title", "body", "tone"::text as "tone", "entity", "entityId", "actionUrl", "readAt", "createdAt"`,
@@ -54,23 +63,22 @@ export class NotificationsService {
         input.entityId ?? null,
         input.actionUrl ?? null,
       );
-      if (rows[0]) {
-        const record = this.toRecord(rows[0]);
-        // Best-effort: registerPushToken() has always stored real device tokens, but
-        // nothing ever actually sent to them - a closed app never got notified of
-        // anything (shipment updates, new messages, dispute resolutions) until the user
-        // happened to reopen it and check the in-app list. Push delivery failing must
-        // never fail notification creation itself, hence the separate try/catch.
-        await this.sendPushNotifications(input).catch((error) => {
-          this.logger.error(`Push delivery failed for notification ${record.id}: ${this.errorMessage(error)}`);
-        });
-        return record;
-      }
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      this.logger.error(`Could not create notification "${input.title}": ${this.errorMessage(error)}`);
+      return null;
+    }
+    if (!rows[0]) {
+      this.logger.error(`Could not create notification "${input.title}": insert returned no row.`);
+      return null;
     }
 
-    return this.previewNotification(input);
+    const record = this.toRecord(rows[0]);
+    // Push delivery failing must never fail notification creation itself - the
+    // notification is already real and in the recipient's in-app list either way.
+    await this.sendPushNotifications(input).catch((error) => {
+      this.logger.error(`Push delivery failed for notification ${record.id}: ${this.errorMessage(error)}`);
+    });
+    return record;
   }
 
   // Expo's push service needs no API key - just the recipient's Expo push token(s), sent
@@ -121,6 +129,11 @@ export class NotificationsService {
     return error instanceof Error ? error.message : String(error);
   }
 
+  // This used to fall back to a single fabricated "Tracko preview is ready" notification
+  // whenever the read failed OR the user genuinely had zero real notifications - the
+  // latter being the normal state for a brand-new account, so most new users saw a fake
+  // notification that never happened. A read failure now surfaces as a real error (the
+  // frontend already wraps this call in try/catch); a genuinely empty list stays empty.
   async list(userId: string, role: UserRole) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
@@ -132,23 +145,16 @@ export class NotificationsService {
         userId,
         role,
       );
-      if (rows.length) return rows.map((row) => this.toRecord(row));
-    } catch {
-      // Preview fallback below.
+      return rows.map((row) => this.toRecord(row));
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load notifications: ${this.errorMessage(error)}`);
     }
-
-    return [
-      this.previewNotification({
-        userId,
-        role,
-        title: 'Tracko preview is ready',
-        body: 'Backend notifications are active in preview mode.',
-        tone: 'SUCCESS',
-        entity: 'System',
-      }),
-    ];
   }
 
+  // Kept non-throwing (this is a frequently-polled badge count, not a mutation) but the
+  // old fallback claimed a permanent phantom "1 unread" on any read error - a badge the
+  // user could never actually clear since it didn't correspond to a real notification.
+  // An honest 0 is a better failure mode: worst case the badge briefly under-reports.
   async unreadCount(userId: string, role: UserRole) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<{ count: bigint }[]>(
@@ -159,14 +165,16 @@ export class NotificationsService {
         role,
       );
       return { unreadCount: Number(rows[0]?.count ?? 0) };
-    } catch {
-      return { unreadCount: 1 };
+    } catch (error) {
+      this.logger.error(`unreadCount() failed, reporting 0 rather than a fake count: ${this.errorMessage(error)}`);
+      return { unreadCount: 0 };
     }
   }
 
   async markRead(id: string, userId: string, role: UserRole) {
+    let rows: NotificationRow[];
     try {
-      const rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
+      rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
         `update "Notification"
          set "readAt" = current_timestamp
          where "id" = $1 and ("userId" = $2 or "role" = cast($3 as "UserRole"))
@@ -175,12 +183,11 @@ export class NotificationsService {
         userId,
         role,
       );
-      if (rows[0]) return this.toRecord(rows[0]);
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not mark this notification as read: ${this.errorMessage(error)}`);
     }
-
-    return { ...this.previewNotification({ title: 'Notification read', body: 'Marked as read.' }), id, readAt: new Date().toISOString() };
+    if (!rows[0]) throw new NotFoundException('Notification not found.');
+    return this.toRecord(rows[0]);
   }
 
   async markAllRead(userId: string, role: UserRole) {
@@ -192,8 +199,8 @@ export class NotificationsService {
         userId,
         role,
       );
-    } catch {
-      // Preview response below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not mark notifications as read: ${this.errorMessage(error)}`);
     }
 
     return { markedRead: true, updatedAt: new Date().toISOString() };
@@ -215,8 +222,11 @@ export class NotificationsService {
         platform ?? null,
         deviceId ?? null,
       );
-    } catch {
-      // Preview response below.
+    } catch (error) {
+      // A push token that silently failed to save meant this device would never receive
+      // push notifications - the caller (registerPushToken screens) needs to know that
+      // instead of being told "registered: true" for a token that isn't actually saved.
+      throw new InternalServerErrorException(`Could not register this device for push notifications: ${this.errorMessage(error)}`);
     }
 
     return {
@@ -244,18 +254,4 @@ export class NotificationsService {
     };
   }
 
-  private previewNotification(input: Partial<NotificationInput>) {
-    return {
-      id: `notification-${Date.now()}`,
-      userId: input.userId,
-      role: input.role,
-      title: input.title ?? 'Tracko notification',
-      body: input.body ?? 'Preview notification.',
-      tone: input.tone ?? 'INFO',
-      entity: input.entity,
-      entityId: input.entityId,
-      actionUrl: input.actionUrl,
-      createdAt: new Date().toISOString(),
-    };
-  }
 }

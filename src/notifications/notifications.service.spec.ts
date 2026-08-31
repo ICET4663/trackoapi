@@ -64,6 +64,73 @@ describe('NotificationsService push delivery', () => {
 
     const result = await service.create({ userId: 'user-1', title: 'Hi', body: 'Body' });
 
-    expect(result.id).toBe('notif-1');
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe('notif-1');
+  });
+});
+
+// create() used to fall back to a fabricated, never-persisted notification on any insert
+// failure - every caller across the codebase believed the recipient had been notified
+// when nothing was actually saved. It's deliberately kept non-throwing (several callers
+// rely on that), but a failure must return null (never fake data) so it's at least honest.
+describe('NotificationsService.create never fakes a persisted notification on failure', () => {
+  it('returns null, not a fake notification, when the insert fails', async () => {
+    const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const service = new NotificationsService({ $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService);
+
+    const result = await service.create({ userId: 'user-1', title: 'Hi', body: 'Body' });
+
+    expect(result).toBeNull();
+  });
+});
+
+// list()/unreadCount()/markRead()/markAllRead()/registerPushToken() used to fall back to
+// fake data (a canned "preview" notification, a phantom "1 unread", a fake "read"
+// confirmation, "registered: true" for a token that was never saved) on any DB failure.
+describe('NotificationsService other methods never fake success on failure', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    return new NotificationsService({ $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService);
+  }
+
+  it('list() throws a real error instead of a fake preview notification when the read fails', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.list('user-1', 'CUSTOMER')).rejects.toThrow();
+  });
+
+  it('list() returns a genuinely empty list, not a fake notification, when there are none', async () => {
+    const service = buildService(jest.fn().mockResolvedValue([]));
+
+    expect(await service.list('user-1', 'CUSTOMER')).toEqual([]);
+  });
+
+  it('unreadCount() returns an honest 0, not the old fake "1", on a read failure', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    expect(await service.unreadCount('user-1', 'CUSTOMER')).toEqual({ unreadCount: 0 });
+  });
+
+  it('markRead() throws instead of a fake "read" confirmation when the update fails', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.markRead('notif-1', 'user-1', 'CUSTOMER')).rejects.toThrow();
+  });
+
+  it('markRead() throws NotFoundException instead of fake success for a notification that is not theirs', async () => {
+    const service = buildService(jest.fn().mockResolvedValue([]));
+
+    await expect(service.markRead('notif-1', 'user-1', 'CUSTOMER')).rejects.toThrow('not found');
+  });
+
+  it('markAllRead() throws instead of silently claiming success when the update fails', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.markAllRead('user-1', 'CUSTOMER')).rejects.toThrow();
+  });
+
+  it('registerPushToken() throws instead of claiming "registered: true" when the insert fails', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.registerPushToken('user-1', 'ExponentPushToken[aaa]')).rejects.toThrow();
   });
 });
