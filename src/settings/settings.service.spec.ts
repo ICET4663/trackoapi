@@ -1,4 +1,4 @@
-import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { SettingsService } from './settings.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -576,5 +576,123 @@ describe('SettingsService.updatePreferredLanguage', () => {
 
     expect(userUpdate).toHaveBeenCalledWith({ where: { id: 'user-1' }, data: { preferredLanguage: 'yo' } });
     expect(result).toEqual({ preferredLanguage: 'yo' });
+  });
+});
+
+// profile()/updateProfile() used to fall back to a fake identity - hardcoded name
+// "Tracko Preview User", email customer@tracko.ng, phone +234 800 000 0000, and a fake
+// "VERIFIED" status belonging to nobody - on any DB read failure or a genuinely-missing
+// user row. A real authenticated user could see someone else's fake identity on their
+// own Personal Details screen.
+describe('SettingsService.profile never fakes a user\'s own identity', () => {
+  function buildService(userFindUnique: jest.Mock) {
+    const prisma = { user: { findUnique: userFindUnique } } as unknown as PrismaService;
+    const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
+    return { service };
+  }
+
+  it('throws a real error instead of a fake identity when the read fails', async () => {
+    const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.profile('user-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('throws NotFoundException instead of a fake identity when the user row is missing', async () => {
+    const { service } = buildService(jest.fn().mockResolvedValue(null));
+
+    await expect(service.profile('user-1')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('returns the real profile on success', async () => {
+    const { service } = buildService(jest.fn().mockResolvedValue({
+      id: 'user-1', email: 'real@user.com', phone: '+2348000000001', role: 'CUSTOMER', verificationStatus: 'PENDING',
+      profile: { fullName: 'Real Name', address: null, city: null, state: null, avatarUrl: null },
+    }));
+
+    const result = await service.profile('user-1');
+
+    expect(result).toMatchObject({ fullName: 'Real Name', email: 'real@user.com', verificationStatus: 'PENDING' });
+  });
+});
+
+// This was a genuinely serious bug, not just fake preview data: the DriverDocument
+// primary key used to be the bare type slug ("license"/"insurance") with no per-user
+// scoping, so two different drivers uploading the same document type collided on the
+// same row via `on conflict ("id")` - the second upload silently overwrote the first
+// driver's file/review state while the row stayed attributed to the FIRST driver.
+describe('SettingsService driver document uploads are correctly scoped per driver', () => {
+  it('computes a per-user database id, never the bare type slug, for the upload', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue(undefined);
+    const prisma = { $queryRawUnsafe: queryRawUnsafe, auditLog: { create: jest.fn().mockResolvedValue(undefined) } } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      { create: jest.fn().mockResolvedValue({ id: 'n1' }) } as unknown as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+
+    await service.uploadDriverDocument('driver-A', 'license', { fileUrl: 'https://example.com/a.jpg' });
+    await service.uploadDriverDocument('driver-B', 'license', { fileUrl: 'https://example.com/b.jpg' });
+
+    const idsUsed = queryRawUnsafe.mock.calls.map((call) => call[1]);
+    expect(idsUsed).toEqual(['driver-A_license', 'driver-B_license']);
+    expect(idsUsed[0]).not.toBe(idsUsed[1]);
+  });
+
+  it('driverDocuments() returns an honest "missing" row per required type, not fake verified data, before any upload', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
+
+    const result = await service.driverDocuments('driver-A');
+
+    expect(result).toEqual([
+      { id: 'license', title: 'Driver license', meta: 'Upload required', state: 'missing' },
+      { id: 'insurance', title: 'Insurance certificate', meta: 'Upload required', state: 'missing' },
+    ]);
+  });
+
+  it('driverDocuments() maps a real row back to its bare type slug, scoped to the correct driver only', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([
+      { id: 'driver-A_license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'https://example.com/a.jpg' },
+    ]);
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
+
+    const result = await service.driverDocuments('driver-A');
+
+    expect(result[0]).toMatchObject({ id: 'license', state: 'pending_review', fileUrl: 'https://example.com/a.jpg' });
+    expect(result[1]).toMatchObject({ id: 'insurance', state: 'missing' });
+  });
+});
+
+describe('SettingsService saved addresses never fake success', () => {
+  function buildService(queryRawUnsafe: jest.Mock) {
+    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
+    return { service };
+  }
+
+  it('savedAddresses() throws instead of 2 fake hardcoded addresses on a read failure', async () => {
+    const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.savedAddresses('customer-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('saveAddress() throws instead of echoing back the submitted input as "saved" when the insert fails', async () => {
+    const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.saveAddress({ label: 'Home', city: 'Lagos' }, undefined, 'customer-1'))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('saveAddress() returns the real saved row on success', async () => {
+    const { service } = buildService(jest.fn().mockResolvedValue([
+      { id: 'addr-1', label: 'Home', line: 'Lekki', city: 'Lagos', address: null, icon: null, isDefaultPickup: false },
+    ]));
+
+    const result = await service.saveAddress({ label: 'Home', city: 'Lagos' }, undefined, 'customer-1');
+
+    expect(result).toMatchObject({ id: 'addr-1', label: 'Home' });
   });
 });

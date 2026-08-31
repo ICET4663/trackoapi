@@ -259,32 +259,42 @@ export class SettingsService {
     };
   }
 
-  async profile(userId = 'preview-user') {
+  // This used to fall back to a fake identity - a hardcoded name/email/phone/verification
+  // status ("Tracko Preview User", VERIFIED) belonging to nobody - on any DB read failure
+  // or a genuinely-missing user row. A real authenticated user could see someone else's
+  // (fake) name and a fake "VERIFIED" status on their own Personal Details screen.
+  async profile(userId: string) {
+    let user;
     try {
-      const user = await this.prisma.user.findUnique({
+      user = await this.prisma.user.findUnique({
         where: { id: userId },
         include: { profile: true },
       });
-      if (user) return this.toProfileRecord(user);
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load your profile. Please try again: ${this.errorMessage(error)}`);
     }
-
-    return this.previewProfile(userId);
+    if (!user) throw new NotFoundException('Account not found.');
+    return this.toProfileRecord(user);
   }
 
+  // Same bug as profile() above, plus this is a WRITE: on any failure after the update
+  // was attempted, this used to echo the submitted input straight back as if it had been
+  // saved - the user saw their new name/address/avatar "succeed" even when nothing was
+  // actually persisted, and the real (unchanged) data would reappear on next real fetch.
   async updateProfile(userId: string, input: Record<string, unknown>) {
+    const current = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { profile: true },
+    }).catch((error) => {
+      throw new InternalServerErrorException(`Could not load your profile. Please try again: ${this.errorMessage(error)}`);
+    });
+    if (!current) throw new NotFoundException('Account not found.');
+
+    const fullName = String(input.fullName ?? current.profile?.fullName ?? current.email).trim();
+    const address = input.address === undefined ? current.profile?.address : input.address ? String(input.address) : null;
+    const avatarUrl = input.avatarUrl === undefined ? current.profile?.avatarUrl : input.avatarUrl ? String(input.avatarUrl) : null;
+
     try {
-      const current = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: { profile: true },
-      });
-      if (!current) return { ...this.previewProfile(userId), ...input };
-
-      const fullName = String(input.fullName ?? current.profile?.fullName ?? current.email).trim();
-      const address = input.address === undefined ? current.profile?.address : input.address ? String(input.address) : null;
-      const avatarUrl = input.avatarUrl === undefined ? current.profile?.avatarUrl : input.avatarUrl ? String(input.avatarUrl) : null;
-
       await this.prisma.profile.upsert({
         where: { userId },
         create: {
@@ -299,21 +309,21 @@ export class SettingsService {
           avatarUrl,
         },
       });
-
-      await this.prisma.auditLog.create({
-        data: {
-          actorId: userId,
-          action: 'ACCOUNT_PROFILE_UPDATED',
-          entity: 'User',
-          entityId: userId,
-          metadata: { fields: Object.keys(input).filter((key) => key !== 'avatarUrl') },
-        },
-      }).catch(() => null);
-
-      return this.profile(userId);
-    } catch {
-      return { ...this.previewProfile(userId), ...input };
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not save your profile. Please try again: ${this.errorMessage(error)}`);
     }
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: 'ACCOUNT_PROFILE_UPDATED',
+        entity: 'User',
+        entityId: userId,
+        metadata: { fields: Object.keys(input).filter((key) => key !== 'avatarUrl') },
+      },
+    }).catch(() => null);
+
+    return this.profile(userId);
   }
 
   async requestAccountDeletion(userId: string, input: { reason?: string }) {
@@ -463,16 +473,6 @@ export class SettingsService {
       city: user.profile?.city ?? undefined,
       state: user.profile?.state ?? undefined,
       avatarUrl: user.profile?.avatarUrl ?? undefined,
-    };
-  }
-
-  private previewProfile(userId: string) {
-    return {
-      id: userId,
-      fullName: 'Tracko Preview User',
-      email: 'customer@tracko.ng',
-      phone: '+234 800 000 0000',
-      verificationStatus: 'VERIFIED',
     };
   }
 
@@ -878,56 +878,41 @@ export class SettingsService {
     };
   }
 
-  async savedAddresses(userId = 'preview-customer') {
+  // This used to fall back to 2 fake hardcoded addresses ("Home" - Lekki Phase 1, "Office"
+  // - Victoria Island) whenever the read failed OR the customer genuinely had zero saved
+  // addresses yet - the normal state before ever adding one. A customer could pick one of
+  // these fake addresses for a real shipment pickup/destination.
+  async savedAddresses(userId: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
+      return await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
         'select "id", "label", "line", "city", "address", "icon", "isDefaultPickup" from "SavedAddress" where "userId" = $1 order by "isDefaultPickup" desc, "createdAt" desc limit 50',
         userId,
       );
-      if (rows.length) return rows;
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load saved addresses: ${this.errorMessage(error)}`);
     }
-
-    return [
-      {
-        id: 'addr-home',
-        label: 'Home',
-        line: 'Lekki Phase 1',
-        city: 'Lagos',
-        address: 'Lekki Phase 1, Lagos',
-        icon: 'home',
-        isDefaultPickup: true,
-      },
-      {
-        id: 'addr-office',
-        label: 'Office',
-        line: 'Victoria Island',
-        city: 'Lagos',
-        address: 'Victoria Island, Lagos',
-        icon: 'business',
-      },
-    ];
   }
 
-  async savedAddress(id: string, userId = 'preview-customer') {
+  async savedAddress(id: string, userId: string) {
+    let rows: SavedAddressRecord[];
     try {
-      const rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
+      rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
         'select "id", "label", "line", "city", "address", "icon", "isDefaultPickup" from "SavedAddress" where "id" = $1 and "userId" = $2 limit 1',
         id,
         userId,
       );
-      if (rows[0]) return rows[0];
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load this address: ${this.errorMessage(error)}`);
     }
-
-    const preview = await this.savedAddresses(userId);
-    return preview.find((address: { id: string }) => address.id === id) ?? { id, label: 'Saved address', line: '', city: '' };
+    if (!rows[0]) throw new NotFoundException('Saved address not found.');
+    return rows[0];
   }
 
-  async saveAddress(input: Record<string, unknown>, id?: string, userId = 'preview-customer') {
-    const addressId = id ?? `addr-${Date.now()}`;
+  // Was faking success on any insert/update failure by echoing the submitted input
+  // straight back - the customer saw their new address "saved" when it never was, and it
+  // would silently vanish (revert to whatever was really in the DB) on the next real fetch.
+  async saveAddress(input: Record<string, unknown>, id: string | undefined, userId: string) {
+    const addressId = id ?? `addr_${randomUUID().replace(/-/g, '')}`;
     try {
       const rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
         `insert into "SavedAddress" ("id", "userId", "label", "line", "city", "address", "icon", "isDefaultPickup", "updatedAt")
@@ -950,37 +935,26 @@ export class SettingsService {
         input.icon ? String(input.icon) : null,
         Boolean(input.isDefaultPickup),
       );
-      if (rows[0]) return rows[0];
-    } catch {
-      // Preview fallback below.
+      if (!rows[0]) throw new Error('Insert returned no row.');
+      return rows[0];
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not save this address. Please try again: ${this.errorMessage(error)}`);
     }
-
-    return { id: addressId, ...input };
   }
 
-  async paymentMethods(userId = 'preview-customer') {
+  // Was faking a "Visa **** 4242, Preview card" payment method whenever the read failed
+  // OR the customer had zero saved cards yet (the normal state before their first real
+  // Paystack charge, since a card is only saved after a successful charge - see
+  // savePaymentMethodFromAuthorization in payment-provider.service.ts).
+  async paymentMethods(userId: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<PaymentMethodRecord[]>(
+      return await this.prisma.$queryRawUnsafe<PaymentMethodRecord[]>(
         'select "id", "brand", "maskedNumber", "detail", "type", "isDefault", "expiry", "holderName" from "PaymentMethod" where "userId" = $1 order by "isDefault" desc, "createdAt" desc',
         userId,
       );
-      if (rows.length) return rows;
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load payment methods: ${this.errorMessage(error)}`);
     }
-
-    return [
-      {
-        id: 'pm-preview',
-        brand: 'Visa',
-        maskedNumber: '**** 4242',
-        detail: 'Preview card',
-        type: 'CARD',
-        isDefault: true,
-        expiry: '12/29',
-        holderName: 'Tracko Preview User',
-      },
-    ];
   }
 
   async paymentMethod(id: string, userId = 'preview-customer') {
@@ -1456,34 +1430,63 @@ export class SettingsService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 
-  async driverDocuments(userId = 'preview-driver') {
-    try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string; reviewNote?: string | null }[]
-      >(
-        'select "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl", "reviewNote" from "DriverDocument" where "userId" = $1 order by "createdAt" desc',
-        userId,
-      );
-      if (rows.length) {
-        return rows.map((row) => ({
-          ...row,
-          issued: row.issued?.toISOString?.(),
-          expires: row.expires?.toISOString?.(),
-        }));
-      }
-    } catch {
-      // Preview fallback below.
-    }
+  private readonly requiredDriverDocuments = [
+    { type: 'license', title: 'Driver license' },
+    { type: 'insurance', title: 'Insurance certificate' },
+  ] as const;
 
-    return [
-      { id: 'license', title: 'Driver license', meta: 'Valid until Dec 2027', state: 'verified', expires: '2027-12-31' },
-      { id: 'insurance', title: 'Vehicle insurance', meta: 'Upload required', state: 'missing' },
-    ];
+  // driverDbId() used to be the type slug ("license"/"insurance") ITSELF, used directly
+  // as DriverDocument's primary key - which is global across every driver, not scoped to
+  // one. Two different drivers uploading a "license" collided on the same row via
+  // `on conflict ("id")`: the second upload silently overwrote the first driver's file
+  // and review state while the row's userId stayed the FIRST driver's - so driver A's
+  // document list could show driver B's actual uploaded photo/ID under driver A's name,
+  // and driver B's own upload would appear to have vanished (their own query, scoped by
+  // their own userId, would never find the row). Scoping the key per user fixes this.
+  private driverDocumentDbId(userId: string, type: string) {
+    return `${userId}_${type}`;
   }
 
-  async driverDocument(id: string, userId = 'preview-driver') {
+  // This used to fall back to 2 fake documents - "Driver license: Verified, valid until
+  // Dec 2027" and "Vehicle insurance: missing" - whenever the read failed OR (the normal
+  // state for every driver before their first upload, since nothing is pre-seeded) there
+  // were genuinely zero real rows yet. A driver could believe their license was already
+  // verified when they had never uploaded anything. Mirrors vehicleDocuments()'s honest
+  // per-type default below instead: a real "missing" row for anything not yet uploaded,
+  // never a fabricated "verified".
+  async driverDocuments(userId: string) {
+    const rows = await this.prisma.$queryRawUnsafe<
+      { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string; reviewNote?: string | null }[]
+    >(
+      'select "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl", "reviewNote" from "DriverDocument" where "userId" = $1 order by "createdAt" desc',
+      userId,
+    ).catch((error) => {
+      throw new InternalServerErrorException(`Could not load driver documents: ${this.errorMessage(error)}`);
+    });
+
+    const byDbId = new Map(rows.map((row) => [row.id, row]));
+    return this.requiredDriverDocuments.map(({ type, title }) => {
+      const row = byDbId.get(this.driverDocumentDbId(userId, type));
+      if (!row) return { id: type, title, meta: 'Upload required', state: 'missing' as const };
+      return {
+        id: type,
+        title: row.title,
+        meta: row.meta,
+        state: row.state,
+        issued: row.issued?.toISOString?.(),
+        expires: row.expires?.toISOString?.(),
+        number: row.number,
+        fileUrl: row.fileUrl,
+        reviewNote: row.reviewNote,
+      };
+    });
+  }
+
+  async driverDocument(id: string, userId: string) {
     const documents = await this.driverDocuments(userId);
-    return documents.find((document: { id: string }) => document.id === id) ?? { id, title: 'Document', meta: 'Preview', state: 'missing' };
+    const document = documents.find((doc) => doc.id === id);
+    if (!document) throw new NotFoundException('Document not found.');
+    return document;
   }
 
   async uploadDriverDocument(
@@ -1503,9 +1506,7 @@ export class SettingsService {
       .join(' ') || 'Driver document';
 
     try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        { id: string; title: string; meta: string; state: string; issued?: Date; expires?: Date; number?: string; fileUrl?: string }[]
-      >(
+      await this.prisma.$queryRawUnsafe(
         `insert into "DriverDocument" ("id", "userId", "title", "meta", "state", "expires", "number", "fileUrl", "updatedAt")
          values ($1, $2, $3, $4, 'PENDING_REVIEW'::"DriverDocumentState", $5, $6, $7, current_timestamp)
          on conflict ("id") do update
@@ -1517,9 +1518,8 @@ export class SettingsService {
              "reviewNote" = null,
              "reviewedAt" = null,
              "reviewedById" = null,
-             "updatedAt" = current_timestamp
-         returning "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl"`,
-        id,
+             "updatedAt" = current_timestamp`,
+        this.driverDocumentDbId(userId, id),
         userId,
         title,
         input.meta ?? 'Uploaded - pending review',
@@ -1533,7 +1533,7 @@ export class SettingsService {
           actorId: userId,
           action: 'DRIVER_DOCUMENT_UPLOADED',
           entity: 'DriverDocument',
-          entityId: id,
+          entityId: this.driverDocumentDbId(userId, id),
           metadata: { fileUrl, number: input.number ?? null, expires: input.expires ?? null },
         },
       }).catch(() => null);
@@ -1544,14 +1544,14 @@ export class SettingsService {
         body: `${title} was uploaded and needs review.`,
         tone: 'WARNING',
         entity: 'DriverDocument',
-        entityId: id,
+        entityId: this.driverDocumentDbId(userId, id),
         actionUrl: '/admin/driver-documents',
       });
 
       return {
         uploaded: true,
         message: 'Driver document uploaded for review.',
-        document: rows[0] ?? { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'pending_review', fileUrl },
+        document: { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'pending_review', fileUrl },
       };
     } catch (error) {
       // The insert IS the upload - a driver who believes their license photo was saved
@@ -1777,22 +1777,31 @@ export class SettingsService {
     return vehicle;
   }
 
-  async safetySettings(userId = 'preview-driver') {
+  // A real read failure used to be indistinguishable from "no row yet" (the normal state
+  // before a driver has ever touched a safety toggle) - both fell back to the same fake
+  // defaults, including a fabricated emergencyContact phone number that was never
+  // actually theirs. A read failure now throws; "no row yet" still returns real column
+  // defaults for the booleans (matches SafetySettings' actual schema defaults - this
+  // isn't faking data, it's what a fresh row would genuinely contain), but an honest
+  // `null` for emergencyContact instead of inventing one.
+  async safetySettings(userId: string) {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
+      const rows = await this.prisma.$queryRawUnsafe<
+        { availableForAssignments: boolean; shareLiveTripLocation: boolean; nightDrivingCheckIns: boolean; emergencyContact: string | null }[]
+      >(
         'select "availableForAssignments", "shareLiveTripLocation", "nightDrivingCheckIns", "emergencyContact" from "SafetySettings" where "userId" = $1 limit 1',
         userId,
       );
       if (rows[0]) return rows[0];
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load safety settings: ${this.errorMessage(error)}`);
     }
 
     return {
       availableForAssignments: true,
       shareLiveTripLocation: true,
       nightDrivingCheckIns: true,
-      emergencyContact: '+234 800 000 0000',
+      emergencyContact: null,
     };
   }
 
