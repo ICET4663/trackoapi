@@ -499,3 +499,56 @@ describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that di
     expect(queryRawUnsafe).not.toHaveBeenCalled();
   });
 });
+
+// addTimelineEvent() is the actual mechanism a shipment progresses through its whole trip
+// lifecycle (pickup, in transit, arrived, delivered). It used to fall back to a
+// fabricated timeline entry claiming the shipment had advanced on ANY failure of either
+// the timeline insert or the shipment status update - the UI could show "delivered" while
+// the real shipment row silently stayed at its old status.
+describe('ShipmentsService.addTimelineEvent never fakes a status change on failure', () => {
+  const shipmentRow = { id: 'shp-1', customerId: 'customer-1', status: 'ASSIGNED', assignments: [] };
+
+  function buildService(queryRawUnsafe: jest.Mock, executeRawUnsafe: jest.Mock) {
+    const prisma = {
+      shipment: { findUnique: jest.fn().mockResolvedValue(shipmentRow) },
+      $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: executeRawUnsafe,
+    } as unknown as PrismaService;
+    return new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+  }
+
+  it('throws a real error instead of a fake timeline entry when the insert fails', async () => {
+    const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')), jest.fn());
+
+    await expect(service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED' }))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('throws a real error instead of a fake timeline entry when the shipment status update fails', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'tl-1', status: 'DELIVERED', note: null, createdAt: new Date() }]);
+    const executeRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const service = buildService(queryRawUnsafe, executeRawUnsafe);
+
+    await expect(service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED' }))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('returns the real timeline entry on genuine success', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'tl-1', status: 'DELIVERED', note: 'Delivered to recipient', createdAt: new Date() }]);
+    const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
+    const service = buildService(queryRawUnsafe, executeRawUnsafe);
+
+    const result = await service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED', note: 'Delivered to recipient' });
+
+    expect(result.status).toBe('DELIVERED');
+  });
+
+  it('still enforces access control before touching the database', async () => {
+    const queryRawUnsafe = jest.fn();
+    const service = buildService(queryRawUnsafe, jest.fn());
+
+    await expect(service.addTimelineEvent('shp-1', 'someone-else', 'CUSTOMER', { status: 'DELIVERED' }))
+      .rejects.toThrow('do not have access');
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
+});
