@@ -86,22 +86,36 @@ export class DeploymentConfigService {
   // place blocking every cold start for a non-critical status check).
   async emailDomainStatus(): Promise<{
     checked: boolean;
+    keyConfigured: boolean;
     verifiedDomains: string[];
     pendingDomains: string[];
     message: string;
   }> {
     const apiKey = this.config.get<string>('RESEND_API_KEY');
     if (!apiKey) {
-      return { checked: false, verifiedDomains: [], pendingDomains: [], message: 'RESEND_API_KEY is not set.' };
+      return { checked: false, keyConfigured: false, verifiedDomains: [], pendingDomains: [], message: 'RESEND_API_KEY is not set.' };
     }
 
     try {
       const response = await fetch('https://api.resend.com/domains', {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
-      const payload = (await response.json().catch(() => null)) as { data?: { name: string; status: string }[] } | null;
+      const payload = (await response.json().catch(() => null)) as { data?: { name: string; status: string }[]; message?: string } | null;
       if (!response.ok || !payload?.data) {
-        return { checked: false, verifiedDomains: [], pendingDomains: [], message: `Resend API returned ${response.status}.` };
+        // 401/403 here does NOT mean sending is broken - Resend API keys can be scoped to
+        // "Sending access" only, which can call /emails just fine but is refused on
+        // /domains. Don't conflate "key exists but can't check domains" with "no key at
+        // all" (the emailDomainStatus caller distinguishes these via keyConfigured).
+        const scopeHint = response.status === 401 || response.status === 403
+          ? ' This usually means the API key is scoped to "Sending access" only (not "Full access") - sending OTP emails may still work fine; create a Full Access key (or a second one) to let this check actually see domain status.'
+          : '';
+        return {
+          checked: false,
+          keyConfigured: true,
+          verifiedDomains: [],
+          pendingDomains: [],
+          message: `Resend API returned ${response.status}${payload?.message ? ` (${payload.message})` : ''}.${scopeHint}`,
+        };
       }
 
       const verifiedDomains = payload.data.filter((domain) => domain.status === 'verified').map((domain) => domain.name);
@@ -111,9 +125,9 @@ export class DeploymentConfigService {
         : pendingDomains.length
           ? `${pendingDomains.join(', ')} added but not yet verified - still sandbox-only (your own inbox) until DNS records are confirmed.`
           : 'No domain added yet in Resend - still sandbox-only (your own inbox).';
-      return { checked: true, verifiedDomains, pendingDomains, message };
+      return { checked: true, keyConfigured: true, verifiedDomains, pendingDomains, message };
     } catch (error) {
-      return { checked: false, verifiedDomains: [], pendingDomains: [], message: error instanceof Error ? error.message : String(error) };
+      return { checked: false, keyConfigured: true, verifiedDomains: [], pendingDomains: [], message: error instanceof Error ? error.message : String(error) };
     }
   }
 

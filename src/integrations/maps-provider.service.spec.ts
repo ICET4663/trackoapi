@@ -113,7 +113,15 @@ describe('MapsProviderService route pricing', () => {
     const service = createService();
     const quote = await service.routeEstimate(routeInput);
     const [payload, signature] = quote.quoteToken.split('.');
-    const tampered = `${payload}.${signature.slice(0, -1)}${signature.endsWith('a') ? 'b' : 'a'}`;
+    // Flipping the FIRST character, not the last: a base64url-encoded 32-byte HMAC-SHA256
+    // digest is 43 characters, and the final character always carries 2 "don't care"
+    // padding bits (256 bits doesn't divide evenly by 6 bits/char) - flipping between two
+    // specific characters there (this used to flip only between 'a' and 'b', which differ
+    // solely in that padding-bit position) can decode to byte-IDENTICAL signatures despite
+    // being a different string, making the tamper a no-op and this test flaky. The first
+    // character is always fully bit-significant, so changing it always changes real bytes.
+    const tamperedFirstChar = signature[0] === 'a' ? 'b' : 'a';
+    const tampered = `${payload}.${tamperedFirstChar}${signature.slice(1)}`;
 
     expect(() => service.verifyQuoteToken(tampered, routeInput)).toThrow('quote is invalid');
   });

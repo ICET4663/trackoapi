@@ -18,7 +18,28 @@ describe('DeploymentConfigService.emailDomainStatus', () => {
     const result = await service.emailDomainStatus();
 
     expect(result.checked).toBe(false);
+    expect(result.keyConfigured).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Observed live: a real Resend API key that's scoped to "Sending access" only (Resend's
+  // more restrictive option) can send emails fine via /emails but gets a 401 from
+  // /domains. That must not be reported the same as "no key configured at all" - sending
+  // may well already work.
+  it('distinguishes "key exists but domain check was refused" from "no key at all"', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ message: 'This API key is restricted to only send emails' }),
+    }) as never;
+    const service = buildService('re_fake_key');
+
+    const result = await service.emailDomainStatus();
+
+    expect(result.checked).toBe(false);
+    expect(result.keyConfigured).toBe(true);
+    expect(result.message).toContain('401');
+    expect(result.message).toContain('Sending access');
   });
 
   it('reports a verified domain when Resend confirms one', async () => {

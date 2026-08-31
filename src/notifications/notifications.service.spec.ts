@@ -9,11 +9,14 @@ describe('NotificationsService push delivery', () => {
   let queryRawUnsafe: jest.Mock;
   let service: NotificationsService;
   let fetchMock: jest.Mock;
+  const originalFetch = global.fetch;
 
   const notificationRow = {
     id: 'notif-1', userId: 'user-1', role: null, title: 'Hi', body: 'Body', tone: 'INFO',
     entity: null, entityId: null, actionUrl: null, readAt: null, createdAt: new Date(),
   };
+
+  afterEach(() => { global.fetch = originalFetch; });
 
   beforeEach(() => {
     queryRawUnsafe = jest.fn();

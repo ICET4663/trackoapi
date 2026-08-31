@@ -81,7 +81,9 @@ export class DemoReadinessController {
         ],
       },
       email: {
-        status: email.checked ? (email.verifiedDomains.length ? 'domain_verified' : 'sandbox_only') : 'not_configured',
+        status: email.checked
+          ? (email.verifiedDomains.length ? 'domain_verified' : 'sandbox_only')
+          : (email.keyConfigured ? 'domain_check_failed' : 'not_configured'),
         provider: this.integrationMode(deployment.integrations, 'email'),
         verifiedDomains: email.verifiedDomains,
         pendingDomains: email.pendingDomains,
