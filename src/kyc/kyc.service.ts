@@ -625,8 +625,15 @@ export class KycService {
     return `${prefix}_${randomUUID().replace(/-/g, '')}`;
   }
 
+  // Deliberately requires the explicit flag only - never falls back to "NODE_ENV isn't
+  // production" (same principle already applied to exposeDevOtp() in auth.service.ts).
+  // NODE_ENV being merely unset/misconfigured on a real deployment would otherwise be
+  // enough to make every one of the 6 call sites below silently fake a KYC submission,
+  // review, or admin approve/reject decision on any DB error instead of surfacing it -
+  // for decide() specifically, an admin could believe they'd rejected a fraudulent
+  // submission when nothing was actually persisted.
   private previewEnabled() {
-    return this.config.get<string>('ENABLE_PREVIEW_AUTH') === 'true' || this.config.get<string>('NODE_ENV') !== 'production';
+    return this.config.get<string>('ENABLE_PREVIEW_AUTH') === 'true';
   }
 
   private previewSubmission(userId: string, role: UserRole) {
