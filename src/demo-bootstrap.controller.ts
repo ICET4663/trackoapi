@@ -2,6 +2,7 @@ import { Body, Controller, ForbiddenException, Headers, Post } from '@nestjs/com
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import { timingSafeEqual } from 'crypto';
 import { Public } from './common/decorators/public.decorator';
 import { PrismaService } from './prisma/prisma.service';
 
@@ -31,7 +32,7 @@ export class DemoBootstrapController {
   @Public()
   async bootstrapStaff(@Headers('x-bootstrap-secret') secret: string | undefined, @Body() body: StaffInput) {
     const expected = this.config.get<string>('DEMO_BOOTSTRAP_SECRET');
-    if (!expected || secret !== expected) {
+    if (!expected || !secret || !this.secretsMatch(expected, secret)) {
       throw new ForbiddenException('Demo bootstrap is not enabled.');
     }
 
@@ -152,6 +153,16 @@ export class DemoBootstrapController {
       },
     });
 
+    await this.setupVehicle(driverId);
+  }
+
+  private secretsMatch(expected: string, presented: string) {
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const presentedBuffer = Buffer.from(presented, 'utf8');
+    return expectedBuffer.length === presentedBuffer.length && timingSafeEqual(expectedBuffer, presentedBuffer);
+  }
+
+  private async setupVehicle(driverId: string) {
     await this.prisma.vehicle.upsert({
       where: { plateNumber: 'TRK-DRV-01' },
       update: {
