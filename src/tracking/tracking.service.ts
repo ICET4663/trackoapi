@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -76,10 +76,15 @@ export class TrackingService {
 
       if (rows[0]) return this.toLocation(rows[0]);
     } catch {
-      // Preview fallback below.
+      // A real infra failure falls through to the honest "no location yet" below too.
     }
 
-    return this.previewLocation(shipmentId);
+    // This used to fabricate a fixed Lagos coordinate here - so a customer/dispatcher
+    // watching this shipment before the driver had ever sent a real GPS ping saw a truck
+    // marker sitting at a location nothing actually reported. Every caller (track.tsx,
+    // live-map.tsx) already handles null/empty correctly - it just never got the honest
+    // "no ping yet" signal.
+    return null;
   }
 
   async locationHistory(shipmentId: string, user: AuthUser) {
@@ -108,10 +113,12 @@ export class TrackingService {
 
       if (rows.length) return rows.map((row) => this.toLocation(row));
     } catch {
-      // Preview fallback below.
+      // A real infra failure falls through to the honest empty list below too.
     }
 
-    return [this.previewLocation(shipmentId)];
+    // Same fabricated-Lagos-coordinate bug as currentLocation() above, for the route
+    // trail - an honest empty list, not an invented single-point "route".
+    return [];
   }
 
   async recordLocation(shipmentId: string, user: AuthUser, input: LocationInput) {
@@ -122,26 +129,30 @@ export class TrackingService {
     const latitude = Number(input.latitude ?? 6.5244);
     const longitude = Number(input.longitude ?? 3.3792);
 
+    // This used to echo the submitted coordinates straight back as a fake "saved" ping
+    // whenever the INSERT failed - so a driver's GPS trail could silently stop being
+    // recorded (DB error, connection drop) while the driver-side reporter, the pickup
+    // confirmation flow, and the trip-stage-advance flow all believed every ping saved
+    // fine. A location that wasn't actually saved must surface as a real error.
+    let rows: {
+      id: string;
+      shipmentId: string;
+      driverId: string | null;
+      latitude: number;
+      longitude: number;
+      heading: number | null;
+      speedKph: number | null;
+      note: string | null;
+      createdAt: Date;
+    }[];
     try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        {
-          id: string;
-          shipmentId: string;
-          driverId: string | null;
-          latitude: number;
-          longitude: number;
-          heading: number | null;
-          speedKph: number | null;
-          note: string | null;
-          createdAt: Date;
-        }[]
-      >(
+      rows = await this.prisma.$queryRawUnsafe(
         `insert into "ShipmentLocationPing" ("id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note")
          values ($1, $2, $3, $4, $5, $6, $7, $8)
          returning "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"`,
         // "id" has no database-level default (Prisma's @default(cuid()) is client-side
         // only) - this raw insert must generate its own, or every location ping ever
-        // sent silently fails and falls back to a fake preview location.
+        // sent silently fails.
         `ping_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         driverId.startsWith('preview-') ? null : driverId,
@@ -151,39 +162,40 @@ export class TrackingService {
         input.speedKph ?? null,
         input.note ?? null,
       );
-
-      if (rows[0]) return this.toLocation(rows[0]);
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not record this location. Please try again: ${this.errorMessage(error)}`);
     }
 
-    return this.previewLocation(shipmentId, {
-      driverId,
-      latitude,
-      longitude,
-      heading: input.heading,
-      speedKph: input.speedKph,
-      note: input.note,
-    });
+    if (!rows[0]) throw new InternalServerErrorException('Could not record this location. Please try again.');
+    return this.toLocation(rows[0]);
   }
 
   async submitDeliveryProof(shipmentId: string, user: AuthUser, input: DeliveryProofInput) {
     shipmentId = await this.assertShipmentAccess(shipmentId, user);
     const driverId = user.sub;
+
+    // This used to wrap the real proof insert, the shipment's DELIVERED transition, the
+    // Escrow proofOfDeliveryUploaded flip, AND the two best-effort notifications in one
+    // try/catch - so ANY failure among them, including just a notification hiccup after
+    // everything else had already saved, fell back to a fabricated "SUBMITTED" proof
+    // signed by "Preview recipient". A driver could believe delivery proof was recorded
+    // while nothing was actually saved: the shipment never moved to DELIVERED, escrow's
+    // release checklist never advanced, and the driver could go unpaid with no error ever
+    // surfaced. The core write now fails loudly; notifications stay best-effort after it.
+    let rows: {
+      id: string;
+      shipmentId: string;
+      driverId: string | null;
+      photoUrl: string | null;
+      signatureUrl: string | null;
+      recipientName: string | null;
+      note: string | null;
+      status: string;
+      submittedAt: Date;
+    }[];
+    let customerId: string;
     try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        {
-          id: string;
-          shipmentId: string;
-          driverId: string | null;
-          photoUrl: string | null;
-          signatureUrl: string | null;
-          recipientName: string | null;
-          note: string | null;
-          status: string;
-          submittedAt: Date;
-        }[]
-      >(
+      rows = await this.prisma.$queryRawUnsafe(
         `insert into "DeliveryProof" ("id", "shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status")
          values ($1, $2, $3, $4, $5, $6, $7, 'SUBMITTED'::"ProofStatus")
          returning "id", "shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status"::text as "status", "submittedAt"`,
@@ -198,6 +210,7 @@ export class TrackingService {
         input.recipientName ?? null,
         input.note ?? null,
       );
+      if (!rows[0]) throw new Error('Delivery proof insert returned no row.');
 
       const shipment = await this.prisma.shipment.update({
         where: { id: shipmentId },
@@ -211,6 +224,7 @@ export class TrackingService {
           },
         },
       });
+      customerId = shipment.customerId;
 
       await this.prisma.$executeRawUnsafe(
         `update "Escrow"
@@ -228,18 +242,21 @@ export class TrackingService {
          where "shipmentId" = $1`,
         shipmentId,
       );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not record proof of delivery. Please try again: ${this.errorMessage(error)}`);
+    }
 
-      await this.notifications.create({
-        userId: shipment.customerId,
+    await Promise.all([
+      this.notifications.create({
+        userId: customerId,
         title: 'Proof of delivery submitted',
         body: 'The driver uploaded delivery proof for your shipment.',
         tone: 'SUCCESS',
         entity: 'DeliveryProof',
-        entityId: rows[0]?.id,
+        entityId: rows[0].id,
         actionUrl: `/shipments/${shipmentId}`,
-      });
-
-      await this.notifications.create({
+      }),
+      this.notifications.create({
         role: 'DISPATCHER',
         title: 'Delivery proof received',
         body: 'A driver submitted proof of delivery for review.',
@@ -247,14 +264,10 @@ export class TrackingService {
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: `/dispatcher/shipments/${shipmentId}`,
-      });
+      }),
+    ]).catch(() => null);
 
-      if (rows[0]) return this.toProof(rows[0]);
-    } catch {
-      // Preview fallback below.
-    }
-
-    return this.previewProof(shipmentId, driverId, input);
+    return this.toProof(rows[0]);
   }
 
   async deliveryProofs(shipmentId: string, user: AuthUser) {
@@ -282,10 +295,14 @@ export class TrackingService {
 
       if (rows.length) return rows.map((row) => this.toProof(row));
     } catch {
-      // Preview fallback below.
+      // A real infra failure falls through to the honest empty list below too.
     }
 
-    return [this.previewProof(shipmentId, 'preview-driver', {})];
+    // This used to fabricate a "SUBMITTED" proof of delivery, signed by "Preview
+    // recipient", for a shipment that had never actually been delivered - shown directly
+    // to the customer on the delivery-confirmation screen. An honest empty list instead;
+    // every caller already handles zero proofs correctly.
+    return [];
   }
 
   private toLocation(row: {
@@ -336,31 +353,7 @@ export class TrackingService {
     };
   }
 
-  private previewLocation(shipmentId: string, input: Partial<LocationInput & { driverId: string }> = {}) {
-    return {
-      id: `loc-${Date.now()}`,
-      shipmentId,
-      driverId: input.driverId ?? 'preview-driver',
-      latitude: Number(input.latitude ?? 6.5244),
-      longitude: Number(input.longitude ?? 3.3792),
-      heading: input.heading,
-      speedKph: input.speedKph,
-      note: input.note ?? 'Preview location ping.',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  private previewProof(shipmentId: string, driverId: string, input: DeliveryProofInput) {
-    return {
-      id: `pod-${Date.now()}`,
-      shipmentId,
-      driverId,
-      photoUrl: input.photoUrl,
-      signatureUrl: input.signatureUrl,
-      recipientName: input.recipientName ?? 'Preview recipient',
-      note: input.note ?? 'Preview proof of delivery.',
-      status: 'SUBMITTED',
-      submittedAt: new Date().toISOString(),
-    };
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 }
