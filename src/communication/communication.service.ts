@@ -274,7 +274,7 @@ export class CommunicationService {
     return this.notifications.registerPushToken(userId, token, platform, deviceId);
   }
 
-  async uploadMedia(input: Record<string, unknown>, userId = 'preview-customer') {
+  async uploadMedia(input: Record<string, unknown>, userId: string) {
     const media = await this.prepareMedia(input, userId);
     try {
       const rows = await this.prisma.$queryRawUnsafe<

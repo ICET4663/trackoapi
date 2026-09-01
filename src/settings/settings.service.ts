@@ -106,7 +106,7 @@ export class SettingsService {
     private readonly auth: AuthService,
   ) {}
 
-  async accountOverview(role: Role, userId = 'preview-user', authRole?: Role) {
+  async accountOverview(role: Role, userId: string, authRole?: Role) {
     try {
       const activeRole = authRole ?? role;
       const unread = await this.notifications.unreadCount(userId, activeRole);
@@ -476,7 +476,7 @@ export class SettingsService {
     };
   }
 
-  async notificationPreferences(userId = 'preview-user', role: Role = 'CUSTOMER') {
+  async notificationPreferences(userId: string, role: Role = 'CUSTOMER') {
     try {
       const rows = await this.prisma.$queryRawUnsafe<{ key: PreferenceKey; value: boolean }[]>(
         `select "key", "value"
@@ -957,7 +957,7 @@ export class SettingsService {
     }
   }
 
-  async paymentMethod(id: string, userId = 'preview-customer') {
+  async paymentMethod(id: string, userId: string) {
     const methods = await this.paymentMethods(userId);
     return methods.find((method: { id: string }) => method.id === id) ?? { ...methods[0], id };
   }
@@ -1002,7 +1002,7 @@ export class SettingsService {
     }
   }
 
-  async bankAccount(userId = 'preview-driver') {
+  async bankAccount(userId: string) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
         'select "id", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "pendingPayout" from "BankAccount" where "userId" = $1 limit 1',
@@ -1134,7 +1134,7 @@ export class SettingsService {
     };
   }
 
-  async driverEarnings(userId = 'preview-driver', options: { strict?: boolean } = {}) {
+  async driverEarnings(userId: string, options: { strict?: boolean } = {}) {
     try {
       const [releasedRows, pendingRows, bankAccount, withdrawalLogs] = await Promise.all([
         this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
@@ -1805,7 +1805,7 @@ export class SettingsService {
     };
   }
 
-  async updateSafetySetting(input: { key?: string; value?: boolean | string }, userId = 'preview-driver') {
+  async updateSafetySetting(input: { key?: string; value?: boolean | string }, userId: string) {
     // This never actually wrote to the database - it just echoed back
     // { ...currentSettings, [key]: value } as if it had saved, so a driver's safety
     // toggles (live location sharing, night-driving check-ins, emergency contact) reset
