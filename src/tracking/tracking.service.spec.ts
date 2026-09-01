@@ -1,4 +1,4 @@
-import { InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { TrackingService } from './tracking.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -85,6 +85,41 @@ describe('TrackingService.recordLocation never fakes a saved ping on failure', (
     const result = await service.recordLocation('shp-1', adminUser, { latitude: 6.5, longitude: 3.3 });
 
     expect(result.id).toBe('ping-1');
+  });
+});
+
+// recordLocation() used to default a missing latitude/longitude to a fixed Lagos
+// coordinate instead of rejecting the request - a malformed GPS payload would get
+// silently recorded into the permanent trail as if the driver were really there.
+describe('TrackingService.recordLocation rejects a ping with no real coordinates', () => {
+  it('throws BadRequestException when latitude is missing', async () => {
+    const prisma = buildPrisma();
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { longitude: 3.3 } as never))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('throws BadRequestException when longitude is missing', async () => {
+    const prisma = buildPrisma();
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5 } as never))
+      .rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('accepts a real equatorial/prime-meridian zero coordinate rather than treating it as missing', async () => {
+    const savedRow = {
+      id: 'ping-1', shipmentId: 'shp-1', driverId: 'admin-1', latitude: 0, longitude: 0,
+      heading: null, speedKph: null, note: null, createdAt: new Date(),
+    };
+    const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([savedRow]) });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    const result = await service.recordLocation('shp-1', adminUser, { latitude: 0, longitude: 0 });
+
+    expect(result.latitude).toBe(0);
   });
 });
 

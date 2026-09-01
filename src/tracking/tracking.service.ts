@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -126,8 +126,20 @@ export class TrackingService {
     // to - otherwise anyone with a valid driver token could spoof any shipment's route.
     shipmentId = await this.assertShipmentAccess(shipmentId, user);
     const driverId = user.sub;
-    const latitude = Number(input.latitude ?? 6.5244);
-    const longitude = Number(input.longitude ?? 3.3792);
+    // This used to default a missing latitude/longitude to a fixed Lagos coordinate -
+    // the exact same fabricated-location bug as the fixes below, just moved to the write
+    // path: a malformed or incomplete GPS payload (a client bug, permissions edge case,
+    // truncated request) would get silently recorded into the permanent trail as if the
+    // driver were really sitting in Lagos, misleading every customer/dispatcher watching
+    // this shipment's live map. A ping without real coordinates must be rejected instead.
+    if (input.latitude == null || input.longitude == null) {
+      throw new BadRequestException('A real GPS latitude and longitude are required to record a location.');
+    }
+    const latitude = Number(input.latitude);
+    const longitude = Number(input.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      throw new BadRequestException('A valid GPS latitude and longitude are required to record a location.');
+    }
 
     // This used to echo the submitted coordinates straight back as a fake "saved" ping
     // whenever the INSERT failed - so a driver's GPS trail could silently stop being
