@@ -89,3 +89,79 @@ describe('DeploymentConfigService.emailDomainStatus', () => {
     expect(result.message).toContain('network down');
   });
 });
+
+// storageStatus() is the live diagnostic behind /v1/demo/readiness's fileUploads section -
+// every upload (KYC/driver/vehicle documents, chat attachments) depends on this being
+// reachable. Env vars alone can't tell you whether the URL is actually valid or the
+// bucket exists, only whether values are set.
+describe('DeploymentConfigService.storageStatus', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function buildStorageService(env: Record<string, string | undefined>) {
+    const config = { get: jest.fn((key: string) => env[key]) } as unknown as ConfigService;
+    return new DeploymentConfigService(config);
+  }
+
+  it('reports unchecked without calling the network when neither URL nor key is set', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as never;
+    const service = buildStorageService({});
+
+    const result = await service.storageStatus();
+
+    expect(result.checked).toBe(false);
+    expect(result.urlConfigured).toBe(false);
+    expect(result.keyConfigured).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports the bucket as missing (not a generic failure) on a 404 from Supabase', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ status: 404, ok: false }) as never;
+    const service = buildStorageService({ SUPABASE_URL: 'https://proj.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'key' });
+
+    const result = await service.storageStatus();
+
+    expect(result.checked).toBe(true);
+    expect(result.bucketExists).toBe(false);
+    expect(result.message).toContain('no "tracko-media" bucket exists');
+  });
+
+  it('reports connected when the bucket exists', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ status: 200, ok: true }) as never;
+    const service = buildStorageService({ SUPABASE_URL: 'https://proj.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'key' });
+
+    const result = await service.storageStatus();
+
+    expect(result.checked).toBe(true);
+    expect(result.bucketExists).toBe(true);
+    expect(result.urlHost).toBe('proj.supabase.co');
+  });
+
+  // This is exactly the live failure observed against production: SUPABASE_URL and
+  // SUPABASE_SERVICE_ROLE_KEY are both set, but the request never gets a response at all
+  // (DNS failure, malformed host, connection refused) - Node's fetch throws "fetch failed"
+  // rather than resolving to a response object.
+  it('surfaces the real network error and a safe hostname when the request itself fails', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('fetch failed')) as never;
+    const service = buildStorageService({ SUPABASE_URL: 'https://proj.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'key' });
+
+    const result = await service.storageStatus();
+
+    expect(result.checked).toBe(false);
+    expect(result.urlConfigured).toBe(true);
+    expect(result.keyConfigured).toBe(true);
+    expect(result.urlHost).toBe('proj.supabase.co');
+    expect(result.message).toContain('fetch failed');
+  });
+
+  it('never throws even when SUPABASE_URL is not a valid URL', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new TypeError('Failed to parse URL')) as never;
+    const service = buildStorageService({ SUPABASE_URL: 'not-a-url', SUPABASE_SERVICE_ROLE_KEY: 'key' });
+
+    const result = await service.storageStatus();
+
+    expect(result.checked).toBe(false);
+    expect(result.urlHost).toBe('invalid-url:"not-a-url"');
+  });
+});

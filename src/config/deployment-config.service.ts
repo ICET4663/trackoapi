@@ -131,6 +131,84 @@ export class DeploymentConfigService {
     }
   }
 
+  // A live call to Supabase's own Storage API - env vars alone can't tell you whether the
+  // URL is actually reachable or the bucket exists, only whether values are set. Every
+  // upload in the app (KYC/driver/vehicle documents, chat attachments) goes through this;
+  // when it's broken, uploads silently fall back to embedding files inline instead of a
+  // real persistent URL (see CommunicationService.prepareMedia()). Called on-demand by
+  // the readiness endpoint, never at bootstrap.
+  async storageStatus(): Promise<{
+    checked: boolean;
+    urlConfigured: boolean;
+    keyConfigured: boolean;
+    bucketExists: boolean;
+    bucket: string;
+    urlHost: string | null;
+    message: string;
+  }> {
+    const url = this.config.get<string>('SUPABASE_URL')
+      ?? this.config.get<string>('EXPO_PUBLIC_SUPABASE_URL')
+      ?? this.config.get<string>('NEXT_PUBLIC_SUPABASE_URL');
+    const serviceRoleKey = this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY');
+    const bucket = this.config.get<string>('SUPABASE_STORAGE_BUCKET') ?? 'tracko-media';
+    const urlHost = this.safeHost(url);
+
+    if (!url || !serviceRoleKey) {
+      return {
+        checked: false,
+        urlConfigured: Boolean(url),
+        keyConfigured: Boolean(serviceRoleKey),
+        bucketExists: false,
+        bucket,
+        urlHost,
+        message: !url && !serviceRoleKey
+          ? 'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are not set - uploads fall back to embedding the file directly (no persistent object storage).'
+          : !url
+            ? 'SUPABASE_URL is not set, but SUPABASE_SERVICE_ROLE_KEY is - uploads will fail rather than silently embedding inline, since the key alone implies real storage was intended.'
+            : 'SUPABASE_SERVICE_ROLE_KEY is not set.',
+      };
+    }
+
+    try {
+      const response = await fetch(`${url.replace(/\/$/, '')}/storage/v1/bucket/${encodeURIComponent(bucket)}`, {
+        headers: { Authorization: `Bearer ${serviceRoleKey}`, apikey: serviceRoleKey },
+      });
+
+      if (response.status === 404) {
+        return {
+          checked: true, urlConfigured: true, keyConfigured: true, bucketExists: false, bucket, urlHost,
+          message: `Connected to Supabase, but no "${bucket}" bucket exists yet. Create it in Supabase → Storage → New bucket (name must match SUPABASE_STORAGE_BUCKET).`,
+        };
+      }
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { message?: string } | null;
+        return {
+          checked: false, urlConfigured: true, keyConfigured: true, bucketExists: false, bucket, urlHost,
+          message: `Supabase Storage returned ${response.status}${payload?.message ? ` (${payload.message})` : ''}. Check SUPABASE_SERVICE_ROLE_KEY is a valid, current service-role key (not the anon key).`,
+        };
+      }
+
+      return {
+        checked: true, urlConfigured: true, keyConfigured: true, bucketExists: true, bucket, urlHost,
+        message: `Connected - uploads are stored in the "${bucket}" bucket.`,
+      };
+    } catch (error) {
+      return {
+        checked: false, urlConfigured: true, keyConfigured: true, bucketExists: false, bucket, urlHost,
+        message: `Could not reach Supabase Storage at "${urlHost ?? url}": ${error instanceof Error ? error.message : String(error)}. Check SUPABASE_URL is the exact project URL (e.g. https://xxxxx.supabase.co, no trailing path or slash, no stray whitespace).`,
+      };
+    }
+  }
+
+  private safeHost(url?: string): string | null {
+    if (!url) return null;
+    try {
+      return new URL(url).host;
+    } catch {
+      return `invalid-url:${JSON.stringify(url)}`;
+    }
+  }
+
   private missing(keys: string[]) {
     return keys.filter((key) => !this.hasValue(key));
   }

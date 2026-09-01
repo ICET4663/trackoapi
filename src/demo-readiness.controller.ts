@@ -16,6 +16,7 @@ export class DemoReadinessController {
     const deployment = this.deploymentConfig.summary();
     const database = await this.databaseStatus();
     const email = await this.deploymentConfig.emailDomainStatus();
+    const storage = await this.deploymentConfig.storageStatus();
 
     return {
       ok: database.connected && deployment.required.ok,
@@ -91,6 +92,17 @@ export class DemoReadinessController {
         endpoints: [
           'POST /v1/auth/register/request',
           'POST /v1/auth/password-reset/request',
+        ],
+      },
+      fileUploads: {
+        status: storage.checked
+          ? (storage.bucketExists ? 'ready' : 'bucket_missing')
+          : (storage.urlConfigured && storage.keyConfigured ? 'unreachable' : 'inline_fallback'),
+        bucket: storage.bucket,
+        urlHost: storage.urlHost,
+        message: storage.message,
+        endpoints: [
+          'POST /v1/media',
         ],
       },
       frontendConnection: {
