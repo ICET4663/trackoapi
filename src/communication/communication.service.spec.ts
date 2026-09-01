@@ -1,4 +1,4 @@
-import { InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CommunicationService } from './communication.service';
 import { TranslationProviderService } from '../integrations/translation-provider.service';
@@ -160,5 +160,68 @@ describe('CommunicationService.transcribeVoiceNote', () => {
 
     expect(result.transcript).toBe('');
     expect(result.unavailableReason).toContain('not configured');
+  });
+});
+
+// uploadMedia() is the backing endpoint for KYC document capture, driver/vehicle
+// document uploads, and chat voice/photo attachments. It used to (a) fall back to a
+// fake "uploaded: true" response with a locally-generated id whenever the MediaAsset
+// insert failed - the file could be genuinely lost while every caller believed it was
+// saved - and (b) silently accept a bare device-local URI (no real file content) as if
+// it were a real, storable, shareable URL, which MessageThreadScreen's retryMessage()
+// on the frontend genuinely sends when re-sending a failed voice/photo message.
+describe('CommunicationService.uploadMedia never fakes success on failure', () => {
+  function buildService(prisma: Partial<PrismaService>, config: Partial<{ get: jest.Mock }> = {}) {
+    const configService = { get: jest.fn().mockReturnValue(undefined), ...config } as unknown as ConfigService;
+    const translationProvider = { translate: jest.fn(), transcribe: jest.fn(), status: jest.fn() } as unknown as TranslationProviderService;
+    return new CommunicationService(configService, prisma as PrismaService, {} as NotificationsService, translationProvider);
+  }
+
+  it('throws instead of a fake "uploaded: true" echo when the MediaAsset insert fails', async () => {
+    const service = buildService({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+
+    await expect(service.uploadMedia({ kind: 'DOCUMENT', base64: 'AAAA', mimeType: 'image/png' }, 'user-1'))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('rejects a bare local device URI with no real file content instead of storing it as if it were a real URL', async () => {
+    const queryRawUnsafe = jest.fn();
+    const service = buildService({ $queryRawUnsafe: queryRawUnsafe });
+
+    await expect(service.uploadMedia({ kind: 'VOICE_NOTE', localUri: 'file:///var/mobile/recording.m4a' }, 'user-1'))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('embeds the real file content inline when no object storage is configured (honest degraded mode)', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{
+      id: 'media-1', kind: 'DOCUMENT', url: 'data:image/png;base64,AAAA', storageKey: 'inline/1', label: 'Doc',
+      transcript: undefined, durationSeconds: undefined, createdAt: new Date(),
+    }]);
+    const service = buildService({ $queryRawUnsafe: queryRawUnsafe });
+
+    const result = await service.uploadMedia({ kind: 'DOCUMENT', base64: 'AAAA', mimeType: 'image/png' }, 'user-1');
+
+    expect(result.uploaded).toBe(true);
+    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.any(String), null, null, 'DOCUMENT', 'data:image/png;base64,AAAA', expect.stringContaining('inline/'), 'Uploaded media', null, null, 'image/png', 'user-1', expect.any(String));
+  });
+
+  it('throws instead of silently falling back to a broken data: URI when real object storage is configured but the upload fails', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500 }) as unknown as typeof fetch;
+    try {
+      const service = buildService(
+        { $queryRawUnsafe: jest.fn() },
+        { get: jest.fn((key: string) => ({
+            SUPABASE_URL: 'https://example.supabase.co',
+            SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+          } as Record<string, string>)[key]) },
+      );
+
+      await expect(service.uploadMedia({ kind: 'DOCUMENT', base64: 'AAAA', mimeType: 'image/png' }, 'user-1'))
+        .rejects.toBeInstanceOf(InternalServerErrorException);
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

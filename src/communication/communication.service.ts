@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -276,6 +276,13 @@ export class CommunicationService {
 
   async uploadMedia(input: Record<string, unknown>, userId: string) {
     const media = await this.prepareMedia(input, userId);
+    // This used to catch ANY insert failure and fall back to a fake "uploaded: true"
+    // response with a locally-generated id, never persisted anywhere - this is the
+    // backing endpoint for KYC document capture, driver/vehicle document uploads, and
+    // chat voice/photo attachments. A KYC document screen would show "Document attached"
+    // and save a KycSubmissionDocument row pointing at a MediaAsset that was never
+    // created - an admin reviewing that submission later would find nothing there. A
+    // real upload failure must surface as a real error, not a false confirmation.
     try {
       const rows = await this.prisma.$queryRawUnsafe<
         {
@@ -319,28 +326,16 @@ export class CommunicationService {
         // elsewhere in the codebase (e.g. KycService.id()) for handwritten SQL inserts.
         `media_${randomUUID().replace(/-/g, '')}`,
       );
-      if (rows[0]) {
-        return {
-          ...rows[0],
-          createdAt: rows[0].createdAt.toISOString(),
-          uploaded: true,
-        };
-      }
-    } catch {
-      // Preview fallback below.
+      if (!rows[0]) throw new Error('Media asset insert returned no row.');
+      return {
+        ...rows[0],
+        createdAt: rows[0].createdAt.toISOString(),
+        uploaded: true,
+      };
+    } catch (error) {
+      this.logger.error(`uploadMedia() failed to save the MediaAsset record: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not save this upload. Please try again: ${this.errorMessage(error)}`);
     }
-
-    return {
-      id: `media-${Date.now()}`,
-      kind: String(input.kind ?? 'DOCUMENT'),
-      url: media.url,
-      label: String(input.label ?? 'Uploaded media'),
-      transcript: input.transcript ? String(input.transcript) : undefined,
-      durationSeconds: input.durationSeconds ? Number(input.durationSeconds) : undefined,
-      createdAt: new Date().toISOString(),
-      storageKey: media.storageKey,
-      uploaded: true,
-    };
   }
 
   private async prepareMedia(input: Record<string, unknown>, userId: string) {
@@ -348,7 +343,20 @@ export class CommunicationService {
     const base64 = typeof input.base64 === 'string' && input.base64.trim() ? input.base64.trim() : null;
     const storage = this.storageConfig();
 
-    if (base64 && storage) {
+    // A bare localUri/uri (a path on the sender's own device, e.g. `file:///...`) can
+    // never be read by the backend or reached by anyone else - it used to be accepted
+    // here and stored verbatim as if it were a real, retrievable URL. This is genuinely
+    // reachable: MessageThreadScreen's retryMessage() re-sends a failed voice/photo
+    // message with only the original localUri, no base64 (the recorded/captured bytes
+    // aren't kept around for a retry). That "successful" retry would silently produce a
+    // MediaAsset pointing nowhere - the sender sees "sent", the recipient sees a broken
+    // attachment forever. Real file content is required; a caller with only a local path
+    // must fail loudly so the UI's existing "tap to retry" affordance can ask for it again.
+    if (!base64) {
+      throw new BadRequestException('Real file content is required to upload media - a local device path cannot be stored or shared.');
+    }
+
+    if (storage) {
       try {
         const storageKey = this.storageKey(input, userId, mimeType);
         const response = await fetch(`${storage.url}/storage/v1/object/${storage.bucket}/${storageKey}`, {
@@ -369,26 +377,24 @@ export class CommunicationService {
           storageKey,
           mimeType,
         };
-      } catch {
-        // Keep demo uploads working even if storage is not configured correctly yet.
+      } catch (error) {
+        // Storage is configured, meaning a real, shareable URL was expected - silently
+        // falling back here used to return a "successful" upload whose data: URI is
+        // only ever visible to the uploader's own request, not a real stored asset any
+        // other viewer (an admin, the message recipient) could later fetch on demand.
+        this.logger.error(`prepareMedia() Supabase storage upload failed: ${this.errorMessage(error)}`);
+        throw new InternalServerErrorException(`Could not upload this file. Please try again: ${this.errorMessage(error)}`);
       }
     }
 
+    // No object storage configured at all (e.g. local/demo environment) - embed the
+    // real file bytes directly rather than a broken reference. Unlike the localUri case
+    // above, this is honest: the actual content is what gets persisted and rendered.
     return {
-      url: this.mediaUrl(input),
-      storageKey: `preview/${Date.now()}`,
+      url: `data:${mimeType};base64,${base64}`,
+      storageKey: `inline/${Date.now()}`,
       mimeType,
     };
-  }
-
-  private mediaUrl(input: Record<string, unknown>) {
-    if (typeof input.base64 === 'string' && input.base64.trim()) {
-      const mimeType = typeof input.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
-      return `data:${mimeType};base64,${input.base64.trim()}`;
-    }
-    if (typeof input.localUri === 'string' && input.localUri.trim()) return input.localUri.trim();
-    if (typeof input.uri === 'string' && input.uri.trim()) return input.uri.trim();
-    return `local://media/${Date.now()}`;
   }
 
   private storageConfig() {
