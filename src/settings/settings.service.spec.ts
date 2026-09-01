@@ -759,3 +759,82 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'payout-1' } }));
   });
 });
+
+// accountOverview() is the very first screen every user sees after logging in - it used
+// to catch ANY read failure and return hardcoded fake stats per role ("12 trips, 5.0
+// rating", "3 trucks", "8 open, 1 alert, 24 resolved" for admin) instead of an error.
+// notificationPreferences()/updateNotificationPreference()/paymentMethod()/
+// supportTickets()/resolveSupportTicket()/auditLogs()/auditLog() had the same pattern
+// across reads (silent defaults or fabricated records) and writes (echoing back the
+// requested value, or a fake "resolved"/"saved" confirmation, as if it had persisted).
+describe('SettingsService admin/dashboard/preference reads and writes never fake data', () => {
+  function buildService(prismaOverrides: Record<string, unknown>) {
+    const prisma = { ...prismaOverrides } as unknown as PrismaService;
+    return new SettingsService(
+      prisma,
+      { unreadCount: jest.fn().mockResolvedValue({ unreadCount: 0 }), create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+  }
+
+  it('accountOverview() throws instead of fake dashboard stats when the read fails', async () => {
+    const service = buildService({
+      shipment: { count: jest.fn().mockRejectedValue(new Error('connection reset')) },
+      $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
+    });
+
+    await expect(service.accountOverview('CUSTOMER', 'cust-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('notificationPreferences() throws instead of silent defaults when the read fails', async () => {
+    const service = buildService({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+
+    await expect(service.notificationPreferences('user-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('updateNotificationPreference() throws instead of echoing back the requested value when the write fails', async () => {
+    const service = buildService({ $executeRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+
+    await expect(service.updateNotificationPreference('user-1', 'CUSTOMER', { key: 'smsAlerts' as never, value: false }))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('paymentMethod() throws NotFoundException instead of silently returning a different card under the wrong id', async () => {
+    const service = buildService({
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ id: 'pm-real', brand: 'Visa', maskedNumber: '**** 1111' }]),
+    });
+
+    await expect(service.paymentMethod('pm-does-not-exist', 'user-1')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('supportTickets() throws instead of a fake pending ticket when the read fails', async () => {
+    const service = buildService({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+
+    await expect(service.supportTickets()).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('resolveSupportTicket() throws instead of a fake "resolved" confirmation when the update fails', async () => {
+    const service = buildService({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+
+    await expect(service.resolveSupportTicket('ticket-1', 'admin-1', {})).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('auditLogs() throws instead of fabricated audit history when the read fails', async () => {
+    const service = buildService({ auditLog: { findMany: jest.fn().mockRejectedValue(new Error('connection reset')) } });
+
+    await expect(service.auditLogs()).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('auditLog(id) throws NotFoundException for a real missing id instead of a fabricated entry under a different id', async () => {
+    const service = buildService({ auditLog: { findUnique: jest.fn().mockResolvedValue(null) } });
+
+    await expect(service.auditLog('audit-does-not-exist')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('auditLog(id) throws a real error instead of fabricated audit data on an actual read failure', async () => {
+    const service = buildService({ auditLog: { findUnique: jest.fn().mockRejectedValue(new Error('connection reset')) } });
+
+    await expect(service.auditLog('audit-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});

@@ -106,6 +106,10 @@ export class SettingsService {
     private readonly auth: AuthService,
   ) {}
 
+  // This used to catch ANY read failure and fall back to hardcoded fake stats per role
+  // ("12 trips, 5.0 rating", "3 trucks", "8 open, 1 alert, 24 resolved" for admin) - the
+  // very first screen every user sees after logging in would silently show made-up
+  // numbers instead of an error during a real DB hiccup.
   async accountOverview(role: Role, userId: string, authRole?: Role) {
     try {
       const activeRole = authRole ?? role;
@@ -202,61 +206,11 @@ export class SettingsService {
           values: {},
         };
       }
-    } catch {
-      // Preview fallback below.
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load your dashboard. Please try again: ${this.errorMessage(error)}`);
     }
-
-    const base = {
-      badges: { notifications: '2' },
-      values: {},
-    };
-
-    if (role === 'DRIVER') {
-      return {
-        ...base,
-        stats: [
-          { label: 'Trips', value: '12' },
-          { label: 'Rating', value: '5.0' },
-          { label: 'Docs', value: 'OK' },
-        ],
-        badges: { notifications: '2', driverDocuments: '1' },
-        values: { regionShift: 'Lagos', driverDocuments: '1 due' },
-      };
-    }
-
-    if (role === 'TRUCK_OWNER') {
-      return {
-        ...base,
-        stats: [
-          { label: 'Trucks', value: '3' },
-          { label: 'Assigned', value: '2' },
-          { label: 'Docs', value: 'OK' },
-        ],
-        badges: { notifications: '2', truckDocuments: '1' },
-        values: { truckDocuments: '1 due' },
-      };
-    }
-
-    if (role === 'ADMIN' || role === 'DISPATCHER') {
-      return {
-        ...base,
-        stats: [
-          { label: 'Open', value: '8' },
-          { label: 'Alerts', value: '1' },
-          { label: 'Resolved', value: '24' },
-        ],
-        badges: { notifications: '2', alerts: '1', fraudAlerts: '0' },
-      };
-    }
-
-    return {
-      ...base,
-      stats: [
-        { label: 'Shipments', value: '4' },
-        { label: 'Active', value: '1' },
-        { label: 'Wallet', value: 'N0' },
-      ],
-    };
+    // Every branch above returns; an unrecognized role falls through to here.
+    throw new BadRequestException('Unsupported account role.');
   }
 
   // This used to fall back to a fake identity - a hardcoded name/email/phone/verification
@@ -489,13 +443,16 @@ export class SettingsService {
         (preferences, row) => ({ ...preferences, [row.key]: row.value }),
         { ...notificationPreferences },
       );
-    } catch {
-      return notificationPreferences;
+    } catch (error) {
+      // Used to silently return the default preference set on any read failure - a user
+      // who had actually customized their preferences would see them apparently reset,
+      // with no indication the real values just failed to load.
+      throw new InternalServerErrorException(`Could not load your notification preferences. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
   async updateNotificationPreference(userId: string, role: Role, input: { key?: PreferenceKey; value?: boolean }) {
-    if (!input.key) return notificationPreferences;
+    if (!input.key) throw new BadRequestException('A preference key is required.');
     try {
       await this.prisma.$executeRawUnsafe(
         `insert into "NotificationPreference" ("id", "userId", "role", "key", "value", "updatedAt")
@@ -522,8 +479,11 @@ export class SettingsService {
       }).catch(() => null);
 
       return this.notificationPreferences(userId, role);
-    } catch {
-      return { ...notificationPreferences, [input.key]: Boolean(input.value) };
+    } catch (error) {
+      // Used to echo back the requested value as if it had been saved on ANY failure of
+      // the actual insert - the toggle would appear to flip in the UI while nothing was
+      // written to the database, silently reverting on next real load.
+      throw new InternalServerErrorException(`Could not save this preference. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -781,23 +741,11 @@ export class SettingsService {
         updatedAt: row.updatedAt.toISOString(),
         resolvedAt: row.resolvedAt?.toISOString(),
       }));
-    } catch {
-      return [
-        {
-          id: 'support-preview-1',
-          shipmentId: null,
-          userId: 'preview-customer',
-          userName: 'Tracko Customer',
-          userEmail: 'customer@tracko.ng',
-          topic: 'General support',
-          channel: 'CHAT',
-          message: 'Preview support ticket.',
-          status: 'OPEN',
-          createdAt: new Date().toISOString(),
-          createdAtLabel: 'Today',
-          updatedAt: new Date().toISOString(),
-        },
-      ];
+    } catch (error) {
+      // Used to fall back to a single fabricated "Tracko Customer" support ticket on any
+      // read failure - an admin/dispatcher's support queue would show a made-up ticket
+      // instead of an error.
+      throw new InternalServerErrorException(`Could not load support tickets. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -845,12 +793,11 @@ export class SettingsService {
         message: 'Support ticket resolved.',
       };
     } catch (error) {
+      // Used to fall back to a fake "resolved" confirmation on any failure other than a
+      // genuinely-missing ticket - an admin resolving a real support ticket during a DB
+      // hiccup would see success while nothing was actually updated.
       if (error instanceof NotFoundException) throw error;
-      return {
-        id,
-        status: 'RESOLVED',
-        message: 'Support ticket resolved in preview.',
-      };
+      throw new InternalServerErrorException(`Could not resolve this support ticket. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -959,7 +906,13 @@ export class SettingsService {
 
   async paymentMethod(id: string, userId: string) {
     const methods = await this.paymentMethods(userId);
-    return methods.find((method: { id: string }) => method.id === id) ?? { ...methods[0], id };
+    const method = methods.find((method: { id: string }) => method.id === id);
+    // Used to silently fall back to the customer's FIRST payment method (re-labeled with
+    // the requested id) when the id didn't match any of theirs - a request for a
+    // nonexistent/deleted card's details would silently show a real, different card's
+    // brand/masked number under the wrong id instead of a proper "not found".
+    if (!method) throw new NotFoundException('Payment method not found.');
+    return method;
   }
 
   // Previously always returned { ...method, isDefault: true } without writing anything -
@@ -2017,8 +1970,13 @@ export class SettingsService {
 
       if (category && category !== 'All') return records.filter((record) => record.category === category);
       return records;
-    } catch {
-      return this.previewAuditLogs(category);
+    } catch (error) {
+      // Used to fall back to 3 hardcoded fake audit entries ("Preview backend started",
+      // "Reviewed demo workflow"...) on any read failure - an admin investigating an
+      // incident during a DB hiccup would see fabricated audit history with nothing
+      // distinguishing it from the real trail, which defeats the entire point of an
+      // audit log.
+      throw new InternalServerErrorException(`Could not load audit logs. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -2098,20 +2056,17 @@ export class SettingsService {
         ip: String(metadata.ip ?? metadata.source ?? 'Vercel/Supabase'),
         result: String(metadata.status ?? metadata.result ?? 'Recorded'),
       };
-    } catch {
-      const log = this.previewAuditLogs().find((entry) => entry.id === id) ?? this.previewAuditLogs()[0];
-      return { ...log, role: 'ADMIN', target: 'Tracko preview', ip: '127.0.0.1', result: 'Completed' };
+    } catch (error) {
+      // Used to fall back to a fake preview audit entry on ANY failure - including a
+      // genuinely-missing id, since the NotFoundException thrown above was swallowed by
+      // this same catch instead of propagating. The fallback didn't even look up the
+      // requested id among its 3 hardcoded fakes correctly: any real id (which never
+      // matches 'audit-1'/'audit-2'/'audit-3') silently returned the FIRST fake entry
+      // ("System - Preview backend started") as if it were the record the admin asked
+      // for - a serious integrity problem for a feature that exists for accountability.
+      if (error instanceof NotFoundException) throw error;
+      throw new InternalServerErrorException(`Could not load this audit entry. Please try again: ${this.errorMessage(error)}`);
     }
-  }
-
-  private previewAuditLogs(category?: string) {
-    const logs = [
-      { id: 'audit-1', actor: 'System', action: 'Preview backend started', time: 'Today', icon: 'settings', tone: 'success', category: 'System' },
-      { id: 'audit-2', actor: 'Admin', action: 'Reviewed demo workflow', time: 'Today', icon: 'verified', tone: 'info', category: 'Accounts' },
-      { id: 'audit-3', actor: 'Finance', action: 'Payout request recorded', time: 'Today', icon: 'payments', tone: 'warning', category: 'Finance' },
-    ];
-    if (category && category !== 'All') return logs.filter((log) => log.category === category);
-    return logs;
   }
 
   private auditActionLabel(action: string) {
