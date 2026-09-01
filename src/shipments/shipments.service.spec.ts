@@ -561,3 +561,112 @@ describe('ShipmentsService.addTimelineEvent never fakes a status change on failu
     expect(queryRawUnsafe).not.toHaveBeenCalled();
   });
 });
+
+// create()/list()/get()/updateStatus() used to catch ANY failure and return a fully
+// fabricated shipment (a fake TRK-<timestamp> id, a fake escrow id, a fake timeline) -
+// never written to the database, indistinguishable in shape from a real one. This is the
+// single most consequential flow in the app: a customer could believe they'd booked a
+// real shipment when nothing was saved, and a driver marking a delivery DELIVERED during
+// a DB hiccup would see confirmation while the real row never moved.
+describe('ShipmentsService core shipment CRUD never fakes success on failure', () => {
+  function buildService(prismaOverrides: Record<string, unknown>) {
+    const prisma = { ...prismaOverrides } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService;
+    const mapsProvider = {
+      routeEstimate: jest.fn().mockResolvedValue({
+        quotedPriceKobo: 24_000_000, distanceKm: 750, durationMinutes: 600,
+        pricingVersion: 'v1', quoteValidMinutes: 30, pricingBreakdown: {},
+      }),
+    } as unknown as MapsProviderService;
+    return new ShipmentsService(prisma, notifications, mapsProvider);
+  }
+
+  it('create() throws instead of a fake shipment when the insert fails', async () => {
+    const service = buildService({
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ verificationStatus: 'VERIFIED', role: 'CUSTOMER', isActive: true }]),
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      shipment: { create: jest.fn().mockRejectedValue(new Error('connection reset')) },
+    });
+
+    await expect(service.create('cust-1', { origin: 'Lagos', destination: 'Abuja' }))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('list() throws instead of a fake shipment list when the read fails', async () => {
+    const service = buildService({
+      shipment: { findMany: jest.fn().mockRejectedValue(new Error('connection reset')) },
+    });
+
+    await expect(service.list('cust-1', 'CUSTOMER')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('get() throws instead of a fake shipment when the read fails', async () => {
+    const service = buildService({
+      shipment: { findUnique: jest.fn().mockRejectedValue(new Error('connection reset')) },
+    });
+
+    await expect(service.get('shp-1', 'cust-1', 'CUSTOMER')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('updateStatus() throws instead of a fake "updated" shipment when the write fails', async () => {
+    const service = buildService({
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1', status: 'ARRIVED_DESTINATION', assignments: [] }),
+        update: jest.fn().mockRejectedValue(new Error('connection reset')),
+      },
+    });
+
+    // ADMIN is operations staff, allowed to drive any valid transition regardless of
+    // owner/assigned-driver relationship - isolates the test to the write-failure path.
+    await expect(service.updateStatus('shp-1', 'admin-1', 'ADMIN', { status: 'DELIVERED' } as never))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});
+
+// availableDrivers()/listAssignments()/offerAssignment() used to fall back to a single
+// fabricated "Tracko Preview Driver" / "OFFERED" assignment (fake truck, fake plate
+// number) on any read failure - dispatch could try to assign a shipment to a driver who
+// doesn't exist, or see "Assignment offered!" when nothing was queried or written.
+describe('ShipmentsService driver/assignment lookups never fake data on failure', () => {
+  it('availableDrivers() throws instead of a fake preview driver when the read fails', async () => {
+    const prisma = { $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.availableDrivers()).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('listAssignments() throws instead of a fake OFFERED assignment when the read fails', async () => {
+    const prisma = {
+      driverAssignment: {
+        findMany: jest.fn().mockRejectedValue(new Error('connection reset')),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.listAssignments('shp-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('offerAssignment() requires a driverId instead of silently defaulting to a fake preview driver', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue(undefined) as never;
+
+    await expect(service.offerAssignment('shp-1', {}, 'DISPATCHER')).rejects.toThrow('A driver must be selected');
+  });
+
+  it('offerAssignment() throws instead of a fake "OFFERED" assignment when eligibility reads fail', async () => {
+    const prisma = {
+      shipment: { findUnique: jest.fn().mockRejectedValue(new Error('connection reset')) },
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+      user: { findUnique: jest.fn().mockRejectedValue(new Error('connection reset')) },
+      $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue(undefined) as never;
+
+    await expect(service.offerAssignment('shp-1', { driverId: 'driver-1' }, 'DISPATCHER'))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});

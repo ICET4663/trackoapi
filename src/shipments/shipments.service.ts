@@ -110,6 +110,13 @@ export class ShipmentsService {
       ? this.mapsProvider.verifyQuoteToken(dto.quoteToken, quoteInput)
       : await this.mapsProvider.routeEstimate(quoteInput);
 
+    // This used to catch ANY failure of the real insert/escrow/media creation below -
+    // including a genuine DB outage or a bug in one of those steps - and return a
+    // fabricated shipment (a fake TRK-<timestamp> id, a fake escrow, a full fake
+    // timeline) that was never written to the database. A customer would believe they'd
+    // booked a real shipment and could try to fund escrow against an id that resolves
+    // to nothing; dispatch would never see it because it doesn't exist. This is the
+    // single most consequential flow in the app - a real failure must throw.
     try {
       const shipment = await this.prisma.shipment.create({
         data: {
@@ -167,17 +174,9 @@ export class ShipmentsService {
         quoteValidMinutes: quote.quoteValidMinutes,
         pricingBreakdown: quote.pricingBreakdown,
       });
-    } catch {
-      return this.previewShipment({
-        id: `TRK-${Date.now()}`,
-        origin: normalized.pickupLabel,
-        destination: normalized.destinationLabel,
-        cargoType: normalized.cargoDescription,
-        quantity: normalized.quantity,
-        weightTons: normalized.weightTons,
-        truckType: normalized.truckType,
-        pickupContactPhone: normalized.pickupContactPhone,
-      });
+    } catch (error) {
+      this.logger.error(`create() failed to save shipment for customer ${customerId}: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not create this shipment. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -244,8 +243,12 @@ export class ShipmentsService {
         take: 100,
       });
       return shipments.map((shipment) => this.toShipmentRecord(shipment));
-    } catch {
-      return [this.previewShipment()];
+    } catch (error) {
+      // Used to fall back to a single fabricated shipment on any read failure - a
+      // customer/driver/admin's shipment list would silently show fake content
+      // instead of surfacing the outage.
+      this.logger.error(`list(${userId}, ${role}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not load shipments. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -256,9 +259,12 @@ export class ShipmentsService {
         where: { id },
         include: { assignments: true, timeline: { orderBy: { createdAt: 'asc' } } },
       });
-    } catch {
-      // A real infrastructure failure (DB unreachable) - fall back to preview data.
-      return this.previewShipment({ id });
+    } catch (error) {
+      // Used to fall back to a fabricated shipment (with a fake escrow id and a fake
+      // "in progress" timeline) for ANY id on a real infrastructure failure - viewing
+      // shipment details during a DB hiccup would show made-up data instead of an error.
+      this.logger.error(`get(${id}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not load this shipment. Please try again: ${this.errorMessage(error)}`);
     }
 
     if (!shipment) throw new NotFoundException('Shipment not found.');
@@ -306,8 +312,15 @@ export class ShipmentsService {
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
       return this.toShipmentRecord(updated);
-    } catch {
-      return this.previewShipment({ id, status: dto.status });
+    } catch (error) {
+      // Used to fall back to a fake "updated" shipment reflecting the REQUESTED status
+      // as if it had actually been applied - e.g. a driver marking a delivery DELIVERED
+      // during a DB hiccup would see confirmation the status changed while the real row
+      // never moved, silently desyncing every party's view of the shipment's true state
+      // (and, for DELIVERED specifically, never actually starting the escrow release
+      // checklist). A real update failure must throw, not fabricate the new state.
+      this.logger.error(`updateStatus(${id} -> ${dto.status}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -413,24 +426,12 @@ export class ShipmentsService {
           capacityKg: vehicle.capacityKg,
         })),
       }));
-    } catch {
-      return [
-        {
-          id: 'preview-driver',
-          fullName: 'Tracko Preview Driver',
-          email: 'driver@tracko.ng',
-          phone: '+234 800 000 0001',
-          verificationStatus: 'VERIFIED',
-          vehicles: [
-            {
-              id: 'preview-vehicle',
-              plateNumber: 'LAG-204-TK',
-              type: 'Flatbed truck',
-              capacityKg: 12000,
-            },
-          ],
-        },
-      ];
+    } catch (error) {
+      // Used to fall back to a single fabricated "Tracko Preview Driver" on any read
+      // failure - a dispatcher assigning a shipment during a DB hiccup could try to
+      // offer it to a driver who doesn't exist.
+      this.logger.error(`availableDrivers() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load available drivers. Please try again.');
     }
   }
 
@@ -462,8 +463,12 @@ export class ShipmentsService {
         orderBy: { offeredAt: 'desc' },
       });
       return assignments.map((assignment) => this.toAssignmentRecord(assignment, validityMinutes));
-    } catch {
-      return [this.previewAssignment({ shipmentId })];
+    } catch (error) {
+      // Used to fall back to a single fabricated OFFERED assignment (a fake driver, a
+      // fake truck) on any read failure - a shipment's assignment history/offer status
+      // would show made-up data instead of an error.
+      this.logger.error(`listAssignments(${shipmentId}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load driver assignments for this shipment. Please try again.');
     }
   }
 
@@ -477,7 +482,8 @@ export class ShipmentsService {
     }
 
     await this.expireStaleAssignmentOffers(shipmentId);
-    const driverId = body.driverId ?? 'preview-driver';
+    const driverId = body.driverId;
+    if (!driverId) throw new BadRequestException('A driver must be selected for this assignment.');
 
     let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows;
     try {
@@ -515,9 +521,12 @@ export class ShipmentsService {
           driverId,
         ).catch(() => []),
       ]);
-    } catch {
-      // A real infrastructure failure (DB unreachable) - fall back to preview data.
-      return this.previewAssignment({ shipmentId, driverId, vehicleId: body.vehicleId, status: 'OFFERED' });
+    } catch (error) {
+      // Used to fall back to a fabricated "OFFERED" assignment on ANY failure of these
+      // reads - before even checking whether the driver/vehicle were eligible, dispatch
+      // could see "Assignment offered!" when nothing was queried or written at all.
+      this.logger.error(`offerAssignment(${shipmentId}, driver ${driverId}) failed to load eligibility data: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not check assignment eligibility. Please try again.');
     }
 
     // Business-rule failures below must propagate as real errors. Swallowing them into a
@@ -1502,13 +1511,14 @@ export class ShipmentsService {
         url,
       );
       return rows[0] ?? null;
-    } catch {
-      return {
-        id: `media-${Date.now()}`,
-        kind: 'CARGO_PHOTO',
-        url,
-        label: 'Cargo photo',
-      };
+    } catch (error) {
+      // A cargo photo is supplementary evidence, not core to the shipment's existence -
+      // a glitch here must not block the shipment being created (create()'s own catch
+      // already fails loudly for the parts that ARE core). But it used to return a fake
+      // MediaAsset with the same shape as a real one, never persisted anywhere - an
+      // honest null (create() already handles `media: media ? [media] : []`) instead.
+      this.logger.error(`createMediaRecord(shipment ${shipmentId}) failed: ${this.errorMessage(error)}`);
+      return null;
     }
   }
 
@@ -1628,65 +1638,4 @@ export class ShipmentsService {
     };
   }
 
-  private previewAssignment(input: Partial<Record<string, unknown>> = {}) {
-    const offeredAt = new Date();
-    return {
-      id: String(input.id ?? `assignment-${Date.now()}`),
-      shipmentId: String(input.shipmentId ?? 'TRK-1024'),
-      driverId: String(input.driverId ?? 'preview-driver'),
-      vehicleId: input.vehicleId ? String(input.vehicleId) : 'preview-vehicle',
-      status: String(input.status ?? 'OFFERED'),
-      offeredAt: offeredAt.toISOString(),
-      expiresAt: this.assignmentExpiresAt(offeredAt, this.defaultAssignmentOfferMinutes).toISOString(),
-      driver: {
-        id: String(input.driverId ?? 'preview-driver'),
-        fullName: 'Tracko Preview Driver',
-        email: 'driver@tracko.ng',
-        phone: '+234 800 000 0001',
-      },
-      vehicle: {
-        id: 'preview-vehicle',
-        plateNumber: 'LAG-204-TK',
-        type: 'Flatbed truck',
-        capacityKg: 12000,
-      },
-    };
-  }
-
-  private previewShipment(input: Partial<Record<string, unknown>> = {}) {
-    const now = new Date().toISOString();
-    const id = String(input.id ?? 'TRK-1024');
-    const status = String(input.status ?? 'IN_TRANSIT');
-
-    return {
-      id,
-      customerId: 'preview-customer',
-      origin: String(input.origin ?? 'Lagos'),
-      destination: String(input.destination ?? 'Abuja'),
-      cargoType: String(input.cargoType ?? 'Consumer goods'),
-      quantity: String(input.quantity ?? '1 truckload'),
-      weightTons: Number(input.weightTons ?? 12),
-      truckType: String(input.truckType ?? 'Flatbed truck'),
-      pickupContactPhone: String(input.pickupContactPhone ?? '+234 800 000 0000'),
-      status,
-      escrowId: `escrow-${id}`,
-      media: [],
-      timeline: [
-        {
-          id: `timeline-${id}-created`,
-          status: 'DRAFT',
-          label: 'Shipment created',
-          actorRole: 'CUSTOMER',
-          createdAt: now,
-        },
-        {
-          id: `timeline-${id}-moving`,
-          status,
-          label: 'Shipment in progress',
-          actorRole: 'SYSTEM',
-          createdAt: now,
-        },
-      ],
-    };
-  }
 }
