@@ -19,9 +19,7 @@ function initials(name: string) {
 export class PortalService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async customer(userId?: string) {
-    if (!userId) return this.previewCustomer();
-
+  async customer(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -50,9 +48,7 @@ export class PortalService {
     };
   }
 
-  async driver(userId?: string) {
-    if (!userId) return this.previewDriver();
-
+  async driver(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -99,9 +95,7 @@ export class PortalService {
     };
   }
 
-  async owner(userId?: string) {
-    if (!userId) return this.previewOwner();
-
+  async owner(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -167,76 +161,6 @@ export class PortalService {
       commodity: shipment.cargoDescription,
       amount: money(shipment.quotedPriceKobo),
       meta: 'Backend shipment',
-    };
-  }
-
-  private previewCustomer() {
-    const recentShipments = [
-      {
-        id: 'TRK-1024',
-        reference: 'TRK-1024',
-        status: 'IN_TRANSIT',
-        date: '21',
-        month: 'JUL',
-        origin: 'Lagos',
-        destination: 'Abuja',
-        commodity: 'Consumer goods',
-        amount: 'N240,000',
-        meta: 'Preview shipment',
-      },
-    ];
-
-    return {
-      greetingName: 'Customer',
-      metrics: {
-        totalShipments: 1,
-        activeShipments: 1,
-        escrowHolds: 0,
-        walletBalance: 'N0',
-      },
-      activeShipment: recentShipments[0],
-      recentShipments,
-      walletTransactions: [],
-    };
-  }
-
-  private previewDriver() {
-    return {
-      driver: {
-        id: 'preview-driver',
-        name: 'Preview Driver',
-        initials: 'PD',
-        online: true,
-        todayEarnings: 'N0',
-      },
-      metrics: {
-        availableJobs: 1,
-        activeTrips: 0,
-        completedTrips: 0,
-        rating: 5,
-      },
-      jobs: [],
-      activeTrips: [],
-    };
-  }
-
-  private previewOwner() {
-    return {
-      owner: {
-        id: 'preview-owner',
-        name: 'Preview Fleet Owner',
-        initials: 'PO',
-      },
-      metrics: {
-        registeredTrucks: 0,
-        assignedTrucks: 0,
-        availableTrucks: 0,
-        driverPool: 0,
-        documentsDue: 0,
-      },
-      trucks: [],
-      availableTrucks: [],
-      seekingDrivers: [],
     };
   }
 }
