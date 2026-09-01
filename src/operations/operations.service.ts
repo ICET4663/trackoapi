@@ -127,8 +127,11 @@ export class OperationsService {
         })),
       };
     } catch (error) {
-      this.logger.error(`dashboard() failed, serving preview data: ${this.errorMessage(error)}`);
-      return this.previewDashboard();
+      // Used to fall back to fabricated metrics/recent-shipments/assignment-queue data on
+      // any read failure - an admin/dispatcher checking the operations dashboard during a
+      // DB hiccup would see made-up platform activity instead of an error.
+      this.logger.error(`dashboard() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load the operations dashboard. Please try again.');
     }
   }
 
@@ -259,40 +262,11 @@ export class OperationsService {
         })),
       };
     } catch (error) {
-      this.logger.error(`assignmentQueue() failed, serving preview data: ${this.errorMessage(error)}`);
-      return {
-        shipments: [
-          {
-            id: 'TRK-1024',
-            reference: 'TRK-1024',
-            origin: 'Lagos',
-            destination: 'Abuja',
-            cargo: 'Consumer goods',
-            cargoWeightKg: 8000,
-            status: 'ESCROW_FUNDED',
-            quotedPriceKobo: 35050000,
-            escrow: { id: 'escrow-TRK-1024', status: 'FUNDED', amount: 35050000, currency: 'NGN' },
-            latestAssignment: null,
-            createdAt: new Date().toISOString(),
-          },
-        ],
-        drivers: [
-          {
-            id: 'preview-driver',
-            fullName: 'Tracko Preview Driver',
-            email: 'driver@tracko.ng',
-            phone: '+234 800 000 0001',
-            verificationStatus: 'VERIFIED',
-            activeAssignments: 0,
-            completedTrips: 12,
-            averageRating: 4.8,
-            vehicles: [{ id: 'preview-vehicle', plateNumber: 'LAG-204-TK', type: 'Flatbed truck', capacityKg: 12000 }],
-            matches: {
-              'TRK-1024': { score: 92, eligible: true, vehicleId: 'preview-vehicle', reason: '12t truck fits 8t cargo · Available now · 4.8 rating' },
-            },
-          },
-        ],
-      };
+      // Used to fall back to a single fabricated funded shipment and a fake "92% match"
+      // driver on any read failure - a dispatcher assigning drivers during a DB hiccup
+      // could act on entirely made-up match data instead of seeing an error.
+      this.logger.error(`assignmentQueue() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load the assignment queue. Please try again.');
     }
   }
 
@@ -616,8 +590,11 @@ export class OperationsService {
         nextActions,
       };
     } catch (error) {
-      this.logger.error(`workflowReadiness() failed, serving preview data: ${this.errorMessage(error)}`);
-      return this.previewWorkflowReadiness();
+      // Used to fall back to fabricated metrics/next-actions on any read failure - an
+      // admin/dispatcher checking platform readiness during a DB hiccup would see
+      // made-up counts instead of an error.
+      this.logger.error(`workflowReadiness() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load workflow readiness. Please try again.');
     }
   }
 
@@ -663,30 +640,13 @@ export class OperationsService {
         })),
       };
     } catch (error) {
-      this.logger.error(`escrowLedger() failed, serving preview data: ${this.errorMessage(error)}`);
-      return {
-        totalHeld: 35050000,
-        items: [
-          {
-            id: 'TRK-1024',
-            escrowId: 'escrow-TRK-1024',
-            reference: 'TRK-1024',
-            route: 'Lagos to Abuja',
-            cargo: 'Consumer goods',
-            amount: 35050000,
-            currency: 'NGN',
-            status: 'FUNDED',
-            updatedAt: new Date().toISOString(),
-            releaseChecks: {
-              arrivalConfirmed: true,
-              proofOfDeliveryUploaded: true,
-              customerDeliveryConfirmed: true,
-              disputeWindowClear: false,
-              platformApproved: false,
-            },
-          },
-        ],
-      };
+      // Used to fall back to a fabricated N350,500 "total held" figure and a fake escrow
+      // line item on any read failure - this is a financial reporting screen; an admin
+      // reconciling the platform's actual escrow liability during a DB hiccup would see
+      // a made-up total instead of an error, with nothing distinguishing it from real
+      // money genuinely held.
+      this.logger.error(`escrowLedger() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load the escrow ledger. Please try again.');
     }
   }
 
@@ -1083,69 +1043,4 @@ export class OperationsService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 
-  private previewDashboard() {
-    return {
-      metrics: {
-        activeShipments: 1,
-        openOffers: 1,
-        activeDrivers: 1,
-        pendingVerifications: 1,
-      },
-      recentShipments: [
-        {
-          id: 'TRK-1024',
-          reference: 'TRK-1024',
-          origin: 'Lagos',
-          destination: 'Abuja',
-          status: 'IN_TRANSIT',
-          cargo: 'Consumer goods',
-          createdAt: new Date().toISOString(),
-        },
-      ],
-      assignmentQueue: [
-        {
-          id: 'assignment-preview',
-          shipmentId: 'TRK-1024',
-          driverId: 'preview-driver',
-          vehicleId: 'preview-vehicle',
-          status: 'OFFERED',
-          offeredAt: new Date().toISOString(),
-        },
-      ],
-    };
-  }
-
-  private previewWorkflowReadiness() {
-    return {
-      ok: true,
-      generatedAt: new Date().toISOString(),
-      metrics: {
-        pendingKyc: 1,
-        verifiedDrivers: 1,
-        fundedUnassignedShipments: 1,
-        offeredAssignments: 1,
-        acceptedAssignments: 0,
-        releaseReadyEscrows: 0,
-        openDisputes: 0,
-        openSupportTickets: 0,
-      },
-      blockers: [],
-      nextActions: [
-        {
-          key: 'assign-funded-shipments',
-          label: 'Assign funded shipments',
-          count: 1,
-          priority: 'HIGH',
-          route: '/dispatcher/assignment',
-        },
-        {
-          key: 'kyc-review',
-          label: 'Review pending KYC',
-          count: 1,
-          priority: 'HIGH',
-          route: '/admin/verifications',
-        },
-      ],
-    };
-  }
 }

@@ -306,3 +306,58 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     expect(nearMatch.reason).toContain('km from pickup');
   });
 });
+
+// dashboard()/assignmentQueue()/workflowReadiness()/escrowLedger() used to catch ANY
+// read failure and return fabricated data on these operations/finance screens - a fake
+// "N350,500 total held" on the escrow ledger, a fake "92% match" driver on the
+// assignment queue, fake platform metrics on the dashboard. An admin/dispatcher relying
+// on any of these during a real DB hiccup would see made-up numbers instead of an error.
+describe('OperationsService admin/dispatcher screens never fake data on failure', () => {
+  const admin: OperationActor = { sub: 'admin-1', role: 'ADMIN' };
+
+  function buildService(prismaOverrides: Record<string, unknown>, shipmentsOverrides: Record<string, unknown> = {}) {
+    const prisma = { ...prismaOverrides } as unknown as PrismaService;
+    const shipments = {
+      expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ validityMinutes: 15 }),
+      ...shipmentsOverrides,
+    } as unknown as ShipmentsService;
+    return new OperationsService(prisma, {} as NotificationsService, shipments);
+  }
+
+  it('dashboard() throws instead of fake platform metrics when the read fails', async () => {
+    const service = buildService({
+      shipment: { findMany: jest.fn().mockRejectedValue(new Error('connection reset')) },
+      driverAssignment: { findMany: jest.fn() },
+      user: { findMany: jest.fn() },
+    });
+
+    await expect(service.dashboard()).rejects.toThrow('Could not load the operations dashboard');
+  });
+
+  it('assignmentQueue() throws instead of a fake matched driver when the read fails', async () => {
+    const service = buildService({
+      $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
+      user: { findMany: jest.fn() },
+    });
+
+    await expect(service.assignmentQueue(admin)).rejects.toThrow('Could not load the assignment queue');
+  });
+
+  it('workflowReadiness() throws instead of fake readiness metrics when the read fails', async () => {
+    const service = buildService({
+      user: { count: jest.fn().mockRejectedValue(new Error('connection reset')) },
+      driverAssignment: { count: jest.fn() },
+      $queryRawUnsafe: jest.fn(),
+    });
+
+    await expect(service.workflowReadiness(admin)).rejects.toThrow('Could not load workflow readiness');
+  });
+
+  it('escrowLedger() throws instead of a fake "total held" figure when the read fails', async () => {
+    const service = buildService({
+      $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
+    });
+
+    await expect(service.escrowLedger(admin)).rejects.toThrow('Could not load the escrow ledger');
+  });
+});
