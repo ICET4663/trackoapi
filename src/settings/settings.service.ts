@@ -1502,30 +1502,37 @@ export class SettingsService {
   // shown was always the wrong hardcoded value regardless of what an admin did (nothing,
   // since there was no admin action to take).
   async pendingDriverDocuments() {
-    return this.prisma.$queryRawUnsafe<
-      { id: string; userId: string; title: string; meta: string; number: string | null; expires: Date | null; fileUrl: string | null; createdAt: Date; email: string; phone: string; fullName: string | null }[]
-    >(
-      `select d."id", d."userId", d."title", d."meta", d."number", d."expires", d."fileUrl", d."createdAt",
-              u."email", u."phone", p."fullName"
-       from "DriverDocument" d
-       join "User" u on u."id" = d."userId"
-       left join "Profile" p on p."userId" = u."id"
-       where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
-       order by d."createdAt" asc
-       limit 100`,
-    ).then((rows) => rows.map((row) => ({
-      id: row.id,
-      userId: row.userId,
-      title: row.title,
-      meta: row.meta,
-      number: row.number,
-      expires: row.expires?.toISOString() ?? null,
-      fileUrl: row.fileUrl,
-      submittedAt: row.createdAt.toISOString(),
-      email: row.email,
-      phone: row.phone,
-      fullName: row.fullName ?? row.email,
-    })));
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<
+        { id: string; userId: string; title: string; meta: string; number: string | null; expires: Date | null; fileUrl: string | null; createdAt: Date; email: string; phone: string; fullName: string | null }[]
+      >(
+        `select d."id", d."userId", d."title", d."meta", d."number", d."expires", d."fileUrl", d."createdAt",
+                u."email", u."phone", p."fullName"
+         from "DriverDocument" d
+         join "User" u on u."id" = d."userId"
+         left join "Profile" p on p."userId" = u."id"
+         where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
+         order by d."createdAt" asc
+         limit 100`,
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        userId: row.userId,
+        title: row.title,
+        meta: row.meta,
+        number: row.number,
+        expires: row.expires?.toISOString() ?? null,
+        fileUrl: row.fileUrl,
+        submittedAt: row.createdAt.toISOString(),
+        email: row.email,
+        phone: row.phone,
+        fullName: row.fullName ?? row.email,
+      }));
+    } catch (error) {
+      // This used to have no error handling at all - a real failure surfaced only as
+      // NestJS's generic, detail-free "Internal server error".
+      throw new InternalServerErrorException(`Could not load pending driver documents. Please try again: ${this.errorMessage(error)}`);
+    }
   }
 
   async reviewDriverDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
@@ -1658,23 +1665,32 @@ export class SettingsService {
   }
 
   async pendingVehicleDocuments() {
-    return this.prisma.$queryRawUnsafe<Array<{
-      id: string; vehicleId: string; type: string; title: string; number: string | null;
-      expires: Date | null; fileUrl: string | null; createdAt: Date; plateNumber: string;
-      ownerId: string; ownerEmail: string; ownerName: string | null;
-    }>>(
-      `select d."id", d."vehicleId", d."type", d."title", d."number", d."expires", d."fileUrl", d."createdAt",
-              v."plateNumber", v."ownerId", u."email" as "ownerEmail", p."fullName" as "ownerName"
-       from "VehicleDocument" d join "Vehicle" v on v."id" = d."vehicleId"
-       join "User" u on u."id" = v."ownerId" left join "Profile" p on p."userId" = u."id"
-       where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
-       order by d."createdAt" asc limit 100`,
-    ).then((rows) => rows.map((row) => ({
-      ...row,
-      ownerName: row.ownerName ?? row.ownerEmail,
-      expires: row.expires?.toISOString() ?? null,
-      submittedAt: row.createdAt.toISOString(),
-    })));
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{
+        id: string; vehicleId: string; type: string; title: string; number: string | null;
+        expires: Date | null; fileUrl: string | null; createdAt: Date; plateNumber: string;
+        ownerId: string; ownerEmail: string; ownerName: string | null;
+      }>>(
+        `select d."id", d."vehicleId", d."type", d."title", d."number", d."expires", d."fileUrl", d."createdAt",
+                v."plateNumber", v."ownerId", u."email" as "ownerEmail", p."fullName" as "ownerName"
+         from "VehicleDocument" d join "Vehicle" v on v."id" = d."vehicleId"
+         join "User" u on u."id" = v."ownerId" left join "Profile" p on p."userId" = u."id"
+         where d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
+         order by d."createdAt" asc limit 100`,
+      );
+      return rows.map((row) => ({
+        ...row,
+        ownerName: row.ownerName ?? row.ownerEmail,
+        expires: row.expires?.toISOString() ?? null,
+        submittedAt: row.createdAt.toISOString(),
+      }));
+    } catch (error) {
+      // This used to have no error handling at all - a real failure (e.g. the
+      // "PENDING_REVIEW" enum value or a review column missing on production, both real
+      // schema-drift bugs found live) surfaced only as NestJS's generic, detail-free
+      // "Internal server error", giving no clue what actually broke.
+      throw new InternalServerErrorException(`Could not load pending vehicle documents. Please try again: ${this.errorMessage(error)}`);
+    }
   }
 
   async reviewVehicleDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
