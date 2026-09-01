@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
@@ -42,12 +42,14 @@ const OWNER_OR_OPS_COLLECTIONS = new Set<DataCollection>(['seeking-drivers']);
 
 @Injectable()
 export class DataService {
+  private readonly logger = new Logger(DataService.name);
+
   constructor(private readonly prisma: PrismaService, private readonly shipments?: ShipmentsService) {}
 
   async list(collection: DataCollection, userId: string, role: UserRole) {
-    // Checked before the try block on purpose: the catch below exists to fall back to
-    // preview data on a real infrastructure failure, and must never also swallow this
-    // into a silent "here's some data anyway" response for someone who isn't ops staff.
+    // Checked before the try block on purpose: a real infrastructure failure below must
+    // throw, not fall back to a silent "here's some data anyway" response - and that
+    // must never also apply to someone who isn't ops staff in the first place.
     if (OPS_ONLY_COLLECTIONS.has(collection) && role !== 'ADMIN' && role !== 'DISPATCHER') {
       throw new ForbiddenException('Only platform operations can view this data.');
     }
@@ -178,8 +180,14 @@ export class DataService {
         default:
           throw new BadRequestException('Unsupported data collection.');
       }
-    } catch {
-      return this.previewList(collection);
+    } catch (error) {
+      // A DataCollection like "customer-shipments"/"owner-trucks"/"wallet-transactions"
+      // used to fall back to a single fabricated, indistinguishable-from-real "preview"
+      // row on ANY failure here (a DB outage, a bad query) - every portal screen backed
+      // by this endpoint would silently render fake data instead of surfacing the outage.
+      if (error instanceof BadRequestException || error instanceof ForbiddenException) throw error;
+      this.logger.error(`list(${collection}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not load this data. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -241,8 +249,16 @@ export class DataService {
         default:
           return { ...item, id: String(item.id ?? `local_${Date.now()}`) };
       }
-    } catch {
-      return { ...item, id: String(item.id ?? `local_${Date.now()}`), preview: true };
+    } catch (error) {
+      // Used to swallow a real write failure (e.g. a duplicate plate number, a DB
+      // outage) into a fake "saved" echo carrying only a locally-generated id - the
+      // owner-trucks screen would tell the user their truck was saved to the fleet
+      // database when the Vehicle row was never written. Only the write cases above
+      // (customer-shipments, owner-trucks) can actually throw here; the `default` echo
+      // branch never touches the DB and returns before this catch is reachable.
+      if (error instanceof BadRequestException) throw error;
+      this.logger.error(`create(${collection}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not save this. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -584,138 +600,7 @@ export class DataService {
     return `${Math.round(hours / 24)}d`;
   }
 
-  private previewList(collection: DataCollection) {
-    switch (collection) {
-      case 'active-trips':
-        return [
-          {
-            id: 'TRK-1024',
-            sender: 'Tracko Customer',
-            senderInitial: 'TC',
-            receiver: 'Abuja Receiver',
-            origin: 'Lagos',
-            destination: 'Abuja',
-            cargo: 'Consumer goods',
-            distance: '752 km',
-            eta: 'Today, 6:30 PM',
-            stageIndex: 2,
-            completed: false,
-          },
-        ];
-      case 'customer-shipments':
-        return [
-          {
-            id: 'TRK-1024',
-            reference: 'TRK-1024',
-            status: 'IN_TRANSIT',
-            date: '22',
-            month: 'JUL',
-            origin: 'Lagos',
-            destination: 'Abuja',
-            commodity: 'Consumer goods',
-            amount: 'N240,000',
-            meta: 'Preview shipment',
-          },
-        ];
-      case 'owner-trucks':
-        return [
-          {
-            id: 'truck-1',
-            reg: 'LAG-204-TK',
-            type: 'Flatbed',
-            capacity: '30 tons',
-            year: '2021',
-            status: 'Available',
-            base: 'Lagos',
-            documents: 'Verified',
-          },
-        ];
-      case 'driver-jobs':
-        return [
-          {
-            id: 'job-1',
-            origin: 'Lagos',
-            destination: 'Abuja',
-            cargo: 'Consumer goods',
-            price: 'N240,000',
-            status: 'OFFERED',
-          },
-        ];
-      case 'dispatcher-shipments':
-      case 'operation-shipments':
-        return [
-          {
-            id: 'TRK-1024',
-            status: 'IN_TRANSIT',
-            origin: 'Lagos',
-            destination: 'Abuja',
-            customer: 'Tracko Customer',
-            driver: 'Musa Ibrahim',
-            truck: 'LAG-204-TK',
-            eta: 'Today, 6:30 PM',
-          },
-        ];
-      case 'dispatcher-disputes':
-        return [
-          {
-            id: 'DSP-1001',
-            title: 'Delivery confirmation pending',
-            status: 'OPEN',
-            priority: 'Medium',
-          },
-        ];
-      case 'platform-users':
-        return [
-          {
-            id: 'preview-customer',
-            name: 'Tracko Customer',
-            role: 'CUSTOMER',
-            status: 'VERIFIED',
-            email: 'customer@tracko.ng',
-            phone: '+234 800 000 0000',
-          },
-          {
-            id: 'preview-driver',
-            name: 'Musa Ibrahim',
-            role: 'DRIVER',
-            status: 'VERIFIED',
-            email: 'driver@tracko.ng',
-            phone: '+234 800 000 0001',
-          },
-        ];
-      case 'operation-drivers':
-        return [
-          {
-            id: 'preview-driver',
-            name: 'Musa Ibrahim',
-            status: 'ONLINE',
-            location: 'Lagos',
-            rating: 5,
-          },
-        ];
-      case 'wallet-transactions':
-        return [
-          {
-            id: 'wallet-1',
-            title: 'Escrow hold',
-            amount: 'N240,000',
-            type: 'DEBIT',
-            date: 'Jul 22, 2026',
-            status: 'HELD',
-          },
-        ];
-      case 'seeking-drivers':
-        return [
-          {
-            id: 'driver-match-1',
-            name: 'Musa Ibrahim',
-            rating: 5,
-            location: 'Lagos',
-            truck: 'Flatbed',
-          },
-        ];
-      default:
-        return [];
-    }
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 }

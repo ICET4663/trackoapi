@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, InternalServerErrorException } from '@nestjs/common';
 import { DataService, type DataCollection } from './data.service';
 import type { PrismaService } from '../prisma/prisma.service';
 
@@ -88,5 +88,49 @@ describe('DataService authorization gates', () => {
     // role must still reach its own legitimately-scoped data.
     await expect(service.list('customer-shipments', 'cust-1', 'CUSTOMER')).resolves.toBeDefined();
     expect(prisma.shipment.findMany).toHaveBeenCalledTimes(1);
+  });
+});
+
+// list()/create() used to swallow ANY failure (a DB outage, a bad query, a unique
+// constraint violation) into a single fabricated "preview" row that was structurally
+// identical to real data - every portal screen behind /v1/data/:collection (shipments,
+// trucks, wallet, dispatcher queues, platform users...) would silently render fake
+// content instead of surfacing the outage, and owner-trucks' create() would tell an
+// owner their truck was saved when the Vehicle row was never written.
+describe('DataService never fakes success on a real failure', () => {
+  it('list() throws instead of returning a fabricated preview row when the read fails', async () => {
+    const prisma = {
+      shipment: { findMany: jest.fn().mockRejectedValue(new Error('connection reset')) },
+    } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(service.list('customer-shipments', 'cust-1', 'CUSTOMER')).rejects.toBeInstanceOf(
+      InternalServerErrorException,
+    );
+  });
+
+  it('list() still lets a real ForbiddenException through untouched, not wrapped as a 500', async () => {
+    const prisma = {} as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(service.list('platform-users', 'cust-1', 'CUSTOMER')).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('create() throws instead of a fake "saved" echo when the Vehicle write fails', async () => {
+    const prisma = {
+      vehicle: { create: jest.fn().mockRejectedValue(new Error('duplicate plate number')) },
+    } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(
+      service.create('owner-trucks', { reg: 'LAG-204-TK', type: 'Flatbed' }, 'owner-1'),
+    ).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('create() still rejects a missing plate number as a real BadRequestException', async () => {
+    const prisma = {} as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(service.create('owner-trucks', {}, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
   });
 });
