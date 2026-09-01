@@ -207,6 +207,23 @@ describe('AuthService.refresh rotates tokens and detects reuse', () => {
     await expect(service.refresh('expired-refresh-token')).rejects.toThrow();
     expect((prisma.refreshToken.updateMany as jest.Mock)).not.toHaveBeenCalled();
   });
+
+  // createSession() used to swallow a failed refresh-token insert and still return the
+  // refreshToken value to the client as if it were durable - the caller's very next
+  // refresh attempt would reject it as "invalid or expired" with no warning at the time
+  // the session was created. Reachable here specifically: refresh() revokes the
+  // presented token BEFORE minting the new one, so a failure at this exact point could
+  // leave the caller with no valid refresh token at all.
+  it('throws instead of returning a session with a refresh token that failed to save', async () => {
+    const row = { id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 1000 * 60 * 60) };
+    const { service, prisma } = buildService(row);
+    (prisma.refreshToken.create as jest.Mock).mockRejectedValue(new Error('connection reset'));
+
+    await expect(service.refresh('some-refresh-token')).rejects.toThrow();
+    // The old token was still revoked (correct - it was legitimately redeemed), but the
+    // caller must never receive a "successful" session that isn't actually durable.
+    expect((prisma.refreshToken.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'rt-1' }, data: { revokedAt: expect.any(Date) } });
+  });
 });
 
 // SettingsService.requestAccountDeletion() (the in-app "Request account deletion" flow)

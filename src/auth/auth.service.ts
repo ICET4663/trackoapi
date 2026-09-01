@@ -380,6 +380,15 @@ export class AuthService {
     const tokenHash = await this.hashToken(refreshToken);
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
+    // This used to swallow a failed refresh-token insert and still return the
+    // refreshToken value to the client as if it were durable - the login/refresh call
+    // itself "succeeded" (a real, working accessToken), but that refreshToken didn't
+    // exist in the database. The very next refresh attempt (refresh()'s own lookup
+    // above) would reject it as "invalid or expired" with no warning at the time the
+    // session was created - reachable from login(), register(), AND refresh() itself
+    // (which revokes the old token before minting this one, so a failure here can leave
+    // the caller with no valid refresh token at all). A session that can't actually
+    // persist must fail loudly, not claim a working long-lived session that isn't one.
     try {
       await this.prisma.refreshToken.create({
         data: { userId: user.id, tokenHash, expiresAt },
@@ -389,6 +398,7 @@ export class AuthService {
         userId: user.id,
         error: error instanceof Error ? error.message : String(error),
       });
+      throw new InternalServerErrorException('Could not start your session. Please try again.');
     }
 
     return {
