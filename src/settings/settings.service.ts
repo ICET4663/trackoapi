@@ -1317,6 +1317,13 @@ export class SettingsService {
     };
   }
 
+  // This used to catch ANY read failure (a DB outage, a bad query) and return a single
+  // fabricated pending withdrawal request - "Tracko Driver", "Preview Bank **** 0012",
+  // N120,000 - indistinguishable from a real one on the admin finance queue. Worse,
+  // reviewPayoutRequest() had a matching special case that let an admin "approve" or
+  // "mark paid" that fake id without ever touching the real Payout table - an admin
+  // could believe they'd paid a driver N120,000 when nothing happened on either side.
+  // A real infra failure here must surface as a real error, never a phantom request.
   async adminPayoutRequests() {
     try {
       const payouts = await this.prisma.payout.findMany({
@@ -1339,23 +1346,8 @@ export class SettingsService {
         requestedAt: payout.createdAt.toISOString(),
         requestedAtLabel: payout.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
       }));
-    } catch {
-      return [
-        {
-          id: 'payout-preview-1',
-          driverId: 'preview-driver',
-          driverName: 'Tracko Driver',
-          driverEmail: 'driver@tracko.ng',
-          amount: 12000000,
-          amountLabel: 'N120,000',
-          status: 'PENDING',
-          bankLabel: 'Preview Bank **** 0012',
-          note: null,
-          reviewNote: null,
-          requestedAt: new Date().toISOString(),
-          requestedAtLabel: 'Today',
-        },
-      ];
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load payout requests. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
@@ -1363,16 +1355,6 @@ export class SettingsService {
     const decision = String(input.decision ?? '').toUpperCase();
     if (!['APPROVED', 'REJECTED', 'PAID'].includes(decision)) {
       throw new BadRequestException('Use APPROVED, REJECTED, or PAID as the payout decision.');
-    }
-
-    if (id.startsWith('payout-preview-')) {
-      return {
-        id,
-        status: decision,
-        amount: 12000000,
-        amountLabel: 'N120,000',
-        message: `Preview payout request marked as ${decision.toLowerCase()}.`,
-      };
     }
 
     const existing = await this.prisma.payout.findUnique({ where: { id } });

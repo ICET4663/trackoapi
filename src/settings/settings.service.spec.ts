@@ -696,3 +696,66 @@ describe('SettingsService saved addresses never fake success', () => {
     expect(result).toMatchObject({ id: 'addr-1', label: 'Home' });
   });
 });
+
+// adminPayoutRequests()/reviewPayoutRequest() used to fall back to a single fabricated
+// "Tracko Driver, N120,000, Preview Bank **** 0012" pending withdrawal on any read
+// failure, and reviewPayoutRequest() had a matching special case that let an admin
+// "approve"/"mark paid" that fake id without ever touching the real Payout table - an
+// admin could believe they'd paid a driver N120,000 when nothing happened on either side.
+describe('SettingsService payout review never fakes a withdrawal request', () => {
+  function buildPayoutService(prismaOverrides: Record<string, unknown>) {
+    const prisma = {
+      notification: { create: jest.fn() },
+      ...prismaOverrides,
+    } as unknown as PrismaService;
+    return new SettingsService(
+      prisma,
+      { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+  }
+
+  it('adminPayoutRequests() throws instead of a fake pending withdrawal when the read fails', async () => {
+    const service = buildPayoutService({
+      payout: { findMany: jest.fn().mockRejectedValue(new Error('connection reset')) },
+    });
+
+    await expect(service.adminPayoutRequests()).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('adminPayoutRequests() returns the real (possibly empty) list on success', async () => {
+    const service = buildPayoutService({
+      payout: { findMany: jest.fn().mockResolvedValue([]) },
+    });
+
+    await expect(service.adminPayoutRequests()).resolves.toEqual([]);
+  });
+
+  it('reviewPayoutRequest() throws NotFoundException for a fake "payout-preview-" id instead of faking a decision', async () => {
+    const service = buildPayoutService({
+      payout: { findUnique: jest.fn().mockResolvedValue(null) },
+    });
+
+    await expect(service.reviewPayoutRequest('payout-preview-1', 'admin-1', { decision: 'PAID' }))
+      .rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('reviewPayoutRequest() records a real decision against a real payout row', async () => {
+    const update = jest.fn().mockResolvedValue({
+      id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'PAID',
+    });
+    const service = buildPayoutService({
+      payout: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1' }),
+        update,
+      },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    });
+
+    const result = await service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' });
+
+    expect(result.id).toBe('payout-1');
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'payout-1' } }));
+  });
+});
