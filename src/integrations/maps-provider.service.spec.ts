@@ -75,6 +75,39 @@ describe('MapsProviderService route pricing', () => {
     expect(quote.pricingBreakdown.routeSource).toBe('google_routes');
   });
 
+  it('reverse geocodes GPS coordinates through Google', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: jest.fn().mockResolvedValue({
+        results: [{
+          place_id: 'place-lagos',
+          formatted_address: '12 Marina Road, Lagos, Nigeria',
+          geometry: { location: { lat: 6.44686, lng: 3.39736 } },
+        }],
+      }),
+    }) as unknown as typeof fetch;
+
+    const result = await createService({ googleKey: 'test-key' }).geocode('6.44686,3.39736');
+
+    expect(result.provider).toBe('google');
+    expect(result.result.address).toBe('12 Marina Road, Lagos, Nigeria');
+    expect(global.fetch).toHaveBeenCalledWith(expect.objectContaining({
+      searchParams: expect.any(URLSearchParams),
+    }));
+    expect(String((global.fetch as jest.Mock).mock.calls[0][0])).toContain('latlng=6.44686%2C3.39736');
+  });
+
+  it('preserves GPS coordinates when reverse geocoding is unavailable', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('Google unavailable')) as unknown as typeof fetch;
+
+    const result = await createService({ googleKey: 'test-key' }).geocode('6.44686,3.39736');
+
+    expect(result.provider).toBe('coordinate');
+    expect(result.result.latitude).toBe(6.44686);
+    expect(result.result.longitude).toBe(3.39736);
+    expect(result.result.address).toContain('6.44686, 3.39736');
+  });
+
   it('uses the persisted rate card for the selected truck type', async () => {
     const quote = await createService({
       settings: [

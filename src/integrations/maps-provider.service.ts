@@ -201,10 +201,30 @@ export class MapsProviderService {
   }
 
   async geocode(address = '') {
+    const coordinates = this.parseCoordinates(address);
     const key = this.config.get<string>('GOOGLE_MAPS_API_KEY');
     if (key && address.trim().length >= 2) {
-      const google = await this.googleGeocode(address, key).catch(() => null);
+      const google = coordinates
+        ? await this.googleReverseGeocode(coordinates.latitude, coordinates.longitude, key).catch(() => null)
+        : await this.googleGeocode(address, key).catch(() => null);
       if (google) return { provider: 'google', result: google };
+    }
+
+    if (coordinates) {
+      const formatted = `${coordinates.latitude.toFixed(5)}, ${coordinates.longitude.toFixed(5)}`;
+      return {
+        provider: 'coordinate',
+        result: {
+          id: `current-${formatted}`,
+          label: 'Current location',
+          address: `Current GPS location - ${formatted}`,
+          city: '',
+          state: '',
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude,
+          provider: 'coordinate',
+        },
+      };
     }
 
     const normalized = address.trim().toLowerCase();
@@ -473,6 +493,41 @@ export class MapsProviderService {
       longitude: result.geometry?.location?.lng ?? 0,
       provider: 'google',
     };
+  }
+
+  private async googleReverseGeocode(latitude: number, longitude: number, key: string): Promise<PlaceSuggestion | null> {
+    const url = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+    url.searchParams.set('latlng', `${latitude},${longitude}`);
+    url.searchParams.set('result_type', 'street_address|route|premise|sublocality|locality');
+    url.searchParams.set('key', key);
+    const response = await fetch(url);
+    const payload = (await response.json()) as {
+      results?: Array<{ place_id: string; formatted_address: string; geometry?: { location?: { lat: number; lng: number } } }>;
+    };
+    const result = payload.results?.[0];
+    if (!result) return null;
+
+    return {
+      id: result.place_id,
+      label: this.cityFromAddress(result.formatted_address),
+      address: result.formatted_address,
+      city: this.cityFromAddress(result.formatted_address),
+      state: '',
+      latitude: result.geometry?.location?.lat ?? latitude,
+      longitude: result.geometry?.location?.lng ?? longitude,
+      provider: 'google',
+    };
+  }
+
+  private parseCoordinates(value: string) {
+    const match = value.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+    if (!match) return null;
+    const latitude = Number(match[1]);
+    const longitude = Number(match[2]);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+      return null;
+    }
+    return { latitude, longitude };
   }
 
   private cityFromAddress(address: string) {
