@@ -22,7 +22,12 @@ export async function createTrackoApp() {
     'http://192.168.100.7:8081',
     'http://192.168.100.7:8082',
   ];
-  const allowedOrigins = new Set([...configuredOrigins, ...devOrigins]);
+  const productionOrigins = [
+    'https://trako.com.ng',
+    'https://www.trako.com.ng',
+    'https://cargo-link-logistics-mm1c.vercel.app',
+  ];
+  const allowedOrigins = new Set([...configuredOrigins, ...productionOrigins, ...devOrigins]);
   const allowVercelPreviews = config.get<string>('ALLOW_VERCEL_PREVIEWS') === 'true';
 
   app.setGlobalPrefix('v1');
