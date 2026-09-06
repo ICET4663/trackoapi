@@ -307,3 +307,57 @@ describe('AuthService.requestRegistrationCode never claims success when the OTP 
     expect(result.sent).toBe(true);
   });
 });
+
+// When the OTP email can't actually be delivered (provider unconfigured, Resend still
+// in sandbox mode, or a real send failure) a new user would otherwise have no way to
+// get their code and could never finish signing up. The code is returned in the
+// response as a fallback - registration only, never password reset - and stops being
+// returned the moment real delivery works.
+describe('AuthService.requestRegistrationCode OTP fallback when email delivery fails', () => {
+  function buildService(configValues: Record<string, string | undefined>) {
+    const config = { get: (key: string) => configValues[key] } as unknown as ConfigService;
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      otpCode: { create: jest.fn().mockResolvedValue(undefined) },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
+    return new AuthService(config, {} as JwtService, prisma, rateLimit, {} as UsersService);
+  }
+
+  const request = { email: 'new@tracko.ng', phone: '+2348030000001', role: 'CUSTOMER' as never } as never;
+
+  it('returns devCode when the provider is unconfigured (mock mode)', async () => {
+    const result = await buildService({}).requestRegistrationCode(request);
+    expect(result.devCode).toMatch(/^\d{6}$/);
+    expect(result.delivery.sent).toBe(false);
+  });
+
+  it('returns devCode when Resend is configured but the send fails', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      json: async () => ({ message: 'You can only send testing emails to your own email address.' }),
+    } as Response);
+    try {
+      const result = await buildService({ EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'test_key' }).requestRegistrationCode(request);
+      expect(result.devCode).toMatch(/^\d{6}$/);
+      expect(result.delivery.sent).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does NOT return devCode once the email actually sends', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'email_123' }),
+    } as Response);
+    try {
+      const result = await buildService({ EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'test_key' }).requestRegistrationCode(request);
+      expect(result.devCode).toBeUndefined();
+      expect(result.delivery.sent).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});

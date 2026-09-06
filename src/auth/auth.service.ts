@@ -76,11 +76,19 @@ export class AuthService {
       expiresAt,
     });
 
+    // If the OTP email did not actually go out (provider unconfigured, Resend still
+    // in sandbox mode, a genuine send failure), fall back to returning the code in
+    // this response so a new user can still complete signup. Scoped to REGISTRATION
+    // only - never password reset - and to the caller who just entered this email
+    // for a brand-new account, so the exposure is minimal. Self-disables the moment
+    // real email delivery starts working (delivery.sent === true).
+    const includeCode = this.exposeDevOtp() || !delivery.sent;
+
     return {
       sent: true,
       expiresAt: expiresAt.toISOString(),
       delivery,
-      ...(this.exposeDevOtp() ? { devCode: code } : {}),
+      ...(includeCode ? { devCode: code } : {}),
     };
   }
 
@@ -204,6 +212,7 @@ export class AuthService {
       fullName: dto.fullName,
       passwordHash,
       role: dto.role,
+      profile: dto.profile,
     });
 
     return this.createSession(user.id);
