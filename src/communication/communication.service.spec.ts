@@ -1,4 +1,4 @@
-import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CommunicationService } from './communication.service';
 import { TranslationProviderService } from '../integrations/translation-provider.service';
@@ -72,6 +72,38 @@ describe('CommunicationService never fakes success on failure', () => {
     expect(result.id).toBe('msg-1');
     expect(result.body).toBe('hello');
   });
+
+  it('allows the owner of the assigned truck to read the shipment conversation', async () => {
+    const prisma = buildPrisma({
+      conversation: {
+        upsert: jest.fn().mockResolvedValue({
+          id: 'conv-1', shipmentId: 'shipment-1', customerId: 'customer-1', driverId: 'driver-1',
+        }),
+        update: jest.fn(),
+      },
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue({ id: 'assignment-1' }) },
+    });
+    const service = buildService(prisma);
+    const owner = { sub: 'owner-1', email: 'owner@x.com', role: 'TRUCK_OWNER' } as AuthUser;
+
+    await expect(service.listMessages('conv-1', owner)).resolves.toMatchObject({ messages: [] });
+  });
+
+  it('rejects a truck owner whose vehicle is not assigned to the shipment', async () => {
+    const prisma = buildPrisma({
+      conversation: {
+        upsert: jest.fn().mockResolvedValue({
+          id: 'conv-1', shipmentId: 'shipment-1', customerId: 'customer-1', driverId: 'driver-1',
+        }),
+        update: jest.fn(),
+      },
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+    });
+    const service = buildService(prisma);
+    const owner = { sub: 'owner-2', email: 'other-owner@x.com', role: 'TRUCK_OWNER' } as AuthUser;
+
+    await expect(service.listMessages('conv-1', owner)).rejects.toBeInstanceOf(ForbiddenException);
+  });
 });
 
 // Translation is a best-effort side effect layered on top of the real send - it must
@@ -134,9 +166,13 @@ describe('CommunicationService.sendMessage translation for the recipient', () =>
 
 // transcribeVoiceNote() used to be an unconditional stub that never called anything real.
 describe('CommunicationService.transcribeVoiceNote', () => {
-  function buildService(transcribe: jest.Mock, statusOverride?: Partial<{ transcriptionEnabled: boolean }>) {
+  function buildService(
+    transcribe: jest.Mock,
+    statusOverride?: Partial<{ transcriptionEnabled: boolean }>,
+    translate: jest.Mock = jest.fn(),
+  ) {
     const translationProvider = {
-      translate: jest.fn(),
+      translate,
       transcribe,
       status: jest.fn().mockReturnValue({ transcriptionEnabled: false, ...statusOverride }),
     } as unknown as TranslationProviderService;
@@ -150,6 +186,28 @@ describe('CommunicationService.transcribeVoiceNote', () => {
     const result = await service.transcribeVoiceNote({ durationSeconds: 4, base64: 'AAAA', mimeType: 'audio/webm' } as never);
 
     expect(result.transcript).toBe('good morning');
+  });
+
+  it('returns an English transcript while retaining the original Nigerian-language transcript', async () => {
+    const transcribe = jest.fn().mockResolvedValue({ transcript: 'Ututu oma', detectedLanguage: 'ig' });
+    const translate = jest.fn().mockResolvedValue({ translatedText: 'Good morning', detectedSourceLanguage: 'ig' });
+    const service = buildService(transcribe, { transcriptionEnabled: true }, translate);
+
+    const result = await service.transcribeVoiceNote({
+      durationSeconds: 4,
+      base64: 'AAAA',
+      mimeType: 'audio/webm',
+      languageHint: 'ig',
+    } as never);
+
+    expect(transcribe).toHaveBeenCalledWith('AAAA', 'audio/webm', 'ig');
+    expect(translate).toHaveBeenCalledWith('Ututu oma', 'en', 'ig');
+    expect(result).toMatchObject({
+      transcript: 'Good morning',
+      sourceTranscript: 'Ututu oma',
+      detectedLanguage: 'ig',
+      translatedToEnglish: true,
+    });
   });
 
   it('returns an honest unavailable reason, not a fake transcript, when unconfigured', async () => {

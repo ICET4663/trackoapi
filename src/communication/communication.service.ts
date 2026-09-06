@@ -22,22 +22,33 @@ export class CommunicationService {
     private readonly translationProvider: TranslationProviderService,
   ) {}
 
-  // A conversation created with a customerId/driverId is scoped: only those two
-  // people (or ops staff) may read/write it. A conversation with both null is a
+  // A conversation created with a customerId/driverId is scoped: those participants,
+  // the assigned truck owner, and operations staff may read/write it. A conversation with both null is a
   // legacy/admin-mock thread from before scoping existed - left open rather than
   // locking existing admin/dispatcher screens out of threads they already use.
   private async assertConversationAccess(
-    conversation: { customerId: string | null; driverId: string | null },
+    conversation: { shipmentId: string | null; customerId: string | null; driverId: string | null },
     user: AuthUser,
   ) {
     if (user.role === 'ADMIN' || user.role === 'DISPATCHER') return;
     if (!conversation.customerId && !conversation.driverId) return;
     if (conversation.customerId === user.sub || conversation.driverId === user.sub) return;
+    if (user.role === 'TRUCK_OWNER' && conversation.shipmentId) {
+      const ownerAssignment = await this.prisma.driverAssignment.findFirst({
+        where: {
+          shipmentId: conversation.shipmentId,
+          status: 'ACCEPTED',
+          vehicle: { ownerId: user.sub },
+        },
+        select: { id: true },
+      });
+      if (ownerAssignment) return;
+    }
     throw new ForbiddenException('You do not have access to this conversation.');
   }
 
   // Finds (or lazily creates) the single conversation thread scoped to a shipment,
-  // so the customer and the assigned driver have exactly one place to talk about it.
+  // so the customer, assigned driver, truck owner and operations team share one thread.
   async getOrCreateShipmentConversation(shipmentId: string, user: AuthUser) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id: shipmentId },
@@ -55,6 +66,13 @@ export class CommunicationService {
       driverId = assignment.driverId;
     } else if (user.role === 'CUSTOMER') {
       if (shipment.customerId !== user.sub) throw new ForbiddenException('You do not have access to this shipment.');
+    } else if (user.role === 'TRUCK_OWNER') {
+      const ownerAssignment = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, status: 'ACCEPTED', vehicle: { ownerId: user.sub } },
+        select: { driverId: true },
+      });
+      if (!ownerAssignment) throw new ForbiddenException('Your truck is not assigned to this shipment.');
+      driverId = ownerAssignment.driverId;
     } else if (user.role !== 'ADMIN' && user.role !== 'DISPATCHER') {
       throw new ForbiddenException('You do not have access to this shipment.');
     }
@@ -88,6 +106,14 @@ export class CommunicationService {
           ? { customerId: user.sub }
           : user.role === 'DRIVER'
             ? { driverId: user.sub }
+            : user.role === 'TRUCK_OWNER'
+              ? {
+                  shipment: {
+                    assignments: {
+                      some: { status: 'ACCEPTED' as const, vehicle: { ownerId: user.sub } },
+                    },
+                  },
+                }
             : {}; // ADMIN/DISPATCHER get operational visibility across all threads.
 
       const conversations = await this.prisma.conversation.findMany({
@@ -254,9 +280,14 @@ export class CommunicationService {
     if (dto.base64) {
       const result = await this.translationProvider.transcribe(dto.base64, dto.mimeType ?? 'audio/webm', dto.languageHint);
       if (result) {
+        const english = result.detectedLanguage && result.detectedLanguage !== 'en'
+          ? await this.translationProvider.translate(result.transcript, 'en', result.detectedLanguage).catch(() => null)
+          : null;
         return {
-          transcript: result.transcript,
+          transcript: english?.translatedText ?? result.transcript,
+          sourceTranscript: english ? result.transcript : undefined,
           detectedLanguage: result.detectedLanguage,
+          translatedToEnglish: Boolean(english),
           durationSeconds: dto.durationSeconds,
         };
       }

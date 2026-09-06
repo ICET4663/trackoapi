@@ -2,7 +2,9 @@ import { ConfigService } from '@nestjs/config';
 import { TranslationProviderService } from './translation-provider.service';
 
 function buildService(apiKey: string | undefined) {
-  const config = { get: jest.fn().mockReturnValue(apiKey) } as unknown as ConfigService;
+  const config = {
+    get: jest.fn((key: string) => key === 'GOOGLE_CLOUD_API_KEY' ? apiKey : undefined),
+  } as unknown as ConfigService;
   return new TranslationProviderService(config);
 }
 
