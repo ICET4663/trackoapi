@@ -9,7 +9,9 @@ const SUPPORTED_LANGUAGES = ['en', 'ha', 'yo', 'ig'] as const;
 type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
 
 const SPEECH_LANGUAGE_TAGS: Record<SupportedLanguage, string> = {
-  en: 'en-NG',
+  // Chirp 2 does not currently list en-NG for synchronous recognition. en-US is
+  // supported in the configured region and handles Nigerian English recordings.
+  en: 'en-US',
   ha: 'ha-NG',
   yo: 'yo-NG',
   ig: 'ig-NG',
