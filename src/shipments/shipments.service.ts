@@ -25,6 +25,7 @@ type ShipmentRecordInput = {
   distanceKm?: number | null;
   durationMinutes?: number | null;
   pickupContactPhone?: string | null;
+  adminApproved?: boolean;
   timeline?: TimelineRecordInput[];
 };
 
@@ -1034,20 +1035,27 @@ export class ShipmentsService {
         adminApproved: false,
         status: { notIn: ['DRAFT', 'QUOTED', 'PENDING_PAYMENT', 'CANCELLED'] },
       },
+      include: { escrow: true, timeline: { orderBy: { createdAt: 'asc' } } },
       orderBy: { updatedAt: 'desc' },
       take: 100,
-    }).catch(() => []);
-    return shipments.map((shipment) => this.toShipmentRecord(shipment));
+    });
+    return shipments.map((shipment) => this.toShipmentRecord(shipment, { escrow: shipment.escrow }));
   }
 
   async approveShipment(shipmentId: string, reviewerId: string, actorRole: UserRole) {
-    if (actorRole !== 'ADMIN' && actorRole !== 'DISPATCHER') {
-      throw new ForbiddenException('Only platform operations can approve a shipment.');
+    if (actorRole !== 'ADMIN') {
+      throw new ForbiddenException('Only an admin can approve a funded shipment for dispatch.');
     }
 
-    const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId } }).catch(() => null);
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: { escrow: true, timeline: { orderBy: { createdAt: 'asc' } } },
+    }).catch(() => null);
     if (!shipment) throw new NotFoundException('Shipment not found.');
-    if (shipment.adminApproved) return this.toShipmentRecord(shipment);
+    if (!shipment.escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(shipment.escrow.status)) {
+      throw new BadRequestException('Paystack payment must be verified and escrow funded before approval.');
+    }
+    if (shipment.adminApproved) return this.toShipmentRecord(shipment, { escrow: shipment.escrow });
 
     const updated = await this.prisma.shipment.update({
       where: { id: shipmentId },
@@ -1072,7 +1080,7 @@ export class ShipmentsService {
       actionUrl: '/dispatcher/assignment',
     });
 
-    return this.toShipmentRecord(updated);
+    return this.toShipmentRecord(updated, { escrow: shipment.escrow });
   }
 
   async releaseEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
@@ -1533,6 +1541,7 @@ export class ShipmentsService {
       pricingVersion?: string;
       quoteValidMinutes?: number;
       pricingBreakdown?: Awaited<ReturnType<MapsProviderService['routeEstimate']>>['pricingBreakdown'];
+      escrow?: { id: string; amount: number; currency: string; status: string; updatedAt?: Date | string } | null;
     } = {},
   ) {
     return {
@@ -1560,7 +1569,17 @@ export class ShipmentsService {
       quoteValidMinutes: options.quoteValidMinutes,
       pricingBreakdown: options.pricingBreakdown,
       status: shipment.status ?? 'DRAFT',
+      adminApproved: shipment.adminApproved ?? false,
       escrowId: options.escrowId ?? `escrow-${shipment.id}`,
+      escrow: options.escrow
+        ? {
+            id: options.escrow.id,
+            amount: options.escrow.amount,
+            currency: options.escrow.currency,
+            status: options.escrow.status,
+            updatedAt: options.escrow.updatedAt instanceof Date ? options.escrow.updatedAt.toISOString() : options.escrow.updatedAt,
+          }
+        : undefined,
       media: options.media ?? [],
       timeline: (shipment.timeline ?? []).map((event) => this.toTimelineRecord(event)),
     };

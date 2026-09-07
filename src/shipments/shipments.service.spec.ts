@@ -670,3 +670,32 @@ describe('ShipmentsService driver/assignment lookups never fake data on failure'
       .rejects.toBeInstanceOf(InternalServerErrorException);
   });
 });
+
+describe('ShipmentsService funded shipment approval', () => {
+  it('keeps payment approval separate from dispatcher assignment', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.approveShipment('shipment-1', 'dispatcher-1', 'DISPATCHER')).rejects.toThrow(
+      'Only an admin can approve a funded shipment for dispatch.',
+    );
+  });
+
+  it('rejects approval until a provider-verified escrow is funded', async () => {
+    const prisma = {
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shipment-1', customerId: 'customer-1', reference: 'TRK-1', status: 'PENDING_PAYMENT',
+          pickupLabel: 'Lagos', destinationLabel: 'Abuja', cargoDescription: 'Food',
+          adminApproved: false, escrow: { id: 'escrow-1', amount: 500000, currency: 'NGN', status: 'PENDING' }, timeline: [],
+        }),
+        update: jest.fn(),
+      },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.approveShipment('shipment-1', 'admin-1', 'ADMIN')).rejects.toThrow(
+      'Paystack payment must be verified and escrow funded before approval.',
+    );
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+  });
+});

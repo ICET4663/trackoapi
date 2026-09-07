@@ -31,7 +31,12 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
     };
     prisma = {
       shipment: { findUnique: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue(undefined) },
-      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+        if (sql.includes('select "amount", "currency"')) {
+          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING' }]);
+        }
+        return Promise.resolve([]);
+      }),
     };
     notifications = {} as NotificationsService;
     service = new PaymentProviderService(config as unknown as ConfigService, prisma as unknown as PrismaService, notifications);
@@ -156,7 +161,12 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
     const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
     const paymentMethodCreate = jest.fn().mockResolvedValue({ id: 'pm-99' });
     const prisma = {
-      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+        if (sql.includes('select "amount", "currency"')) {
+          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING' }]);
+        }
+        return Promise.resolve([]);
+      }),
       $executeRawUnsafe: executeRawUnsafe,
       auditLog: { create: jest.fn().mockResolvedValue(undefined) },
       shipment: {
@@ -224,5 +234,51 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
       expect.any(String),
       expect.any(String),
     );
+  });
+
+  it('does not fund escrow when Paystack reports a different amount', async () => {
+    const mismatchedBody = JSON.stringify({
+      event: 'charge.success',
+      data: {
+        status: 'success', reference: 'ref-mismatch', amount: 100,
+        currency: 'NGN', metadata: { shipmentId: 'ship-1' },
+      },
+    });
+    const { service, executeRawUnsafe } = buildService();
+    const signature = createHmac('sha512', secretKey).update(mismatchedBody).digest('hex');
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(mismatchedBody), signature, mismatchedBody);
+
+    expect(result.escrowUpdated).toBe(false);
+    expect(executeRawUnsafe).not.toHaveBeenCalled();
+  });
+});
+
+describe('PaymentProviderService customer payment verification ownership', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => { global.fetch = originalFetch; });
+
+  it('does not let one customer verify another customer\'s shipment payment', async () => {
+    const config = {
+      get: jest.fn((key: string) => (key === 'PAYSTACK_SECRET_KEY' ? 'sk_test_fake' : undefined)),
+    } as unknown as ConfigService;
+    const prisma = {
+      shipment: { findUnique: jest.fn().mockResolvedValue({ customerId: 'customer-owner' }) },
+    } as unknown as PrismaService;
+    (global as unknown as { fetch: jest.Mock }).fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: true,
+        data: {
+          status: 'success', reference: 'ref-owned', amount: 500000, currency: 'NGN',
+          metadata: { shipmentId: 'ship-owned' },
+        },
+      }),
+    });
+    const service = new PaymentProviderService(config, prisma, {} as NotificationsService);
+
+    await expect(service.verifyPaystackPayment('ref-owned', { sub: 'customer-other', role: 'CUSTOMER' }))
+      .rejects.toThrow('This payment belongs to another customer account.');
   });
 });

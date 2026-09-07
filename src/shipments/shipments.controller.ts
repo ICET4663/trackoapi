@@ -38,7 +38,7 @@ export class ShipmentsController {
 
   @Post(':id/approve')
   async approveShipment(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
     return this.shipmentsService.approveShipment(id, user.sub, user.role);
   }
 

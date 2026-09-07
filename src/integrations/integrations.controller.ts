@@ -69,8 +69,8 @@ export class IntegrationsController {
 
   @Get('payments/paystack/verify/:reference')
   async verifyPaystackPayment(@Param('reference') reference: string, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.paymentProvider.verifyPaystackPayment(reference);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.paymentProvider.verifyPaystackPayment(reference, user);
   }
 
   // Paystack calls this with no user session - protected by HMAC signature verification

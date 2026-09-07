@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -12,6 +12,11 @@ type InitializeEscrowInput = {
   currency?: string;
   customerEmail?: string;
   method?: 'card' | 'bank_transfer';
+};
+
+type PaymentActor = {
+  sub: string;
+  role: string;
 };
 
 @Injectable()
@@ -30,6 +35,9 @@ export class PaymentProviderService {
     return {
       provider,
       mode: hasPaystackKey || hasStripeKey ? 'configured' : 'mock',
+      environment: hasPaystackKey
+        ? this.config.get<string>('PAYSTACK_SECRET_KEY')?.startsWith('sk_live_') ? 'live' : 'test'
+        : 'mock',
       escrowEnabled: true,
       realChargeEnabled: hasPaystackKey || hasStripeKey,
       webhookSignatureVerification: provider === 'paystack' ? 'raw-body-hmac-sha512' : 'provider-dependent',
@@ -97,11 +105,11 @@ export class PaymentProviderService {
             },
           },
         },
-      }).catch(() => null);
-    } catch {
-      // Escrow bookkeeping is best-effort here; the real charge is still initialized with
-      // the provider below regardless. (This used to swallow a guaranteed NOT NULL violation
-      // on "updatedAt" - now fixed above - so this row was never actually being created.)
+      });
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Could not create the escrow record, so no payment was started: ${this.errorMessage(error)}`,
+      );
     }
 
     if (status.provider === 'paystack' && status.realChargeEnabled) {
@@ -195,7 +203,7 @@ export class PaymentProviderService {
     }
   }
 
-  async verifyPaystackPayment(reference: string) {
+  async verifyPaystackPayment(reference: string, actor?: PaymentActor) {
     const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
     if (!secretKey) {
       return {
@@ -238,6 +246,15 @@ export class PaymentProviderService {
 
     const payment = this.extractPaymentEvent({ event: 'charge.success', data: payload.data });
     const verified = Boolean(response.ok && payload.status && payload.data?.status === 'success');
+    if (verified && payment.shipmentId && actor && !['ADMIN', 'DISPATCHER'].includes(actor.role)) {
+      const shipment = await this.prisma.shipment.findUnique({
+        where: { id: payment.shipmentId },
+        select: { customerId: true },
+      });
+      if (!shipment || shipment.customerId !== actor.sub) {
+        throw new ForbiddenException('This payment belongs to another customer account.');
+      }
+    }
     const escrowUpdated = verified && payment.shipmentId
       ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference, payment.authorization)
       : false;
@@ -395,16 +412,21 @@ export class PaymentProviderService {
     },
   ) {
     try {
+      const [escrow] = await this.prisma.$queryRawUnsafe<Array<{ amount: number; currency: string; status: string }>>(
+        `select "amount", "currency", "status"::text as "status"
+         from "Escrow" where "shipmentId" = $1 limit 1`,
+        shipmentId,
+      );
+      if (!escrow || !Number.isFinite(amount) || amount !== escrow.amount || !currency || currency !== escrow.currency) {
+        return false;
+      }
+      if (escrow.status !== 'PENDING') return ['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(escrow.status);
       await this.prisma.$queryRawUnsafe(
         `update "Escrow"
          set "status" = 'FUNDED'::"EscrowStatus",
-             "amount" = coalesce($2, "amount"),
-             "currency" = coalesce($3, "currency"),
              "updatedAt" = current_timestamp
-         where "shipmentId" = $1`,
+         where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"`,
         shipmentId,
-        amount,
-        currency,
       );
       await this.prisma.shipment.update({
         where: { id: shipmentId },
@@ -428,6 +450,10 @@ export class PaymentProviderService {
     } catch {
       return false;
     }
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : 'Unknown database error';
   }
 
   private async recordSuccessfulPayment(shipmentId: string, amount?: number, currency = 'NGN', provider = 'paystack', reference?: string, paymentMethodId?: string) {
