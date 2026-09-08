@@ -147,6 +147,10 @@ export class PortalService {
     pickupLabel: string;
     destinationLabel: string;
     cargoDescription: string;
+    quantity: string | null;
+    truckType: string | null;
+    cargoWeightKg: number | null;
+    cargoVolumeM3: number | null;
     quotedPriceKobo: number | null;
   }) {
     const month = shipment.createdAt.toLocaleString('en-US', { month: 'short' }).toUpperCase();
@@ -159,8 +163,12 @@ export class PortalService {
       origin: shipment.pickupLabel,
       destination: shipment.destinationLabel,
       commodity: shipment.cargoDescription,
+      quantity: shipment.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
+      weightTons: shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0,
+      volumeM3: shipment.cargoVolumeM3 ?? 0,
+      truckType: shipment.truckType ?? 'Truck',
       amount: money(shipment.quotedPriceKobo),
-      meta: 'Backend shipment',
+      meta: [shipment.quantity, shipment.truckType].filter(Boolean).join(' · ') || 'Shipment load',
     };
   }
 }

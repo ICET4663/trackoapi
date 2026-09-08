@@ -20,7 +20,10 @@ type ShipmentRecordInput = {
   destinationLatitude?: number | null;
   destinationLongitude?: number | null;
   cargoDescription?: string | null;
+  quantity?: string | null;
+  truckType?: string | null;
   cargoWeightKg?: number | null;
+  cargoVolumeM3?: number | null;
   quotedPriceKobo?: number | null;
   distanceKm?: number | null;
   durationMinutes?: number | null;
@@ -106,6 +109,7 @@ export class ShipmentsService {
       destinationLongitude: normalized.destinationLongitude ?? undefined,
       truckType: normalized.truckType,
       weightTons: normalized.weightTons,
+      volumeM3: normalized.cargoVolumeM3,
     };
     const quote = dto.quoteToken
       ? this.mapsProvider.verifyQuoteToken(dto.quoteToken, quoteInput)
@@ -132,7 +136,10 @@ export class ShipmentsService {
           destinationLatitude: normalized.destinationLatitude,
           destinationLongitude: normalized.destinationLongitude,
           cargoDescription: normalized.cargoDescription,
+          quantity: normalized.quantity,
+          truckType: normalized.truckType,
           cargoWeightKg: normalized.cargoWeightKg,
+          cargoVolumeM3: normalized.cargoVolumeM3,
           cargoValueKobo: dto.cargoValueKobo,
           quotedPriceKobo: quote.quotedPriceKobo,
           distanceKm: quote.distanceKm,
@@ -171,6 +178,7 @@ export class ShipmentsService {
         quantity: normalized.quantity,
         truckType: normalized.truckType,
         weightTons: normalized.weightTons,
+        volumeM3: normalized.cargoVolumeM3,
         pricingVersion: quote.pricingVersion,
         quoteValidMinutes: quote.quoteValidMinutes,
         pricingBreakdown: quote.pricingBreakdown,
@@ -615,6 +623,21 @@ export class ShipmentsService {
     return this.toAssignmentRecord(assignment, await this.assignmentOfferValidityMinutes());
   }
 
+  async offerBestEligibleDriver(shipmentId: string, actorRole: UserRole) {
+    if (actorRole !== 'DISPATCHER' && actorRole !== 'ADMIN') {
+      throw new ForbiddenException('Only dispatchers and admins can start automatic driver matching.');
+    }
+
+    await this.expireStaleAssignmentOffers(shipmentId);
+    const assignment = await this.offerNextEligibleDriver(shipmentId);
+    if (!assignment) {
+      throw new BadRequestException(
+        'No eligible driver and verified truck are currently available. Check KYC, vehicle documents, capacity, availability, and active offers.',
+      );
+    }
+    return assignment;
+  }
+
   async respondToAssignment(assignmentId: string, driverId: string, action: 'ACCEPT' | 'REJECT') {
     const status: AssignmentStatus = action === 'ACCEPT' ? 'ACCEPTED' : 'REJECTED';
     const shipmentStatus: ShipmentStatus = action === 'ACCEPT' ? 'DRIVER_EN_ROUTE' : 'QUOTED';
@@ -860,10 +883,11 @@ export class ShipmentsService {
               include: { documents: { select: { type: true, state: true, expires: true } } },
             },
             driverAssignments: {
-              where: { status: { in: ['OFFERED', 'ACCEPTED'] } },
-              select: { id: true },
-              take: 20,
+              select: { status: true, shipment: { select: { status: true } } },
+              orderBy: { offeredAt: 'desc' },
+              take: 100,
             },
+            driverReviews: { select: { rating: true }, take: 100 },
           },
           take: 100,
         }),
@@ -898,10 +922,37 @@ export class ShipmentsService {
             shipment.pickupLatitude,
             shipment.pickupLongitude,
           );
-          return { driver, vehicle, activeAssignments: driver.driverAssignments.length, pickupDistanceKm };
+          const activeAssignments = driver.driverAssignments.filter((assignment) =>
+            ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+            && !['COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
+          ).length;
+          const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
+          const reviews = driver.driverReviews ?? [];
+          const averageRating = reviews.length
+            ? reviews.reduce((total, review) => total + review.rating, 0) / reviews.length
+            : null;
+          const capacityKg = vehicle?.capacityKg ?? cargoWeightKg;
+          const spareRatio = capacityKg > 0 ? Math.max(0, capacityKg - cargoWeightKg) / capacityKg : 0;
+          const capacityScore = Math.round(35 - Math.min(spareRatio * 12, 12));
+          const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
+          const experienceScore = Math.min(10, completedTrips * 2);
+          const proximityScore = pickupDistanceKm === null
+            ? 5
+            : pickupDistanceKm <= 10
+              ? 15
+              : pickupDistanceKm <= 25
+                ? 12
+                : pickupDistanceKm <= 50
+                  ? 9
+                  : pickupDistanceKm <= 100
+                    ? 5
+                    : 1;
+          const score = capacityScore + 20 + ratingScore + experienceScore + 5 + proximityScore;
+          return { driver, vehicle, activeAssignments, pickupDistanceKm, score };
         })
         .filter((candidate) => Boolean(candidate.vehicle) && candidate.activeAssignments === 0)
         .sort((left, right) => {
+          if (left.score !== right.score) return right.score - left.score;
           const leftDistance = left.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
           const rightDistance = right.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
           return leftDistance - rightDistance;
@@ -1480,6 +1531,7 @@ export class ShipmentsService {
       cargoWeightKg,
       quantity: dto.quantity ?? (cargoWeightKg ? `${cargoWeightKg} kg` : '1 truckload'),
       weightTons: dto.weightTons ?? (cargoWeightKg ? cargoWeightKg / 1000 : 0),
+      cargoVolumeM3: typeof dto.volumeM3 === 'number' && dto.volumeM3 > 0 ? dto.volumeM3 : 0,
       truckType: dto.truckType ?? 'Truck',
       pickupContactPhone: dto.pickupContactPhone ?? '+234 800 000 0000',
     };
@@ -1538,6 +1590,7 @@ export class ShipmentsService {
       quantity?: string;
       truckType?: string;
       weightTons?: number;
+      volumeM3?: number;
       pricingVersion?: string;
       quoteValidMinutes?: number;
       pricingBreakdown?: Awaited<ReturnType<MapsProviderService['routeEstimate']>>['pricingBreakdown'];
@@ -1558,9 +1611,10 @@ export class ShipmentsService {
           ? { latitude: shipment.destinationLatitude, longitude: shipment.destinationLongitude }
           : undefined,
       cargoType: shipment.cargoDescription ?? 'Cargo',
-      quantity: options.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
+      quantity: options.quantity ?? shipment.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
       weightTons: options.weightTons ?? (shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0),
-      truckType: options.truckType ?? 'Truck',
+      volumeM3: options.volumeM3 ?? shipment.cargoVolumeM3 ?? 0,
+      truckType: options.truckType ?? shipment.truckType ?? 'Truck',
       pickupContactPhone: shipment.pickupContactPhone ?? '+234 800 000 0000',
       quotedPriceKobo: shipment.quotedPriceKobo ?? undefined,
       distanceKm: shipment.distanceKm ?? undefined,

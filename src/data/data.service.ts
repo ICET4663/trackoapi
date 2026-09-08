@@ -68,6 +68,13 @@ export class DataService {
           // opened via this list instead of straight from shipment creation.
           return (await this.prisma.shipment.findMany({
             where: { customerId: userId },
+            include: {
+              mediaAssets: {
+                where: { kind: 'CARGO_PHOTO' },
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+              },
+            },
             orderBy: { createdAt: 'desc' },
           })).map((shipment) => ({
             id: shipment.id,
@@ -78,8 +85,19 @@ export class DataService {
             origin: shipment.pickupLabel,
             destination: shipment.destinationLabel,
             commodity: shipment.cargoDescription,
+            quantity: shipment.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
+            weightTons: shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0,
+            volumeM3: shipment.cargoVolumeM3 ?? 0,
+            truckType: shipment.truckType ?? 'Truck',
+            cargoPhotoUrl: shipment.mediaAssets[0]?.url ?? null,
             amount: this.formatMoney(shipment.quotedPriceKobo),
-            meta: shipment.distanceKm ? `${shipment.distanceKm.toFixed(1)} km route` : shipment.pickupAddress,
+            meta: [
+              shipment.quantity,
+              shipment.cargoWeightKg ? `${(shipment.cargoWeightKg / 1000).toFixed(1)}t` : null,
+              shipment.cargoVolumeM3 ? `${shipment.cargoVolumeM3.toFixed(1)}m³` : null,
+              shipment.truckType,
+              shipment.distanceKm ? `${shipment.distanceKm.toFixed(1)} km` : null,
+            ].filter(Boolean).join(' · ') || shipment.pickupAddress,
           }));
         case 'owner-trucks':
           // The raw Vehicle row doesn't match the frontend's OwnerTruck shape (reg/

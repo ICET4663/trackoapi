@@ -102,6 +102,12 @@ export class ShipmentsController {
     return this.shipmentsService.offerAssignment(id, body, user.role);
   }
 
+  @Post(':id/assignments/best-match')
+  async offerBestEligibleDriver(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.shipmentsService.offerBestEligibleDriver(id, user.role);
+  }
+
   @Get(':id/escrow')
   async getEscrow(@Param('id') id: string, @Headers('authorization') authorization?: string) {
     await this.requestUser.fromAuthorizationHeader(authorization);

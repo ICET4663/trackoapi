@@ -164,4 +164,33 @@ describe('MapsProviderService route pricing', () => {
       BadRequestException,
     );
   });
+
+  it('scales the route portion from a reserved light-load floor to full capacity', async () => {
+    const service = createService();
+    const light = await service.routeEstimate({ ...routeInput, weightTons: 3 });
+    const full = await service.routeEstimate({ ...routeInput, weightTons: 30 });
+
+    expect(light.pricingBreakdown.loadUtilization).toBe(0.1);
+    expect(light.pricingBreakdown.weightMultiplier).toBe(0.69);
+    expect(full.pricingBreakdown.loadUtilization).toBe(1);
+    expect(full.pricingBreakdown.weightMultiplier).toBe(1);
+    expect(full.quotedPriceKobo).toBeGreaterThan(light.quotedPriceKobo);
+  });
+
+  it('prices bulky cargo using space utilization when it is higher than weight utilization', async () => {
+    const service = createService();
+    const compact = await service.routeEstimate({ ...routeInput, weightTons: 3, volumeM3: 5 });
+    const bulky = await service.routeEstimate({ ...routeInput, weightTons: 3, volumeM3: 44 });
+
+    expect(bulky.pricingBreakdown.limitingFactor).toBe('space');
+    expect(bulky.pricingBreakdown.volumeUtilization).toBe(0.8);
+    expect(bulky.pricingBreakdown.loadUtilization).toBe(0.8);
+    expect(bulky.quotedPriceKobo).toBeGreaterThan(compact.quotedPriceKobo);
+  });
+
+  it('rejects cargo volume that exceeds the selected truck space', async () => {
+    await expect(createService().routeEstimate({ ...routeInput, weightTons: 3, volumeM3: 56 })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
 });

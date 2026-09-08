@@ -79,7 +79,7 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
 
 const ROAD_FACTOR = 1.29;
 const AVERAGE_SPEED_KMH = 58;
-const PRICING_VERSION = '2026-08-admin-1';
+const PRICING_VERSION = '2026-09-load-volume-1';
 
 const PRICING_SETTING_DEFAULTS = {
   pricingServiceFeePercent: 3.5,
@@ -107,6 +107,7 @@ const PRICING_SETTING_DEFAULTS = {
 type TruckPricingProfile = {
   label: string;
   capacityTons: number;
+  capacityM3: number;
   baseFareNgn: number;
   perKmRateNgn: number;
   minimumFareNgn: number;
@@ -119,6 +120,7 @@ type RouteEstimateInput = {
   destinationLongitude?: number;
   truckType?: string;
   weightTons?: number;
+  volumeM3?: number;
 };
 
 type NormalizedQuoteInput = {
@@ -128,6 +130,7 @@ type NormalizedQuoteInput = {
   destinationLongitude: number;
   truckType: string;
   weightTons: number;
+  volumeM3: number;
 };
 
 type RouteQuoteCore = {
@@ -154,11 +157,11 @@ type SignedQuotePayload = {
 };
 
 const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
-  flatbed: { label: 'Flatbed', capacityTons: 30, baseFareNgn: 55_000, perKmRateNgn: 720, minimumFareNgn: 95_000 },
-  box: { label: 'Box truck', capacityTons: 15, baseFareNgn: 50_000, perKmRateNgn: 680, minimumFareNgn: 90_000 },
-  tipper: { label: 'Tipper', capacityTons: 30, baseFareNgn: 60_000, perKmRateNgn: 760, minimumFareNgn: 100_000 },
-  tanker: { label: 'Tanker', capacityTons: 33, baseFareNgn: 70_000, perKmRateNgn: 820, minimumFareNgn: 115_000 },
-  truck: { label: 'Standard truck', capacityTons: 20, baseFareNgn: 50_000, perKmRateNgn: 700, minimumFareNgn: 90_000 },
+  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, baseFareNgn: 55_000, perKmRateNgn: 720, minimumFareNgn: 95_000 },
+  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, baseFareNgn: 50_000, perKmRateNgn: 680, minimumFareNgn: 90_000 },
+  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, baseFareNgn: 60_000, perKmRateNgn: 760, minimumFareNgn: 100_000 },
+  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, baseFareNgn: 70_000, perKmRateNgn: 820, minimumFareNgn: 115_000 },
+  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, baseFareNgn: 50_000, perKmRateNgn: 700, minimumFareNgn: 90_000 },
 };
 
 @Injectable()
@@ -259,13 +262,22 @@ export class MapsProviderService {
     const durationMinutes = liveRoute?.durationMinutes ?? Math.max(30, Math.round((distanceKm / AVERAGE_SPEED_KMH) * 60));
     const profile = this.truckProfile(normalizedInput.truckType, adjustments);
     const safeWeight = normalizedInput.weightTons;
+    const safeVolume = normalizedInput.volumeM3;
     if (safeWeight > profile.capacityTons) {
       throw new BadRequestException(`${profile.label} supports up to ${profile.capacityTons} tons. Select a larger truck or reduce the cargo weight.`);
     }
-    const loadUtilization = safeWeight / profile.capacityTons;
-    const weightMultiplier = 0.75 + 0.35 * Math.min(loadUtilization, 1);
+    if (safeVolume > profile.capacityM3) {
+      throw new BadRequestException(`${profile.label} provides up to ${profile.capacityM3} cubic metres. Select a larger truck or reduce the cargo volume.`);
+    }
+    const weightUtilization = safeWeight / profile.capacityTons;
+    const volumeUtilization = safeVolume > 0 ? safeVolume / profile.capacityM3 : 0;
+    const loadUtilization = Math.max(weightUtilization, volumeUtilization);
+    // A customer reserves the whole truck, so a light load cannot be priced as if only
+    // the cargo moved itself. The route component starts at 65% and rises linearly to
+    // 100% at full capacity; the fixed base/minimum fare still covers dispatch costs.
+    const loadMultiplier = 0.65 + 0.35 * Math.min(loadUtilization, 1);
     const distancePricing = this.distancePricing(distanceKm);
-    const linehaulNgn = distanceKm * profile.perKmRateNgn * distancePricing.multiplier * weightMultiplier;
+    const linehaulNgn = distanceKm * profile.perKmRateNgn * distancePricing.multiplier * loadMultiplier;
     const fuelSurchargeNgn = Math.round(linehaulNgn * (adjustments.pricingFuelSurchargePercent / 100));
     const tollAllowanceNgn = adjustments.pricingTollAllowanceNgn;
     const preSurgeSubtotalNgn = profile.baseFareNgn + linehaulNgn + fuelSurchargeNgn + tollAllowanceNgn;
@@ -296,10 +308,16 @@ export class MapsProviderService {
         routeSource: liveRoute ? 'google_routes' : 'coordinate_factor',
         averageSpeedKmh: AVERAGE_SPEED_KMH,
         weightTons: safeWeight,
-        weightMultiplier: Number(weightMultiplier.toFixed(2)),
+        weightMultiplier: Number(loadMultiplier.toFixed(2)),
+        loadMultiplier: Number(loadMultiplier.toFixed(2)),
         truckMultiplier: 1,
         truckType: profile.label,
         truckCapacityTons: profile.capacityTons,
+        truckCapacityM3: profile.capacityM3,
+        volumeM3: safeVolume,
+        weightUtilization: Number(weightUtilization.toFixed(3)),
+        volumeUtilization: Number(volumeUtilization.toFixed(3)),
+        limitingFactor: volumeUtilization > weightUtilization ? 'space' : 'weight',
         loadUtilization: Number(loadUtilization.toFixed(3)),
         distanceBand: distancePricing.band,
         distanceMultiplier: distancePricing.multiplier,
@@ -346,6 +364,7 @@ export class MapsProviderService {
   private normalizeQuoteInput(input: RouteEstimateInput): NormalizedQuoteInput {
     const normalizeCoordinate = (value: number | undefined, fallback: number) => Number(Number(value ?? fallback).toFixed(6));
     const weight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0 ? Number(input.weightTons) : 1;
+    const volume = Number.isFinite(input.volumeM3) && Number(input.volumeM3) > 0 ? Number(input.volumeM3) : 0;
     return {
       originLatitude: normalizeCoordinate(input.originLatitude, 6.5244),
       originLongitude: normalizeCoordinate(input.originLongitude, 3.3792),
@@ -353,6 +372,7 @@ export class MapsProviderService {
       destinationLongitude: normalizeCoordinate(input.destinationLongitude, 7.3986),
       truckType: String(input.truckType ?? 'truck').trim().toLowerCase(),
       weightTons: Number(weight.toFixed(3)),
+      volumeM3: Number(volume.toFixed(3)),
     };
   }
 

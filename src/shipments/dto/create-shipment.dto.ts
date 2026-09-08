@@ -28,6 +28,10 @@ export class CreateShipmentDto {
   weightTons?: number;
 
   @IsOptional()
+  @IsNumber()
+  volumeM3?: number;
+
+  @IsOptional()
   @IsString()
   truckType?: string;
 

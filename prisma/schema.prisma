@@ -293,6 +293,9 @@ model Shipment {
   destinationLatitude   Float?
   destinationLongitude  Float?
   cargoDescription      String
+  quantity              String?
+  truckType             String?
+  cargoVolumeM3         Float?
   cargoWeightKg         Float?
   cargoValueKobo        Int?
   quotedPriceKobo       Int?

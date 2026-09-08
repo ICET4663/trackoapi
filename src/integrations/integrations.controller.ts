@@ -51,6 +51,7 @@ export class IntegrationsController {
       destinationLongitude: Number(body.destinationLongitude ?? body.destinationLng),
       truckType: typeof body.truckType === 'string' ? body.truckType : undefined,
       weightTons: Number(body.weightTons),
+      volumeM3: Number(body.volumeM3),
     });
   }
 

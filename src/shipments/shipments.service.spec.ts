@@ -699,3 +699,33 @@ describe('ShipmentsService funded shipment approval', () => {
     expect(prisma.shipment.update).not.toHaveBeenCalled();
   });
 });
+
+describe('ShipmentsService automatic best-match assignment', () => {
+  it('allows platform operations to offer the shipment to the best eligible driver', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) as never;
+    const assignment = { id: 'assignment-1', driverId: 'driver-best', status: 'OFFERED' };
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(assignment as never);
+
+    await expect(service.offerBestEligibleDriver('shipment-1', 'DISPATCHER')).resolves.toEqual(assignment);
+    expect(service.expireStaleAssignmentOffers).toHaveBeenCalledWith('shipment-1');
+  });
+
+  it('returns a clear blocker when no eligible driver and verified truck are available', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) as never;
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
+
+    await expect(service.offerBestEligibleDriver('shipment-1', 'ADMIN')).rejects.toThrow(
+      'No eligible driver and verified truck are currently available.',
+    );
+  });
+
+  it('does not let customers start automatic matching', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.offerBestEligibleDriver('shipment-1', 'CUSTOMER')).rejects.toThrow(
+      'Only dispatchers and admins can start automatic driver matching.',
+    );
+  });
+});
