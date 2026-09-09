@@ -79,29 +79,31 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
 
 const ROAD_FACTOR = 1.29;
 const AVERAGE_SPEED_KMH = 58;
-const PRICING_VERSION = '2026-09-load-volume-1';
+const PRICING_VERSION = '2026-09-vehicle-catalogue-1';
 
+// Admin-overridable defaults for the five rate-carded vehicle classes. The wider
+// catalogue below carries its own fixed rates (not admin-tuned yet).
 const PRICING_SETTING_DEFAULTS = {
   pricingServiceFeePercent: 3.5,
   pricingFuelSurchargePercent: 0,
   pricingTollAllowanceNgn: 0,
   pricingDemandSurgePercent: 0,
   pricingQuoteValidityMinutes: 30,
-  pricingFlatbedBaseFareNgn: 55_000,
-  pricingFlatbedPerKmRateNgn: 720,
-  pricingFlatbedMinimumFareNgn: 95_000,
-  pricingBoxBaseFareNgn: 50_000,
-  pricingBoxPerKmRateNgn: 680,
-  pricingBoxMinimumFareNgn: 90_000,
-  pricingTipperBaseFareNgn: 60_000,
-  pricingTipperPerKmRateNgn: 760,
-  pricingTipperMinimumFareNgn: 100_000,
-  pricingTankerBaseFareNgn: 70_000,
-  pricingTankerPerKmRateNgn: 820,
-  pricingTankerMinimumFareNgn: 115_000,
-  pricingStandardBaseFareNgn: 50_000,
-  pricingStandardPerKmRateNgn: 700,
-  pricingStandardMinimumFareNgn: 90_000,
+  pricingFlatbedBaseFareNgn: 60_000,
+  pricingFlatbedPerKmRateNgn: 780,
+  pricingFlatbedMinimumFareNgn: 115_000,
+  pricingBoxBaseFareNgn: 45_000,
+  pricingBoxPerKmRateNgn: 620,
+  pricingBoxMinimumFareNgn: 85_000,
+  pricingTipperBaseFareNgn: 65_000,
+  pricingTipperPerKmRateNgn: 800,
+  pricingTipperMinimumFareNgn: 120_000,
+  pricingTankerBaseFareNgn: 75_000,
+  pricingTankerPerKmRateNgn: 860,
+  pricingTankerMinimumFareNgn: 135_000,
+  pricingStandardBaseFareNgn: 45_000,
+  pricingStandardPerKmRateNgn: 620,
+  pricingStandardMinimumFareNgn: 85_000,
 } as const;
 
 type TruckPricingProfile = {
@@ -156,13 +158,30 @@ type SignedQuotePayload = {
   expiresAt: string;
 };
 
+// Keyed by a lowercase substring of the truck-type name. Matched in declaration
+// order (see truckProfile), so the specific keys come before the generic ones
+// ("light"/"refrigerat" before "truck"; "container"/"lowbed"/"articulated" before
+// "trailer"). Capacities MUST match the frontend src/constants/truck-catalog.ts,
+// or a truck that passes the client capacity check gets rejected here. Per-km
+// rates scale with vehicle size plus a fixed dispatch base fare - typical
+// Nigerian road-freight economics.
 const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
-  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, baseFareNgn: 55_000, perKmRateNgn: 720, minimumFareNgn: 95_000 },
-  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, baseFareNgn: 50_000, perKmRateNgn: 680, minimumFareNgn: 90_000 },
-  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, baseFareNgn: 60_000, perKmRateNgn: 760, minimumFareNgn: 100_000 },
-  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, baseFareNgn: 70_000, perKmRateNgn: 820, minimumFareNgn: 115_000 },
-  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, baseFareNgn: 50_000, perKmRateNgn: 700, minimumFareNgn: 90_000 },
+  pickup: { label: 'Pickup', capacityTons: 1, capacityM3: 4, baseFareNgn: 12_000, perKmRateNgn: 180, minimumFareNgn: 20_000 },
+  van: { label: 'Cargo van', capacityTons: 2, capacityM3: 9, baseFareNgn: 16_000, perKmRateNgn: 240, minimumFareNgn: 28_000 },
+  light: { label: 'Light truck', capacityTons: 6, capacityM3: 20, baseFareNgn: 26_000, perKmRateNgn: 400, minimumFareNgn: 48_000 },
+  refrigerat: { label: 'Refrigerated truck', capacityTons: 12, capacityM3: 38, baseFareNgn: 60_000, perKmRateNgn: 780, minimumFareNgn: 115_000 },
+  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, baseFareNgn: 45_000, perKmRateNgn: 620, minimumFareNgn: 85_000 },
+  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, baseFareNgn: 60_000, perKmRateNgn: 780, minimumFareNgn: 115_000 },
+  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, baseFareNgn: 65_000, perKmRateNgn: 800, minimumFareNgn: 120_000 },
+  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, baseFareNgn: 75_000, perKmRateNgn: 860, minimumFareNgn: 135_000 },
+  container: { label: 'Container trailer', capacityTons: 30, capacityM3: 67, baseFareNgn: 80_000, perKmRateNgn: 900, minimumFareNgn: 150_000 },
+  lowbed: { label: 'Lowbed trailer', capacityTons: 45, capacityM3: 30, baseFareNgn: 120_000, perKmRateNgn: 1_150, minimumFareNgn: 250_000 },
+  articulated: { label: 'Articulated trailer', capacityTons: 40, capacityM3: 90, baseFareNgn: 90_000, perKmRateNgn: 950, minimumFareNgn: 175_000 },
+  trailer: { label: 'Trailer', capacityTons: 35, capacityM3: 70, baseFareNgn: 80_000, perKmRateNgn: 900, minimumFareNgn: 150_000 },
+  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, baseFareNgn: 45_000, perKmRateNgn: 620, minimumFareNgn: 85_000 },
 };
+
+const ADMIN_TUNED_KEYS = new Set(['flatbed', 'box', 'tipper', 'tanker', 'truck']);
 
 @Injectable()
 export class MapsProviderService {
@@ -453,10 +472,12 @@ export class MapsProviderService {
   }
 
   private truckProfile(truckType: string | undefined, adjustments: Record<string, number>) {
-    const normalizedTruckType = truckType ?? '';
-    const key = Object.keys(TRUCK_PRICING).find((candidate) => normalizedTruckType.toLowerCase().includes(candidate)) ?? 'truck';
-    const prefix = key === 'truck' ? 'Standard' : key.charAt(0).toUpperCase() + key.slice(1);
+    const normalizedTruckType = (truckType ?? '').toLowerCase();
+    const key = Object.keys(TRUCK_PRICING).find((candidate) => normalizedTruckType.includes(candidate)) ?? 'truck';
     const defaults = TRUCK_PRICING[key];
+    // Only the five carded classes are admin-tunable; everything else uses its fixed rate.
+    if (!ADMIN_TUNED_KEYS.has(key)) return { ...defaults };
+    const prefix = key === 'truck' ? 'Standard' : key.charAt(0).toUpperCase() + key.slice(1);
     return {
       ...defaults,
       baseFareNgn: adjustments[`pricing${prefix}BaseFareNgn`] ?? defaults.baseFareNgn,
@@ -466,9 +487,13 @@ export class MapsProviderService {
   }
 
   private distancePricing(distanceKm: number) {
-    if (distanceKm <= 50) return { band: 'LOCAL', multiplier: 1.15 };
-    if (distanceKm <= 300) return { band: 'REGIONAL', multiplier: 1 };
-    return { band: 'LONG_HAUL', multiplier: 0.9 };
+    // Short local runs carry a handling premium; regional trips are the reference
+    // rate; long haul tapers smoothly toward 0.8x by ~1500 km (fuel and driver
+    // cost per km fall the longer the trip), instead of one flat long-haul step.
+    if (distanceKm <= 60) return { band: 'LOCAL', multiplier: 1.15 };
+    if (distanceKm <= 200) return { band: 'REGIONAL', multiplier: 1 };
+    const taper = Math.min(1, (distanceKm - 200) / 1300);
+    return { band: 'LONG_HAUL', multiplier: Number((1 - 0.2 * taper).toFixed(3)) };
   }
 
   private async googlePlaces(query: string, key: string): Promise<PlaceSuggestion[]> {
