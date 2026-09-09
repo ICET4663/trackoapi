@@ -57,7 +57,15 @@ export class IntegrationsController {
 
   @Post('payments/escrow/initialize')
   async initializeEscrow(
-    @Body() body: { shipmentId?: string; amount?: number; currency?: string; customerEmail?: string; method?: 'card' | 'bank_transfer' },
+    @Body()
+    body: {
+      shipmentId?: string;
+      amount?: number;
+      currency?: string;
+      customerEmail?: string;
+      method?: 'card' | 'bank_transfer';
+      callbackUrl?: string;
+    },
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.requireRole(authorization, ['CUSTOMER']);

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -12,7 +12,24 @@ type InitializeEscrowInput = {
   currency?: string;
   customerEmail?: string;
   method?: 'card' | 'bank_transfer';
+  // The web app's own origin, so Paystack redirects the customer back to the
+  // exact site they started from (trako.com.ng vs the vercel.app alias have
+  // separate localStorage, so a cross-origin return lands them logged out and
+  // the client-side verify never runs). Validated against KNOWN_APP_ORIGINS.
+  callbackUrl?: string;
 };
+
+// Origins the Paystack callback is allowed to return to. Anything else falls
+// back to PAYMENT_CALLBACK_URL - a caller-supplied redirect target is an open
+// redirect risk and Paystack rejects non-whitelisted callback URLs anyway.
+const KNOWN_APP_ORIGINS = new Set([
+  'https://trako.com.ng',
+  'https://www.trako.com.ng',
+  'https://cargo-link-logistics-mm1c.vercel.app',
+  'http://localhost:8081',
+  'http://localhost:8082',
+  'http://localhost:3000',
+]);
 
 type PaymentActor = {
   sub: string;
@@ -21,6 +38,8 @@ type PaymentActor = {
 
 @Injectable()
 export class PaymentProviderService {
+  private readonly logger = new Logger(PaymentProviderService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
@@ -120,6 +139,7 @@ export class PaymentProviderService {
         customerEmail: input.customerEmail,
         providerReference,
         method: input.method,
+        callbackUrl: input.callbackUrl,
       });
     }
 
@@ -284,8 +304,27 @@ export class PaymentProviderService {
         ? escrowUpdated
           ? 'Payment verified and escrow marked as funded.'
           : 'Payment verified, but escrow could not be updated automatically.'
-        : payload.message ?? 'Payment could not be verified.',
+        : this.unverifiedMessage(payload.data?.status),
     };
+  }
+
+  // Paystack's own `message` is "Verification successful" even for an abandoned
+  // charge (it describes the API call, not the payment), which reads as a false
+  // positive on the escrow screen. Report the transaction state plainly instead.
+  private unverifiedMessage(transactionStatus?: string) {
+    switch (transactionStatus) {
+      case 'abandoned':
+        return 'This payment was not completed on Paystack. Start the payment again to fund escrow.';
+      case 'failed':
+        return 'Paystack declined this payment. Try another card or payment method.';
+      case 'ongoing':
+      case 'pending':
+        return 'This payment is still processing on Paystack. Check again in a moment.';
+      case 'reversed':
+        return 'This payment was reversed, so escrow was not funded.';
+      default:
+        return 'Payment could not be verified yet. If you completed checkout, try again shortly.';
+    }
   }
 
   private async initializePaystackEscrow(input: {
@@ -295,6 +334,7 @@ export class PaymentProviderService {
     customerEmail?: string;
     providerReference: string;
     method?: 'card' | 'bank_transfer';
+    callbackUrl?: string;
   }) {
     const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
     if (!secretKey) return this.mockProviderResponse(input, 'Paystack key is missing.');
@@ -321,7 +361,7 @@ export class PaymentProviderService {
         amount: input.amount,
         currency: input.currency,
         reference: input.providerReference,
-        callback_url: this.paymentCallbackUrl(input.shipmentId, input.providerReference),
+        callback_url: this.paymentCallbackUrl(input.shipmentId, input.providerReference, input.callbackUrl),
         ...(channels ? { channels } : {}),
         metadata: {
           shipmentId: input.shipmentId,
@@ -379,8 +419,8 @@ export class PaymentProviderService {
     };
   }
 
-  private paymentCallbackUrl(shipmentId: string, reference: string) {
-    const baseUrl = this.config.get<string>('PAYMENT_CALLBACK_URL');
+  private paymentCallbackUrl(shipmentId: string, reference: string, requestedCallbackUrl?: string) {
+    const baseUrl = this.resolveCallbackBaseUrl(requestedCallbackUrl);
     if (!baseUrl) return undefined;
 
     try {
@@ -392,6 +432,36 @@ export class PaymentProviderService {
       const separator = baseUrl.includes('?') ? '&' : '?';
       return `${baseUrl}${separator}shipmentId=${encodeURIComponent(shipmentId)}&reference=${encodeURIComponent(reference)}`;
     }
+  }
+
+  // Prefer the origin the customer is actually on (passed by the web app) so the
+  // Paystack redirect returns them to the same site with their session intact.
+  // Only honour it when its origin is one we recognise - otherwise fall back to
+  // the configured PAYMENT_CALLBACK_URL. CORS_ORIGIN entries count as recognised.
+  private resolveCallbackBaseUrl(requestedCallbackUrl?: string) {
+    const envBase = this.config.get<string>('PAYMENT_CALLBACK_URL')?.trim() || undefined;
+    if (!requestedCallbackUrl) return envBase;
+
+    let requested: URL;
+    try {
+      requested = new URL(requestedCallbackUrl);
+    } catch {
+      this.logger.warn(`Ignoring malformed escrow callbackUrl "${requestedCallbackUrl}"`);
+      return envBase;
+    }
+
+    const corsOrigins = (this.config.get<string>('CORS_ORIGIN') ?? '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
+    const allowed = KNOWN_APP_ORIGINS.has(requested.origin) || corsOrigins.includes(requested.origin);
+    if (!allowed) {
+      this.logger.warn(`Ignoring unrecognised escrow callback origin "${requested.origin}"`);
+      return envBase;
+    }
+
+    // Keep only origin + path; our own query params get appended by the caller.
+    return `${requested.origin}${requested.pathname}`;
   }
 
   private async markEscrowFunded(
@@ -418,6 +488,10 @@ export class PaymentProviderService {
         shipmentId,
       );
       if (!escrow || !Number.isFinite(amount) || amount !== escrow.amount || !currency || currency !== escrow.currency) {
+        this.logger.warn(
+          `Escrow for shipment ${shipmentId} not marked funded: ` +
+            `paid ${amount} ${currency ?? '?'} vs expected ${escrow?.amount ?? 'no-record'} ${escrow?.currency ?? '?'}`,
+        );
         return false;
       }
       if (escrow.status !== 'PENDING') return ['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(escrow.status);
@@ -447,7 +521,8 @@ export class PaymentProviderService {
       const paymentMethodId = await this.savePaymentMethodFromAuthorization(shipmentId, authorization);
       await this.recordSuccessfulPayment(shipmentId, amount, currency, provider, reference, paymentMethodId);
       return true;
-    } catch {
+    } catch (error) {
+      this.logger.error(`Could not mark escrow funded for shipment ${shipmentId}: ${this.errorMessage(error)}`);
       return false;
     }
   }
@@ -484,7 +559,7 @@ export class PaymentProviderService {
       this.notifications.create({
         userId: shipment.customerId,
         title: 'Escrow funded',
-        body: `${amountLabel} has been secured for shipment ${shipment.reference}. Dispatch can now assign a driver.`,
+        body: `${amountLabel} has been secured for shipment ${shipment.reference}. Admin review is now ready.`,
         tone: 'SUCCESS',
         entity: 'Shipment',
         entityId: shipmentId,

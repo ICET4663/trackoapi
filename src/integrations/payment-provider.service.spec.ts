@@ -70,6 +70,37 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
 
     expect(paystackRequestBody().channels).toBeUndefined();
   });
+
+  it('returns the customer to the recognised origin they started from (with shipment + reference params)', async () => {
+    await service.initializeEscrow({
+      shipmentId: undefined,
+      amount: 500000,
+      currency: 'NGN',
+      callbackUrl: 'https://trako.com.ng/customer/escrow',
+    });
+
+    const callbackUrl = new URL(paystackRequestBody().callback_url);
+    expect(callbackUrl.origin).toBe('https://trako.com.ng');
+    expect(callbackUrl.pathname).toBe('/customer/escrow');
+    expect(callbackUrl.searchParams.get('reference')).toMatch(/^tracko_escrow_/);
+  });
+
+  it('falls back to PAYMENT_CALLBACK_URL when the requested callback origin is not recognised', async () => {
+    config.get.mockImplementation((key: string) => {
+      if (key === 'PAYMENT_PROVIDER') return 'paystack';
+      if (key === 'PAYSTACK_SECRET_KEY') return 'sk_test_fake';
+      if (key === 'PAYMENT_CALLBACK_URL') return 'https://cargo-link-logistics-mm1c.vercel.app/customer/escrow';
+      return undefined;
+    });
+
+    await service.initializeEscrow({
+      amount: 500000,
+      currency: 'NGN',
+      callbackUrl: 'https://evil.example.com/customer/escrow',
+    });
+
+    expect(new URL(paystackRequestBody().callback_url).origin).toBe('https://cargo-link-logistics-mm1c.vercel.app');
+  });
 });
 
 // verifyPaystackSignature() used a plain `digest === signature` string comparison - this
