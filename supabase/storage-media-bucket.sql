@@ -13,7 +13,11 @@ values (
     'image/webp',
     'application/pdf',
     'audio/mpeg',
+    'audio/webm',
+    'audio/ogg',
     'audio/mp4',
+    'audio/x-m4a',
+    'audio/aac',
     'audio/wav',
     'video/mp4',
     'application/octet-stream'

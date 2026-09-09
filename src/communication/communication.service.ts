@@ -1,15 +1,21 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { UserRole } from '@prisma/client';
-import { randomUUID } from 'crypto';
-import type { AuthUser } from '../common/types/auth-user';
-import { TranslationProviderService } from '../integrations/translation-provider.service';
-import { NotificationsService } from '../notifications/notifications.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { SendMessageDto } from './dto/send-message.dto';
-import { TranscribeVoiceDto } from './dto/transcribe-voice.dto';
-import { TypingStatusDto } from './dto/typing-status.dto';
-
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { UserRole } from "@prisma/client";
+import { randomUUID } from "crypto";
+import type { AuthUser } from "../common/types/auth-user";
+import { TranslationProviderService } from "../integrations/translation-provider.service";
+import { NotificationsService } from "../notifications/notifications.service";
+import { PrismaService } from "../prisma/prisma.service";
+import { SendMessageDto } from "./dto/send-message.dto";
+import { TranscribeVoiceDto } from "./dto/transcribe-voice.dto";
+import { TypingStatusDto } from "./dto/typing-status.dto";
 
 @Injectable()
 export class CommunicationService {
@@ -27,24 +33,34 @@ export class CommunicationService {
   // legacy/admin-mock thread from before scoping existed - left open rather than
   // locking existing admin/dispatcher screens out of threads they already use.
   private async assertConversationAccess(
-    conversation: { shipmentId: string | null; customerId: string | null; driverId: string | null },
+    conversation: {
+      shipmentId: string | null;
+      customerId: string | null;
+      driverId: string | null;
+    },
     user: AuthUser,
   ) {
-    if (user.role === 'ADMIN' || user.role === 'DISPATCHER') return;
+    if (user.role === "ADMIN" || user.role === "DISPATCHER") return;
     if (!conversation.customerId && !conversation.driverId) return;
-    if (conversation.customerId === user.sub || conversation.driverId === user.sub) return;
-    if (user.role === 'TRUCK_OWNER' && conversation.shipmentId) {
+    if (
+      conversation.customerId === user.sub ||
+      conversation.driverId === user.sub
+    )
+      return;
+    if (user.role === "TRUCK_OWNER" && conversation.shipmentId) {
       const ownerAssignment = await this.prisma.driverAssignment.findFirst({
         where: {
           shipmentId: conversation.shipmentId,
-          status: 'ACCEPTED',
+          status: "ACCEPTED",
           vehicle: { ownerId: user.sub },
         },
         select: { id: true },
       });
       if (ownerAssignment) return;
     }
-    throw new ForbiddenException('You do not have access to this conversation.');
+    throw new ForbiddenException(
+      "You do not have access to this conversation.",
+    );
   }
 
   // Finds (or lazily creates) the single conversation thread scoped to a shipment,
@@ -54,32 +70,45 @@ export class CommunicationService {
       where: { id: shipmentId },
       select: { id: true, reference: true, customerId: true },
     });
-    if (!shipment) throw new NotFoundException('Shipment was not found.');
+    if (!shipment) throw new NotFoundException("Shipment was not found.");
 
     let driverId: string | null = null;
-    if (user.role === 'DRIVER') {
+    if (user.role === "DRIVER") {
       const assignment = await this.prisma.driverAssignment.findFirst({
-        where: { shipmentId, driverId: user.sub, status: 'ACCEPTED' },
+        where: { shipmentId, driverId: user.sub, status: "ACCEPTED" },
         select: { driverId: true },
       });
-      if (!assignment) throw new ForbiddenException('You are not the assigned driver for this shipment.');
+      if (!assignment)
+        throw new ForbiddenException(
+          "You are not the assigned driver for this shipment.",
+        );
       driverId = assignment.driverId;
-    } else if (user.role === 'CUSTOMER') {
-      if (shipment.customerId !== user.sub) throw new ForbiddenException('You do not have access to this shipment.');
-    } else if (user.role === 'TRUCK_OWNER') {
+    } else if (user.role === "CUSTOMER") {
+      if (shipment.customerId !== user.sub)
+        throw new ForbiddenException(
+          "You do not have access to this shipment.",
+        );
+    } else if (user.role === "TRUCK_OWNER") {
       const ownerAssignment = await this.prisma.driverAssignment.findFirst({
-        where: { shipmentId, status: 'ACCEPTED', vehicle: { ownerId: user.sub } },
+        where: {
+          shipmentId,
+          status: "ACCEPTED",
+          vehicle: { ownerId: user.sub },
+        },
         select: { driverId: true },
       });
-      if (!ownerAssignment) throw new ForbiddenException('Your truck is not assigned to this shipment.');
+      if (!ownerAssignment)
+        throw new ForbiddenException(
+          "Your truck is not assigned to this shipment.",
+        );
       driverId = ownerAssignment.driverId;
-    } else if (user.role !== 'ADMIN' && user.role !== 'DISPATCHER') {
-      throw new ForbiddenException('You do not have access to this shipment.');
+    } else if (user.role !== "ADMIN" && user.role !== "DISPATCHER") {
+      throw new ForbiddenException("You do not have access to this shipment.");
     }
 
     if (!driverId) {
       const acceptedAssignment = await this.prisma.driverAssignment.findFirst({
-        where: { shipmentId, status: 'ACCEPTED' },
+        where: { shipmentId, status: "ACCEPTED" },
         select: { driverId: true },
       });
       driverId = acceptedAssignment?.driverId ?? null;
@@ -102,30 +131,33 @@ export class CommunicationService {
   async listConversations(user: AuthUser) {
     try {
       const where =
-        user.role === 'CUSTOMER'
+        user.role === "CUSTOMER"
           ? { customerId: user.sub }
-          : user.role === 'DRIVER'
+          : user.role === "DRIVER"
             ? { driverId: user.sub }
-            : user.role === 'TRUCK_OWNER'
+            : user.role === "TRUCK_OWNER"
               ? {
                   shipment: {
                     assignments: {
-                      some: { status: 'ACCEPTED' as const, vehicle: { ownerId: user.sub } },
+                      some: {
+                        status: "ACCEPTED" as const,
+                        vehicle: { ownerId: user.sub },
+                      },
                     },
                   },
                 }
-            : {}; // ADMIN/DISPATCHER get operational visibility across all threads.
+              : {}; // ADMIN/DISPATCHER get operational visibility across all threads.
 
       const conversations = await this.prisma.conversation.findMany({
         where,
         include: {
           messages: {
-            orderBy: { createdAt: 'desc' },
+            orderBy: { createdAt: "desc" },
             take: 1,
             include: { sender: { include: { profile: true } } },
           },
         },
-        orderBy: { updatedAt: 'desc' },
+        orderBy: { updatedAt: "desc" },
         take: 50,
       });
 
@@ -134,9 +166,12 @@ export class CommunicationService {
         return {
           id: conversation.id,
           role: user.role,
-          title: conversation.subject ?? 'Tracko conversation',
-          subtitle: lastMessage?.body ?? lastMessage?.transcript ?? 'No messages yet',
-          lastMessageAt: lastMessage?.createdAt?.toISOString() ?? conversation.updatedAt.toISOString(),
+          title: conversation.subject ?? "Tracko conversation",
+          subtitle:
+            lastMessage?.body ?? lastMessage?.transcript ?? "No messages yet",
+          lastMessageAt:
+            lastMessage?.createdAt?.toISOString() ??
+            conversation.updatedAt.toISOString(),
           unreadCount: 0,
         };
       });
@@ -155,10 +190,12 @@ export class CommunicationService {
       conversation = await this.prisma.conversation.upsert({
         where: { id: conversationId },
         update: {},
-        create: { id: conversationId, subject: 'Tracko conversation' },
+        create: { id: conversationId, subject: "Tracko conversation" },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load this conversation. Please try again: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(
+        `Could not load this conversation. Please try again: ${this.errorMessage(error)}`,
+      );
     }
     await this.assertConversationAccess(conversation, user);
 
@@ -167,10 +204,12 @@ export class CommunicationService {
       messages = await this.prisma.message.findMany({
         where: { conversationId },
         include: { sender: { include: { profile: true } } },
-        orderBy: { createdAt: 'asc' },
+        orderBy: { createdAt: "asc" },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load messages. Please try again: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(
+        `Could not load messages. Please try again: ${this.errorMessage(error)}`,
+      );
     }
 
     return {
@@ -185,17 +224,30 @@ export class CommunicationService {
   // received anything, since nothing was ever saved. The core write now fails loudly.
   // Translation is layered on afterward as a genuinely best-effort side effect: it must
   // never block or fail the send itself.
-  async sendMessage(conversationId: string, senderId: string, dto: SendMessageDto, user: AuthUser) {
-    const conversation = await this.prisma.conversation.upsert({
-      where: { id: conversationId },
-      update: { updatedAt: new Date() },
-      create: { id: conversationId, subject: 'Tracko conversation' },
-    }).catch((error) => {
-      throw new InternalServerErrorException(`Could not open this conversation. Please try again: ${this.errorMessage(error)}`);
-    });
+  async sendMessage(
+    conversationId: string,
+    senderId: string,
+    dto: SendMessageDto,
+    user: AuthUser,
+  ) {
+    const conversation = await this.prisma.conversation
+      .upsert({
+        where: { id: conversationId },
+        update: { updatedAt: new Date() },
+        create: { id: conversationId, subject: "Tracko conversation" },
+      })
+      .catch((error) => {
+        throw new InternalServerErrorException(
+          `Could not open this conversation. Please try again: ${this.errorMessage(error)}`,
+        );
+      });
     await this.assertConversationAccess(conversation, user);
 
-    const translation = await this.translateForRecipient(conversation, senderId, dto).catch(() => null);
+    const translation = await this.translateForRecipient(
+      conversation,
+      senderId,
+      dto,
+    ).catch(() => null);
 
     let message;
     try {
@@ -216,15 +268,21 @@ export class CommunicationService {
         include: { sender: { include: { profile: true } } },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not send this message. Please try again: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(
+        `Could not send this message. Please try again: ${this.errorMessage(error)}`,
+      );
     }
 
-    await this.prisma.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    }).catch((error) => {
-      this.logger.error(`Could not bump conversation ${conversationId} after a real message was saved: ${this.errorMessage(error)}`);
-    });
+    await this.prisma.conversation
+      .update({
+        where: { id: conversationId },
+        data: { updatedAt: new Date() },
+      })
+      .catch((error) => {
+        this.logger.error(
+          `Could not bump conversation ${conversationId} after a real message was saved: ${this.errorMessage(error)}`,
+        );
+      });
 
     return this.toMessageRecord(message);
   }
@@ -238,34 +296,55 @@ export class CommunicationService {
     conversation: { customerId: string | null; driverId: string | null },
     senderId: string,
     dto: SendMessageDto,
-  ): Promise<{ translatedText: string; translatedLanguage: string; sourceLanguage?: string } | null> {
-    const text = (dto.kind === 'VOICE' ? dto.transcript : dto.body)?.trim();
+  ): Promise<{
+    translatedText: string;
+    translatedLanguage: string;
+    sourceLanguage?: string;
+  } | null> {
+    const text = (dto.kind === "VOICE" ? dto.transcript : dto.body)?.trim();
     if (!text) return null;
 
-    const recipientId = conversation.customerId === senderId ? conversation.driverId : conversation.customerId;
+    const recipientId =
+      conversation.customerId === senderId
+        ? conversation.driverId
+        : conversation.customerId;
     if (!recipientId) return null;
 
     const [sender, recipient] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: senderId }, select: { preferredLanguage: true } }),
-      this.prisma.user.findUnique({ where: { id: recipientId }, select: { preferredLanguage: true } }),
+      this.prisma.user.findUnique({
+        where: { id: senderId },
+        select: { preferredLanguage: true },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: recipientId },
+        select: { preferredLanguage: true },
+      }),
     ]);
-    const recipientLanguage = recipient?.preferredLanguage ?? 'en';
+    const recipientLanguage = recipient?.preferredLanguage ?? "en";
     // Same-language heuristic to skip a pointless API call in the common case - if the
     // sender's own language happens to differ from what they actually typed/spoke, the
     // real translate() call below still runs whenever the languages differ, and its
     // detectedSourceLanguage (not this assumption) is what actually gets stored.
-    if (recipientLanguage === (sender?.preferredLanguage ?? 'en')) return null;
+    if (recipientLanguage === (sender?.preferredLanguage ?? "en")) return null;
 
-    const result = await this.translationProvider.translate(text, recipientLanguage);
+    const result = await this.translationProvider.translate(
+      text,
+      recipientLanguage,
+    );
     if (!result) return null;
     return {
       translatedText: result.translatedText,
       translatedLanguage: recipientLanguage,
-      sourceLanguage: result.detectedSourceLanguage ?? sender?.preferredLanguage,
+      sourceLanguage:
+        result.detectedSourceLanguage ?? sender?.preferredLanguage,
     };
   }
 
-  updateTypingStatus(conversationId: string, userId: string, dto: TypingStatusDto) {
+  updateTypingStatus(
+    conversationId: string,
+    userId: string,
+    dto: TypingStatusDto,
+  ) {
     // userId always comes from the verified session, never from the request body -
     // otherwise any caller could report typing status (and thus presence) as anyone else.
     return {
@@ -278,11 +357,18 @@ export class CommunicationService {
 
   async transcribeVoiceNote(dto: TranscribeVoiceDto) {
     if (dto.base64) {
-      const result = await this.translationProvider.transcribe(dto.base64, dto.mimeType ?? 'audio/webm', dto.languageHint);
+      const result = await this.translationProvider.transcribe(
+        dto.base64,
+        dto.mimeType ?? "audio/webm",
+        dto.languageHint,
+      );
       if (result) {
-        const english = result.detectedLanguage && result.detectedLanguage !== 'en'
-          ? await this.translationProvider.translate(result.transcript, 'en', result.detectedLanguage).catch(() => null)
-          : null;
+        const english =
+          result.detectedLanguage && result.detectedLanguage !== "en"
+            ? await this.translationProvider
+                .translate(result.transcript, "en", result.detectedLanguage)
+                .catch(() => null)
+            : null;
         return {
           transcript: english?.translatedText ?? result.transcript,
           sourceTranscript: english ? result.transcript : undefined,
@@ -293,16 +379,26 @@ export class CommunicationService {
       }
     }
     return {
-      transcript: '',
+      transcript: "",
       durationSeconds: dto.durationSeconds,
       unavailableReason: this.translationProvider.status().transcriptionEnabled
-        ? 'Could not transcribe this recording. Use Chrome or Edge browser speech recognition for live transcript instead.'
-        : 'Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.',
+        ? "Could not transcribe this recording. Use Chrome or Edge browser speech recognition for live transcript instead."
+        : "Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.",
     };
   }
 
-  registerPushToken(userId: string, token: string, platform?: string, deviceId?: string) {
-    return this.notifications.registerPushToken(userId, token, platform, deviceId);
+  registerPushToken(
+    userId: string,
+    token: string,
+    platform?: string,
+    deviceId?: string,
+  ) {
+    return this.notifications.registerPushToken(
+      userId,
+      token,
+      platform,
+      deviceId,
+    );
   }
 
   async uploadMedia(input: Record<string, unknown>, userId: string) {
@@ -344,34 +440,47 @@ export class CommunicationService {
          returning "id", "kind"::text as "kind", "url", "storageKey", "label", "transcript", "durationSeconds", "createdAt"`,
         input.shipmentId ? String(input.shipmentId) : null,
         input.conversationId ? String(input.conversationId) : null,
-        String(input.kind ?? 'DOCUMENT'),
+        String(input.kind ?? "DOCUMENT"),
         media.url,
         media.storageKey,
-        String(input.label ?? 'Uploaded media'),
+        String(input.label ?? "Uploaded media"),
         input.transcript ? String(input.transcript) : null,
         input.durationSeconds ? Number(input.durationSeconds) : null,
         media.mimeType,
-        userId.startsWith('preview-') ? null : userId,
+        userId.startsWith("preview-") ? null : userId,
         // "id" has no database-level default (Prisma's @default(cuid()) is client-side
         // only) - this raw insert must generate its own, matching the pattern used
         // elsewhere in the codebase (e.g. KycService.id()) for handwritten SQL inserts.
-        `media_${randomUUID().replace(/-/g, '')}`,
+        `media_${randomUUID().replace(/-/g, "")}`,
       );
-      if (!rows[0]) throw new Error('Media asset insert returned no row.');
+      if (!rows[0]) throw new Error("Media asset insert returned no row.");
       return {
         ...rows[0],
         createdAt: rows[0].createdAt.toISOString(),
         uploaded: true,
       };
     } catch (error) {
-      this.logger.error(`uploadMedia() failed to save the MediaAsset record: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not save this upload. Please try again: ${this.errorMessage(error)}`);
+      this.logger.error(
+        `uploadMedia() failed to save the MediaAsset record: ${this.errorMessage(error)}`,
+      );
+      throw new InternalServerErrorException(
+        `Could not save this upload. Please try again: ${this.errorMessage(error)}`,
+      );
     }
   }
 
   private async prepareMedia(input: Record<string, unknown>, userId: string) {
-    const mimeType = typeof input.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
-    const base64 = typeof input.base64 === 'string' && input.base64.trim() ? input.base64.trim() : null;
+    // MediaRecorder commonly reports `audio/webm;codecs=opus`. Supabase bucket MIME
+    // allow-lists and file extensions expect the canonical media type without params.
+    const suppliedMimeType =
+      typeof input.mimeType === "string" && input.mimeType.trim()
+        ? input.mimeType.trim()
+        : "application/octet-stream";
+    const mimeType = suppliedMimeType.split(";", 1)[0].trim().toLowerCase();
+    const base64 =
+      typeof input.base64 === "string" && input.base64.trim()
+        ? input.base64.trim()
+        : null;
     const storage = this.storageConfig();
 
     // A bare localUri/uri (a path on the sender's own device, e.g. `file:///...`) can
@@ -384,24 +493,45 @@ export class CommunicationService {
     // attachment forever. Real file content is required; a caller with only a local path
     // must fail loudly so the UI's existing "tap to retry" affordance can ask for it again.
     if (!base64) {
-      throw new BadRequestException('Real file content is required to upload media - a local device path cannot be stored or shared.');
+      throw new BadRequestException(
+        "Real file content is required to upload media - a local device path cannot be stored or shared.",
+      );
     }
 
     if (storage) {
       try {
         const storageKey = this.storageKey(input, userId, mimeType);
-        const response = await fetch(`${storage.url}/storage/v1/object/${storage.bucket}/${storageKey}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${storage.serviceRoleKey}`,
-            apikey: storage.serviceRoleKey,
-            'Content-Type': mimeType,
-            'x-upsert': 'false',
-          },
-          body: Buffer.from(base64, 'base64'),
-        });
+        const objectUrl = `${storage.url}/storage/v1/object/${storage.bucket}/${storageKey}`;
+        const bytes = Buffer.from(base64, "base64");
+        const upload = (contentType: string) =>
+          fetch(objectUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${storage.serviceRoleKey}`,
+              apikey: storage.serviceRoleKey,
+              "Content-Type": contentType,
+              "x-upsert": "false",
+            },
+            body: bytes,
+          });
 
-        if (!response.ok) throw new Error(`Supabase storage upload failed with ${response.status}`);
+        let response = await upload(mimeType);
+        // Existing deployments may still have the older bucket allow-list that omitted
+        // audio/webm/audio/ogg. application/octet-stream was always allowed, so retry
+        // audio once with that storage content type while retaining the real MIME on the
+        // MediaAsset record and a correct audio file extension for playback.
+        if (
+          !response.ok &&
+          response.status === 400 &&
+          mimeType.startsWith("audio/")
+        ) {
+          response = await upload("application/octet-stream");
+        }
+
+        if (!response.ok)
+          throw new Error(
+            `Supabase storage upload failed with ${response.status}`,
+          );
 
         return {
           url: `${storage.url}/storage/v1/object/public/${storage.bucket}/${storageKey}`,
@@ -413,8 +543,12 @@ export class CommunicationService {
         // falling back here used to return a "successful" upload whose data: URI is
         // only ever visible to the uploader's own request, not a real stored asset any
         // other viewer (an admin, the message recipient) could later fetch on demand.
-        this.logger.error(`prepareMedia() Supabase storage upload failed: ${this.errorMessage(error)}`);
-        throw new InternalServerErrorException(`Could not upload this file. Please try again: ${this.errorMessage(error)}`);
+        this.logger.error(
+          `prepareMedia() Supabase storage upload failed: ${this.errorMessage(error)}`,
+        );
+        throw new InternalServerErrorException(
+          `Could not upload this file. Please try again: ${this.errorMessage(error)}`,
+        );
       }
     }
 
@@ -429,27 +563,42 @@ export class CommunicationService {
   }
 
   private storageConfig() {
-    const url = this.config.get<string>('SUPABASE_URL') ?? this.config.get<string>('EXPO_PUBLIC_SUPABASE_URL') ?? this.config.get<string>('NEXT_PUBLIC_SUPABASE_URL');
-    const serviceRoleKey = this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY');
-    const bucket = this.config.get<string>('SUPABASE_STORAGE_BUCKET') ?? 'tracko-media';
+    const url =
+      this.config.get<string>("SUPABASE_URL") ??
+      this.config.get<string>("EXPO_PUBLIC_SUPABASE_URL") ??
+      this.config.get<string>("NEXT_PUBLIC_SUPABASE_URL");
+    const serviceRoleKey = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY");
+    const bucket =
+      this.config.get<string>("SUPABASE_STORAGE_BUCKET") ?? "tracko-media";
     if (!url || !serviceRoleKey) return null;
-    return { url: url.replace(/\/$/, ''), serviceRoleKey, bucket };
+    return { url: url.replace(/\/$/, ""), serviceRoleKey, bucket };
   }
 
-  private storageKey(input: Record<string, unknown>, userId: string, mimeType: string) {
-    const kind = String(input.kind ?? 'DOCUMENT').toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const owner = userId.startsWith('preview-') ? 'preview' : userId.replace(/[^a-zA-Z0-9_-]/g, '');
+  private storageKey(
+    input: Record<string, unknown>,
+    userId: string,
+    mimeType: string,
+  ) {
+    const kind = String(input.kind ?? "DOCUMENT")
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+    const owner = userId.startsWith("preview-")
+      ? "preview"
+      : userId.replace(/[^a-zA-Z0-9_-]/g, "");
     return `${kind}/${owner}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${this.extensionForMime(mimeType)}`;
   }
 
   private extensionForMime(mimeType: string) {
-    if (mimeType.includes('png')) return 'png';
-    if (mimeType.includes('webp')) return 'webp';
-    if (mimeType.includes('pdf')) return 'pdf';
-    if (mimeType.includes('mpeg')) return 'mp3';
-    if (mimeType.includes('wav')) return 'wav';
-    if (mimeType.includes('mp4')) return 'mp4';
-    return 'jpg';
+    if (mimeType.includes("png")) return "png";
+    if (mimeType.includes("webp")) return "webp";
+    if (mimeType.includes("pdf")) return "pdf";
+    if (mimeType.includes("mpeg")) return "mp3";
+    if (mimeType.includes("webm")) return "webm";
+    if (mimeType.includes("ogg")) return "ogg";
+    if (mimeType.includes("x-m4a") || mimeType.includes("aac")) return "m4a";
+    if (mimeType.includes("wav")) return "wav";
+    if (mimeType.includes("mp4")) return "mp4";
+    return "jpg";
   }
 
   private toMessageRecord(message: {
