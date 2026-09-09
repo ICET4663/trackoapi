@@ -116,6 +116,7 @@ export class DataService {
             reg: vehicle.plateNumber,
             type: vehicle.type,
             capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            volumeCapacity: vehicle.capacityM3 ? `${vehicle.capacityM3.toFixed(1)}m³` : 'Volume pending',
             year: '—',
             status: vehicle.assignedDriverId ? 'Assigned' : vehicle.isActive ? 'Available' : 'Maintenance',
             base: vehicle.registrationState ?? 'Location pending',
@@ -140,6 +141,7 @@ export class DataService {
             reg: vehicle.plateNumber,
             type: vehicle.type,
             capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            volumeCapacity: vehicle.capacityM3 ? `${vehicle.capacityM3.toFixed(1)}m³` : 'Volume pending',
             status: vehicle.isActive ? 'Active' : 'Inactive',
             owner: vehicle.owner.profile?.fullName ?? vehicle.owner.email,
           }));
@@ -242,6 +244,7 @@ export class DataService {
               plateNumber,
               type: String(item.type ?? 'Flatbed'),
               capacityKg: this.parseCapacityKg(item.capacity),
+              capacityM3: this.parseCapacityM3(item.volumeCapacity ?? item.capacityM3),
               registrationState: item.base ? String(item.base) : null,
             },
           });
@@ -258,6 +261,7 @@ export class DataService {
             reg: vehicle.plateNumber,
             type: vehicle.type,
             capacity: vehicle.capacityKg ? `${(vehicle.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+            volumeCapacity: vehicle.capacityM3 ? `${vehicle.capacityM3.toFixed(1)}m³` : 'Volume pending',
             year: '—',
             status: 'Available',
             base: vehicle.registrationState ?? 'Location pending',
@@ -610,6 +614,13 @@ export class DataService {
     const value = Number(match[0]);
     if (!Number.isFinite(value) || value <= 0) return null;
     return raw.includes('kg') ? Math.round(value) : Math.round(value * 1000);
+  }
+
+  private parseCapacityM3(input: unknown): number | null {
+    const match = String(input ?? '').trim().match(/[\d.]+/);
+    if (!match) return null;
+    const value = Number(match[0]);
+    return Number.isFinite(value) && value > 0 ? Number(value.toFixed(2)) : null;
   }
 
   private ageLabel(date: Date) {

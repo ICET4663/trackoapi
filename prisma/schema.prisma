@@ -245,6 +245,7 @@ model Vehicle {
   plateNumber       String    @unique
   type              String
   capacityKg        Int?
+  capacityM3        Float?
   registrationState String?
   isActive          Boolean   @default(true)
   createdAt         DateTime  @default(now())

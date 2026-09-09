@@ -80,6 +80,7 @@ type AssignmentRecordInput = {
     plateNumber: string;
     type: string;
     capacityKg?: number | null;
+    capacityM3?: number | null;
   } | null;
 };
 
@@ -566,8 +567,10 @@ export class ShipmentsService {
       throw new BadRequestException('This driver already has an active shipment or pending offer. Select another driver.');
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+    const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
     const eligibleVehicles = [...driver.driverVehicles]
       .filter((vehicle) => !cargoWeightKg || (vehicle.capacityKg ?? 0) >= cargoWeightKg)
+      .filter((vehicle) => !cargoVolumeM3 || (vehicle.capacityM3 ?? 0) >= cargoVolumeM3)
       .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
     const selectedVehicle = body.vehicleId
       ? driver.driverVehicles.find((vehicle) => vehicle.id === body.vehicleId)
@@ -577,6 +580,9 @@ export class ShipmentsService {
     }
     if (cargoWeightKg && (selectedVehicle.capacityKg ?? 0) < cargoWeightKg) {
       throw new BadRequestException('The selected truck does not have enough capacity for this cargo.');
+    }
+    if (cargoVolumeM3 && (selectedVehicle.capacityM3 ?? 0) < cargoVolumeM3) {
+      throw new BadRequestException('The selected truck does not have enough physical space for this cargo.');
     }
     if (!this.isVehicleAssignmentReady(selectedVehicle)) {
       throw new BadRequestException('The selected truck cannot receive loads until registration, insurance, and roadworthiness documents are verified and current.');
@@ -869,7 +875,7 @@ export class ShipmentsService {
       const [shipment, previousAssignments, candidates, unavailableDrivers] = await Promise.all([
         this.prisma.shipment.findUnique({
           where: { id: shipmentId },
-          select: { cargoWeightKg: true, pickupLatitude: true, pickupLongitude: true },
+          select: { cargoWeightKg: true, cargoVolumeM3: true, pickupLatitude: true, pickupLongitude: true },
         }),
         this.prisma.driverAssignment.findMany({
           where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED', 'CANCELLED'] } },
@@ -907,12 +913,14 @@ export class ShipmentsService {
       const excluded = new Set(previousAssignments.map((assignment) => assignment.driverId));
       const availabilityByDriver = new Map(unavailableDrivers.map((driver) => [driver.userId, driver]));
       const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+      const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
       const ranked = candidates
         .filter((driver) => !excluded.has(driver.id) && availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
             .filter((candidate) => this.isVehicleAssignmentReady(candidate))
             .filter((candidate) => !cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)
+            .filter((candidate) => !cargoVolumeM3 || (candidate.capacityM3 ?? 0) >= cargoVolumeM3)
             .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0))[0];
           const availability = availabilityByDriver.get(driver.id);
           const pickupDistanceKm = this.pickupDistanceKm(
@@ -932,7 +940,10 @@ export class ShipmentsService {
             ? reviews.reduce((total, review) => total + review.rating, 0) / reviews.length
             : null;
           const capacityKg = vehicle?.capacityKg ?? cargoWeightKg;
-          const spareRatio = capacityKg > 0 ? Math.max(0, capacityKg - cargoWeightKg) / capacityKg : 0;
+          const capacityM3 = vehicle?.capacityM3 ?? cargoVolumeM3;
+          const weightUtilization = capacityKg > 0 ? cargoWeightKg / capacityKg : 0;
+          const volumeUtilization = capacityM3 > 0 ? cargoVolumeM3 / capacityM3 : 0;
+          const spareRatio = Math.max(0, 1 - Math.max(weightUtilization, volumeUtilization));
           const capacityScore = Math.round(35 - Math.min(spareRatio * 12, 12));
           const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
           const experienceScore = Math.min(10, completedTrips * 2);
@@ -1705,6 +1716,7 @@ export class ShipmentsService {
             plateNumber: assignment.vehicle.plateNumber,
             type: assignment.vehicle.type,
             capacityKg: assignment.vehicle.capacityKg,
+            capacityM3: assignment.vehicle.capacityM3,
           }
         : undefined,
       shipment: assignment.shipment ? this.toShipmentRecord(assignment.shipment) : undefined,

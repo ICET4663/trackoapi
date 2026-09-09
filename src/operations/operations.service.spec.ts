@@ -173,7 +173,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
       $queryRawUnsafe: jest.fn().mockResolvedValue([
         {
           id: 'shipment-1', reference: 'TRK-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
-          cargoDescription: 'Food', cargoWeightKg: 8000, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
+          cargoDescription: 'Food', cargoWeightKg: 8000, cargoVolumeM3: 20, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
           escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
           assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
           assignmentOfferedAt: null, rejectedDriverIds: [], createdAt: new Date('2026-08-28T09:00:00.000Z'),
@@ -184,14 +184,14 @@ describe('OperationsService.assignmentQueue driver matching', () => {
           {
             id: 'driver-best', email: 'best@tracko.ng', phone: '+2341', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Best Driver' },
-            driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000, documents: verifiedDocuments }],
+            driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000, capacityM3: 30, documents: verifiedDocuments }],
             driverAssignments: Array.from({ length: 5 }, () => ({ status: 'ACCEPTED', shipment: { status: 'COMPLETED' } })),
             driverReviews: [{ rating: 5 }, { rating: 5 }],
           },
           {
             id: 'driver-busy', email: 'busy@tracko.ng', phone: '+2342', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Busy Driver' },
-            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, documents: verifiedDocuments }],
+            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, capacityM3: 40, documents: verifiedDocuments }],
             driverAssignments: [
               { status: 'ACCEPTED', shipment: { status: 'IN_TRANSIT' } },
               { status: 'OFFERED', shipment: { status: 'DRIVER_ASSIGNED' } },
@@ -200,8 +200,8 @@ describe('OperationsService.assignmentQueue driver matching', () => {
           },
           {
             id: 'driver-small', email: 'small@tracko.ng', phone: '+2343', verificationStatus: 'VERIFIED',
-            profile: { fullName: 'Small Truck Driver' },
-            driverVehicles: [{ id: 'truck-small', plateNumber: 'SML-1', type: 'Van', capacityKg: 5000, documents: verifiedDocuments }],
+            profile: { fullName: 'Small Body Truck Driver' },
+            driverVehicles: [{ id: 'truck-small', plateNumber: 'SML-1', type: 'Van', capacityKg: 10000, capacityM3: 10, documents: verifiedDocuments }],
             driverAssignments: [],
             driverReviews: [{ rating: 5 }],
           },

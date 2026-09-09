@@ -19,6 +19,7 @@ type AssignmentQueueShipmentRow = {
   destinationLabel: string;
   cargoDescription: string;
   cargoWeightKg: number | null;
+  cargoVolumeM3: number | null;
   pickupLatitude: number | null;
   pickupLongitude: number | null;
   status: string;
@@ -40,7 +41,7 @@ type DriverMatchInput = {
   id: string;
   verificationStatus: string;
   driverVehicles: Array<{
-    id: string; plateNumber: string; type: string; capacityKg: number | null;
+    id: string; plateNumber: string; type: string; capacityKg: number | null; capacityM3: number | null;
     documents: Array<{ type: string; state: string; expires: Date | string | null }>;
   }>;
   driverAssignments: Array<{ status: string; shipment: { status: string } }>;
@@ -144,7 +145,7 @@ export class OperationsService {
         this.prisma.$queryRawUnsafe<AssignmentQueueShipmentRow[]>(
           `select
             s."id", s."reference", s."pickupLabel", s."destinationLabel", s."cargoDescription",
-            s."cargoWeightKg", s."pickupLatitude", s."pickupLongitude",
+            s."cargoWeightKg", s."cargoVolumeM3", s."pickupLatitude", s."pickupLongitude",
             s."status"::text as "status", s."quotedPriceKobo", s."createdAt",
             e."id" as "escrowId", e."status"::text as "escrowStatus", e."amount" as "escrowAmount",
             e."currency" as "escrowCurrency",
@@ -213,6 +214,7 @@ export class OperationsService {
           destination: shipment.destinationLabel,
           cargo: shipment.cargoDescription,
           cargoWeightKg: shipment.cargoWeightKg,
+          cargoVolumeM3: shipment.cargoVolumeM3,
           status: shipment.status,
           quotedPriceKobo: shipment.quotedPriceKobo,
           escrow: shipment.escrowId
@@ -256,6 +258,7 @@ export class OperationsService {
             plateNumber: vehicle.plateNumber,
             type: vehicle.type,
             capacityKg: vehicle.capacityKg,
+            capacityM3: vehicle.capacityM3,
             readiness: this.vehicleReadiness(vehicle),
           })),
           matches: Object.fromEntries(shipments.map((shipment) => [shipment.id, this.matchDriver(driver, shipment)])),
@@ -275,17 +278,21 @@ export class OperationsService {
       return { score: 0, eligible: false, vehicleId: null, reason: 'Driver already declined or missed this shipment offer.' };
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
+    const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
+    const fitsLoad = (candidate: DriverMatchInput['driverVehicles'][number]) =>
+      (!cargoWeightKg || (candidate.capacityKg ?? 0) >= cargoWeightKg)
+      && (!cargoVolumeM3 || (candidate.capacityM3 ?? 0) >= cargoVolumeM3);
     const vehicles = [...driver.driverVehicles].sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
     const readyVehicles = vehicles.filter((candidate) => this.vehicleReadiness(candidate).ready);
-    const vehicle = cargoWeightKg > 0
-      ? readyVehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
+    const vehicle = cargoWeightKg > 0 || cargoVolumeM3 > 0
+      ? readyVehicles.find(fitsLoad)
       : readyVehicles[readyVehicles.length - 1];
     if (!vehicle) {
-      const capacityVehicle = cargoWeightKg > 0
-        ? vehicles.find((candidate) => (candidate.capacityKg ?? 0) >= cargoWeightKg)
+      const capacityVehicle = cargoWeightKg > 0 || cargoVolumeM3 > 0
+        ? vehicles.find(fitsLoad)
         : vehicles[vehicles.length - 1];
       if (capacityVehicle) return { score: 0, eligible: false, vehicleId: capacityVehicle.id, reason: 'Truck documents are incomplete, pending review, rejected, or expired.' };
-      return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck has enough capacity for this cargo.' };
+      return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck fits both the cargo weight and physical volume.' };
     }
 
     const activeAssignments = driver.driverAssignments.filter((assignment) =>
@@ -305,7 +312,10 @@ export class OperationsService {
       ? driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length
       : null;
     const capacityKg = vehicle.capacityKg ?? cargoWeightKg;
-    const spareRatio = capacityKg > 0 ? Math.max(0, capacityKg - cargoWeightKg) / capacityKg : 0;
+    const capacityM3 = vehicle.capacityM3 ?? cargoVolumeM3;
+    const weightUtilization = capacityKg > 0 ? cargoWeightKg / capacityKg : 0;
+    const volumeUtilization = capacityM3 > 0 ? cargoVolumeM3 / capacityM3 : 0;
+    const spareRatio = Math.max(0, 1 - Math.max(weightUtilization, volumeUtilization));
     const capacityScore = Math.round(35 - Math.min(spareRatio * 12, 12));
     const availabilityScore = Math.max(0, 20 - activeAssignments * 10);
     const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
@@ -334,7 +344,7 @@ export class OperationsService {
       eligible: true,
       vehicleId: vehicle.id,
       pickupDistanceKm,
-      reason: `${capacityTons}t ${vehicle.type} fits ${cargoTons}t cargo · ${proximity} · ${availability} · ${rating}`,
+      reason: `${capacityTons}t / ${capacityM3 || '?'}m³ ${vehicle.type} fits ${cargoTons}t${cargoVolumeM3 ? ` / ${cargoVolumeM3}m³` : ''} cargo · ${proximity} · ${availability} · ${rating}`,
     };
   }
 
