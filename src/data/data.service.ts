@@ -216,10 +216,11 @@ export class DataService {
     return items.find((item: { id: string }) => item.id === id) ?? { id };
   }
 
-  async create(collection: DataCollection, item: Record<string, unknown>, userId: string) {
+  async create(collection: DataCollection, item: Record<string, unknown>, userId: string, role?: UserRole) {
     try {
       switch (collection) {
         case 'customer-shipments':
+          if (role && role !== 'CUSTOMER') throw new ForbiddenException('Only customers can create shipments.');
           return await this.prisma.shipment.create({
             data: {
               reference: `TRK-${Date.now()}`,
@@ -232,6 +233,7 @@ export class DataService {
             },
           });
         case 'owner-trucks': {
+          if (role && role !== 'TRUCK_OWNER') throw new ForbiddenException('Only truck owners can register trucks.');
           // register-truck.tsx tells the owner "saved to the backend fleet database" -
           // the default branch below only ever echoed the submitted form fields back
           // with a local id and never wrote a Vehicle row, so that message was false
@@ -278,7 +280,7 @@ export class DataService {
       // database when the Vehicle row was never written. Only the write cases above
       // (customer-shipments, owner-trucks) can actually throw here; the `default` echo
       // branch never touches the DB and returns before this catch is reachable.
-      if (error instanceof BadRequestException) throw error;
+      if (error instanceof BadRequestException || error instanceof ForbiddenException) throw error;
       this.logger.error(`create(${collection}) failed: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException(`Could not save this. Please try again: ${this.errorMessage(error)}`);
     }
@@ -467,21 +469,52 @@ export class DataService {
   private async seekingDrivers() {
     const drivers = await this.prisma.user.findMany({
       where: { OR: [{ role: UserRole.DRIVER }, { availableRoles: { has: UserRole.DRIVER } }], isActive: true },
-      include: { profile: true, driverVehicles: true },
+      include: {
+        profile: true,
+        driverVehicles: true,
+        driverAssignments: {
+          where: { shipment: { status: 'COMPLETED' } },
+          include: { shipment: true },
+          orderBy: { offeredAt: 'desc' },
+        },
+        driverReviews: { select: { rating: true } },
+      },
       orderBy: { updatedAt: 'desc' },
       take: 50,
     });
 
     return drivers.map((driver) => {
       const vehicle = driver.driverVehicles[0];
+      const completedTrips = driver.driverAssignments.length;
+      const averageRating = driver.driverReviews.length
+        ? driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length
+        : 0;
+      const state = driver.profile?.state ?? 'State pending';
+      const location = [driver.profile?.city, driver.profile?.state].filter(Boolean).join(', ') || 'Location pending';
+      const previousShipment = driver.driverAssignments[0]?.shipment;
+      const previousRoute = previousShipment
+        ? `${previousShipment.pickupLabel} to ${previousShipment.destinationLabel}`
+        : 'No completed route yet';
+      const neededTruck = ['Flatbed', 'Box truck', 'Tanker', 'Tipper'].includes(vehicle?.type ?? '')
+        ? vehicle!.type
+        : 'Flatbed';
       return {
         id: driver.id,
         name: driver.profile?.fullName ?? driver.email,
-        rating: driver.verificationStatus === 'VERIFIED' ? 5 : 4,
-        location: [driver.profile?.city, driver.profile?.state].filter(Boolean).join(', ') || 'Location pending',
-        truck: vehicle?.type ?? 'Truck pending',
-        plate: vehicle?.plateNumber ?? 'Unassigned',
-        phone: driver.phone,
+        location,
+        state,
+        experienceYears: Math.max(0, Math.floor(completedTrips / 20)),
+        rating: averageRating,
+        completedTrips,
+        safetyScore: driver.verificationStatus === 'VERIFIED' ? 95 : 60,
+        neededTruck,
+        availability: vehicle?.isActive ? 'Ready today' : 'Availability pending',
+        listedMinutes: Math.max(0, Math.floor((Date.now() - driver.updatedAt.getTime()) / 60_000)),
+        previousRoute,
+        preferredRoutes: state === 'State pending' ? [] : [state],
+        phone: driver.phone ?? 'Phone pending',
+        verified: driver.verificationStatus === 'VERIFIED',
+        notes: vehicle ? `${vehicle.type} ${vehicle.plateNumber}` : 'Waiting for a verified truck assignment.',
       };
     });
   }
@@ -622,6 +655,7 @@ export class DataService {
     const value = Number(match[0]);
     return Number.isFinite(value) && value > 0 ? Number(value.toFixed(2)) : null;
   }
+
 
   private ageLabel(date: Date) {
     const hours = Math.max(1, Math.round((Date.now() - date.getTime()) / 36e5));

@@ -101,6 +101,7 @@ export class PortalService {
       include: {
         profile: true,
         vehicles: {
+          include: { documents: true, assignedDriver: { include: { profile: true } } },
           orderBy: { createdAt: 'desc' },
           take: 50,
         },
@@ -112,12 +113,19 @@ export class PortalService {
       id: truck.id,
       reg: truck.plateNumber,
       type: truck.type,
-      capacity: truck.capacityKg ? `${truck.capacityKg}kg` : 'Not set',
-      year: 'Not set',
+      capacity: truck.capacityKg ? `${(truck.capacityKg / 1000).toFixed(1)}t` : 'Capacity pending',
+      volumeCapacity: truck.capacityM3 ? `${truck.capacityM3.toFixed(1)}m³` : 'Volume pending',
+      year: '—',
       status: truck.assignedDriverId ? 'Assigned' : 'Available',
       base: truck.registrationState ?? 'Not set',
-      assignedDriver: truck.assignedDriverId ?? undefined,
-      documents: 'Verified',
+      assignedDriver: truck.assignedDriver?.profile?.fullName ?? truck.assignedDriver?.email,
+      documents: truck.documents.length >= 3 && truck.documents.every((document) => document.state === 'VERIFIED')
+        ? 'Verified'
+        : truck.documents.some((document) => document.state === 'PENDING_REVIEW')
+          ? 'Pending review'
+          : truck.documents.some((document) => document.state === 'REJECTED')
+            ? 'Action required'
+            : 'Incomplete',
     }));
 
     return {

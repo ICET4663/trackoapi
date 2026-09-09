@@ -81,6 +81,31 @@ describe('DataService authorization gates', () => {
     it('allows ADMIN/DISPATCHER too', async () => {
       await expect(service.list('seeking-drivers', 'admin-1', 'ADMIN')).resolves.toBeDefined();
     });
+
+    it('returns the complete driver-pool contract expected by the owner screen', async () => {
+      prisma.user.findMany.mockResolvedValueOnce([{
+        id: 'driver-1',
+        email: 'driver@tracko.ng',
+        phone: '+2348000000000',
+        verificationStatus: 'VERIFIED',
+        updatedAt: new Date(),
+        profile: { fullName: 'Tracko Driver', city: 'Ikeja', state: 'Lagos' },
+        driverVehicles: [{ type: 'Box truck', plateNumber: 'TRK-DRV-01', isActive: true }],
+        driverAssignments: [],
+        driverReviews: [],
+      }]);
+
+      const result = await service.list('seeking-drivers', 'owner-1', 'TRUCK_OWNER');
+
+      expect(result[0]).toMatchObject({
+        name: 'Tracko Driver',
+        state: 'Lagos',
+        neededTruck: 'Box truck',
+        completedTrips: 0,
+        verified: true,
+        preferredRoutes: ['Lagos'],
+      });
+    });
   });
 
   it('does not gate a self-scoped collection like customer-shipments for a CUSTOMER', async () => {
@@ -132,5 +157,14 @@ describe('DataService never fakes success on a real failure', () => {
     const service = new DataService(prisma);
 
     await expect(service.create('owner-trucks', {}, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('prevents a non-owner account from registering a truck', async () => {
+    const prisma = { vehicle: { create: jest.fn() } } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(
+      service.create('owner-trucks', { reg: 'TRK-001' }, 'customer-1', 'CUSTOMER'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

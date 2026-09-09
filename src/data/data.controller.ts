@@ -38,6 +38,6 @@ export class DataController {
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.dataService.create(collection, body, user.sub);
+    return this.dataService.create(collection, body, user.sub, user.role);
   }
 }
