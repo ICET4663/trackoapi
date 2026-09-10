@@ -40,6 +40,12 @@ export class OperationsController {
     return this.operations.escrowLedger(user);
   }
 
+  @Get('finance-summary')
+  async financeSummary(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'ADMIN');
+    return this.operations.financeSummary(user);
+  }
+
   @Post('shipments/:id/progress')
   async progressShipment(
     @Param('id') id: string,

@@ -360,4 +360,67 @@ describe('OperationsService admin/dispatcher screens never fake data on failure'
 
     await expect(service.escrowLedger(admin)).rejects.toThrow('Could not load the escrow ledger');
   });
+
+  it('financeSummary() throws instead of made-up totals when the read fails', async () => {
+    const service = buildService({
+      $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
+    });
+    await expect(service.financeSummary(admin)).rejects.toThrow('Could not load the finance summary');
+  });
+});
+
+describe('OperationsService.financeSummary', () => {
+  const admin: OperationActor = { sub: 'admin-1', role: 'ADMIN' };
+
+  function build(escrow: Record<string, number>, payout: Record<string, number>, counts: Record<string, number>) {
+    const $queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('as "fundedShipments"')) return Promise.resolve([counts]);
+      if (sql.includes('as "collected"')) return Promise.resolve([escrow]);
+      if (sql.includes('as "paid"')) return Promise.resolve([payout]);
+      return Promise.resolve([{}]);
+    });
+    const service = new OperationsService({ $queryRawUnsafe } as unknown as PrismaService, {} as NotificationsService, {} as ShipmentsService);
+    return service;
+  }
+
+  it('reports zero reconciliation delta when escrow buckets add up', async () => {
+    const service = build(
+      { collected: 1_000_000, held: 400_000, disputed: 100_000, released: 450_000, refunded: 50_000 },
+      { paid: 300_000, approved: 100_000, pending: 20_000, rejected: 0 },
+      { fundedShipments: 3, openDisputes: 1, pendingPayouts: 2 },
+    );
+    const result = await service.financeSummary(admin);
+
+    expect(result.escrow.reconciliationDeltaKobo).toBe(0);
+    expect(result.escrow.collectedKobo).toBe(1_000_000);
+    expect(result.payouts.paidKobo).toBe(300_000);
+    // released 450k - paid 300k - approved 100k
+    expect(result.driverSettlementLiabilityKobo).toBe(50_000);
+    expect(result.counts).toEqual({ fundedShipments: 3, openDisputes: 1, pendingPayouts: 2 });
+  });
+
+  it('surfaces a non-zero delta when an escrow row is in an unexpected state', async () => {
+    const service = build(
+      { collected: 1_000_000, held: 400_000, disputed: 0, released: 400_000, refunded: 0 },
+      { paid: 0, approved: 0, pending: 0, rejected: 0 },
+      { fundedShipments: 0, openDisputes: 0, pendingPayouts: 0 },
+    );
+    const result = await service.financeSummary(admin);
+    expect(result.escrow.reconciliationDeltaKobo).toBe(200_000);
+  });
+
+  it('never reports a negative settlement liability', async () => {
+    const service = build(
+      { collected: 500_000, held: 0, disputed: 0, released: 100_000, refunded: 0 },
+      { paid: 250_000, approved: 0, pending: 0, rejected: 0 },
+      { fundedShipments: 0, openDisputes: 0, pendingPayouts: 0 },
+    );
+    const result = await service.financeSummary(admin);
+    expect(result.driverSettlementLiabilityKobo).toBe(0);
+  });
+
+  it('rejects a non-operations caller', async () => {
+    const service = build({}, {}, {});
+    await expect(service.financeSummary({ sub: 'c', role: 'CUSTOMER' } as OperationActor)).rejects.toThrow('Only operations users');
+  });
 });

@@ -660,6 +660,101 @@ export class OperationsService {
     }
   }
 
+  // Money-flow reconciliation for the admin finance screen: what came in, what is
+  // still held, what left the platform, and whether escrow balances against
+  // driver payouts. All figures are in the smallest currency unit (kobo).
+  async financeSummary(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+
+    try {
+      const [escrowRows, payoutRows, countRows] = await Promise.all([
+        this.prisma.$queryRawUnsafe<Array<{
+          collected: bigint | null;
+          held: bigint | null;
+          disputed: bigint | null;
+          released: bigint | null;
+          refunded: bigint | null;
+        }>>(
+          `select
+             coalesce(sum("amount") filter (where "status" <> 'PENDING'::"EscrowStatus"), 0) as "collected",
+             coalesce(sum("amount") filter (where "status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "held",
+             coalesce(sum("amount") filter (where "status" = 'DISPUTED'::"EscrowStatus"), 0) as "disputed",
+             coalesce(sum("amount") filter (where "status" = 'RELEASED'::"EscrowStatus"), 0) as "released",
+             coalesce(sum("amount") filter (where "status" = 'REFUNDED'::"EscrowStatus"), 0) as "refunded"
+           from "Escrow"`,
+        ),
+        this.prisma.$queryRawUnsafe<Array<{
+          paid: bigint | null;
+          approved: bigint | null;
+          pending: bigint | null;
+          rejected: bigint | null;
+        }>>(
+          `select
+             coalesce(sum("amountKobo") filter (where "status" = 'PAID'::"PayoutStatus"), 0) as "paid",
+             coalesce(sum("amountKobo") filter (where "status" = 'APPROVED'::"PayoutStatus"), 0) as "approved",
+             coalesce(sum("amountKobo") filter (where "status" = 'PENDING'::"PayoutStatus"), 0) as "pending",
+             coalesce(sum("amountKobo") filter (where "status" = 'REJECTED'::"PayoutStatus"), 0) as "rejected"
+           from "Payout"`,
+        ),
+        this.prisma.$queryRawUnsafe<Array<{
+          fundedShipments: bigint | null;
+          openDisputes: bigint | null;
+          pendingPayouts: bigint | null;
+        }>>(
+          `select
+             (select count(*) from "Escrow" where "status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")) as "fundedShipments",
+             (select count(*) from "Dispute" where "status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")) as "openDisputes",
+             (select count(*) from "Payout" where "status" in ('PENDING'::"PayoutStatus", 'APPROVED'::"PayoutStatus")) as "pendingPayouts"`,
+        ),
+      ]);
+
+      const n = (value: bigint | null | undefined) => Number(value ?? 0);
+      const escrow = escrowRows[0] ?? {};
+      const payout = payoutRows[0] ?? {};
+      const counts = countRows[0] ?? {};
+
+      const collected = n(escrow.collected);
+      const held = n(escrow.held);
+      const disputed = n(escrow.disputed);
+      const released = n(escrow.released);
+      const refunded = n(escrow.refunded);
+      const paid = n(payout.paid);
+      const approved = n(payout.approved);
+
+      return {
+        currency: 'NGN',
+        escrow: {
+          collectedKobo: collected,
+          heldKobo: held,
+          disputedKobo: disputed,
+          releasedKobo: released,
+          refundedKobo: refunded,
+          // Every non-pending escrow should sit in exactly one of the buckets
+          // below; a non-zero delta means an Escrow row is in an unexpected state.
+          reconciliationDeltaKobo: collected - (held + disputed + released + refunded),
+        },
+        payouts: {
+          paidKobo: paid,
+          approvedAwaitingDisbursementKobo: approved,
+          pendingReviewKobo: n(payout.pending),
+          rejectedKobo: n(payout.rejected),
+        },
+        // Money released from escrow that has not yet been paid to or approved for
+        // a driver - the platform's outstanding settlement liability.
+        driverSettlementLiabilityKobo: Math.max(0, released - paid - approved),
+        counts: {
+          fundedShipments: n(counts.fundedShipments),
+          openDisputes: n(counts.openDisputes),
+          pendingPayouts: n(counts.pendingPayouts),
+        },
+        generatedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error(`financeSummary() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load the finance summary. Please try again.');
+    }
+  }
+
   async progressTrip(
     shipmentId: string,
     body: { status?: ShipmentStatus; note?: string; location?: string },
