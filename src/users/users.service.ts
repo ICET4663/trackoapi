@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { UserRole, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 type CreateUserInput = {
@@ -11,6 +11,9 @@ type CreateUserInput = {
   // Free-form signup profile blob from the multi-step forms. Only the fields that
   // map to real Profile columns are stored; anything else is ignored.
   profile?: Record<string, unknown>;
+  // Admin-created staff skip KYC, so the caller can start them VERIFIED. Left
+  // undefined for self-registration, which keeps the schema default (PENDING).
+  verificationStatus?: VerificationStatus;
 };
 
 function optionalString(value: unknown): string | undefined {
@@ -35,6 +38,7 @@ export class UsersService {
         passwordHash: input.passwordHash,
         role: input.role,
         availableRoles: [input.role],
+        ...(input.verificationStatus ? { verificationStatus: input.verificationStatus } : {}),
         profile: {
           create: {
             fullName: input.fullName.trim(),

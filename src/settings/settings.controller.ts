@@ -368,6 +368,15 @@ export class SettingsController {
     return this.settingsService.updatePlatformSetting(key, body.value, user.sub);
   }
 
+  @Post('admin/users')
+  async createUser(
+    @Body() body: { fullName?: string; email?: string; phone?: string; role?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const admin = await this.requestUser.requireRole(authorization, ['ADMIN']);
+    return this.settingsService.createUserByAdmin(admin.sub, body);
+  }
+
   @Get('admin/payout-requests')
   async payoutRequests(@Headers('authorization') authorization?: string) {
     await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);

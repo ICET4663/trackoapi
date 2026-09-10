@@ -1903,6 +1903,12 @@ export class SettingsService {
     })),
   ];
 
+  // Admin-created accounts (staff or otherwise). Delegates to AuthService, which
+  // owns password hashing and the set-your-password email.
+  createUserByAdmin(actorId: string, input: { fullName?: string; email?: string; phone?: string; role?: string }) {
+    return this.auth.createUserByAdmin(actorId, input);
+  }
+
   async platformSettings() {
     const rows = await this.prisma.platformSetting.findMany().catch(() => []);
     const overridesByKey = new Map(rows.map((row) => [row.key, row.value]));

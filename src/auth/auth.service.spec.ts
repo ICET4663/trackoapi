@@ -153,6 +153,55 @@ describe('AuthService registration is actually gated by the pauseRegistrations p
   });
 });
 
+describe('AuthService.createUserByAdmin', () => {
+  function buildService(createResult: unknown, emailProvider?: string) {
+    const config = { get: (key: string) => (key === 'EMAIL_PROVIDER' ? emailProvider : undefined) } as unknown as ConfigService;
+    const usersCreate = jest.fn().mockResolvedValue(createResult);
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      otpCode: { create: jest.fn().mockResolvedValue(undefined) },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const users = {
+      create: usersCreate,
+      findByEmailOrPhone: jest.fn().mockResolvedValue({ id: 'u-new', email: 'new@tracko.ng', phone: '+2348030000009' }),
+    } as unknown as UsersService;
+    const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
+    return { service: new AuthService(config, {} as JwtService, prisma, rateLimit, users), usersCreate };
+  }
+
+  it('creates a staff account VERIFIED and never returns a password', async () => {
+    const { service, usersCreate } = buildService({ id: 'u-new', verificationStatus: 'VERIFIED' });
+    const result = await service.createUserByAdmin('admin-1', {
+      fullName: 'New Dispatcher', email: 'New@Tracko.NG', phone: '+234 803 000 0009', role: 'dispatcher',
+    });
+
+    expect(usersCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'DISPATCHER', verificationStatus: 'VERIFIED', email: 'new@tracko.ng' }));
+    expect(result).not.toHaveProperty('password');
+    expect(result).not.toHaveProperty('passwordHash');
+    expect(result.passwordSetup).toBeDefined();
+  });
+
+  it('leaves CUSTOMER/DRIVER at the schema default (undefined verificationStatus -> PENDING)', async () => {
+    const { service, usersCreate } = buildService({ id: 'u-new', verificationStatus: 'PENDING' });
+    await service.createUserByAdmin('admin-1', { fullName: 'New Driver', email: 'd@tracko.ng', phone: '+2348030000009', role: 'DRIVER' });
+    expect(usersCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'DRIVER', verificationStatus: undefined }));
+  });
+
+  it('rejects an unknown or self-service-only bad role', async () => {
+    const { service } = buildService({ id: 'x' });
+    await expect(service.createUserByAdmin('admin-1', { fullName: 'X Y', email: 'x@y.ng', phone: '+2348030000009', role: 'SUPERUSER' }))
+      .rejects.toThrow('Role must be one of');
+  });
+
+  it('rejects a malformed email before creating anything', async () => {
+    const { service, usersCreate } = buildService({ id: 'x' });
+    await expect(service.createUserByAdmin('admin-1', { fullName: 'X Y', email: 'not-an-email', phone: '+2348030000009', role: 'ADMIN' }))
+      .rejects.toThrow('valid email');
+    expect(usersCreate).not.toHaveBeenCalled();
+  });
+});
+
 // refresh() previously never revoked the token it was given - every call just minted a
 // new session, so a stolen refresh token stayed valid for its full 30-day lifetime no
 // matter how many times the real user also refreshed. These tests pin down rotation

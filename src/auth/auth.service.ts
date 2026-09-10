@@ -218,6 +218,76 @@ export class AuthService {
     return this.createSession(user.id);
   }
 
+  private static readonly ADMIN_CREATABLE_ROLES: UserRole[] = ['CUSTOMER', 'DRIVER', 'TRUCK_OWNER', 'DISPATCHER', 'ADMIN'];
+  private static readonly STAFF_ROLES: UserRole[] = ['DISPATCHER', 'ADMIN'];
+
+  // Admin-only account creation. Unlike self-registration this needs no OTP: the
+  // caller is a trusted admin. The new account gets a throwaway random password
+  // and is emailed a password-reset code so the user sets their own - the plain
+  // password is never returned or stored anywhere readable. Staff roles
+  // (DISPATCHER/ADMIN) start VERIFIED; CUSTOMER/DRIVER still go through KYC.
+  async createUserByAdmin(
+    actorId: string,
+    input: { fullName?: string; email?: string; phone?: string; role?: string },
+  ) {
+    const fullName = input.fullName?.trim();
+    const email = input.email?.trim().toLowerCase();
+    const phone = input.phone?.trim();
+    const role = String(input.role ?? '').toUpperCase() as UserRole;
+
+    if (!fullName || fullName.length < 2) throw new BadRequestException('A full name is required.');
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new BadRequestException('A valid email is required.');
+    if (!phone || phone.replace(/\D/g, '').length < 7) throw new BadRequestException('A valid phone number is required.');
+    if (!AuthService.ADMIN_CREATABLE_ROLES.includes(role)) {
+      throw new BadRequestException('Role must be one of CUSTOMER, DRIVER, TRUCK_OWNER, DISPATCHER, ADMIN.');
+    }
+
+    const passwordHash = await bcrypt.hash(`${randomUUID()}${randomUUID()}`, 12);
+    const user = await this.users.create({
+      email,
+      phone,
+      fullName,
+      passwordHash,
+      role,
+      verificationStatus: AuthService.STAFF_ROLES.includes(role) ? 'VERIFIED' : undefined,
+    });
+
+    // Best-effort: send the new user a code to set their own password. Never let
+    // an email hiccup roll back an account that was already created.
+    let passwordSetup: { sent: boolean; expiresAt?: string; devCode?: string } = { sent: false };
+    try {
+      const reset = await this.requestPasswordReset(email);
+      passwordSetup = {
+        sent: Boolean(reset.delivery?.sent),
+        expiresAt: reset.expiresAt,
+        ...(('devCode' in reset && reset.devCode) ? { devCode: reset.devCode as string } : {}),
+      };
+    } catch {
+      // passwordSetup stays { sent: false } - the admin is told to help the user
+      // through "Forgot password" manually.
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId,
+        action: 'ADMIN_USER_CREATED',
+        entity: 'User',
+        entityId: user.id,
+        metadata: { email, role, staff: AuthService.STAFF_ROLES.includes(role) },
+      },
+    }).catch(() => null);
+
+    return {
+      id: user.id,
+      fullName,
+      email,
+      phone,
+      role,
+      verificationStatus: user.verificationStatus,
+      passwordSetup,
+    };
+  }
+
   async login(dto: LoginDto) {
     await this.rateLimit.assertAllowed(`login:${dto.identifier.trim().toLowerCase()}`, {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),
