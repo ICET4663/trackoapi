@@ -26,6 +26,21 @@ export class RequestUserService {
     throw new UnauthorizedException('A valid login session is required.');
   }
 
+  // For endpoints that are usable while signed out (e.g. crash telemetry) but want to
+  // attribute the request to a user when a valid token happens to be present. Never
+  // throws - a missing, malformed or expired token just yields null.
+  async optionalFromAuthorizationHeader(header?: string): Promise<AuthUser | null> {
+    const token = this.extractToken(header);
+    if (!token) return null;
+    try {
+      const payload = await this.jwt.verifyAsync<AuthUser>(token);
+      if (payload?.sub && payload?.role) return payload;
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   async requireRole(header: string | undefined, roles: UserRole[]): Promise<AuthUser> {
     const user = await this.fromAuthorizationHeader(header);
     if (!roles.includes(user.role)) {

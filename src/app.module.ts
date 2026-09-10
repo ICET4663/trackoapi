@@ -19,6 +19,7 @@ import { PortalModule } from './portal/portal.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SettingsModule } from './settings/settings.module';
 import { ShipmentsModule } from './shipments/shipments.module';
+import { TelemetryModule } from './telemetry/telemetry.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { UsersModule } from './users/users.module';
 
@@ -40,6 +41,7 @@ import { UsersModule } from './users/users.module';
     OperationsModule,
     TrackingModule,
     CommunicationModule,
+    TelemetryModule,
   ],
   controllers: [HealthController, DemoReadinessController, DemoBootstrapController],
   providers: [
