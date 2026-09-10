@@ -747,7 +747,7 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
     });
     const service = buildPayoutService({
       payout: {
-        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1' }),
+        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
         update,
       },
       auditLog: { create: jest.fn().mockResolvedValue(undefined) },
@@ -757,6 +757,52 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
 
     expect(result.id).toBe('payout-1');
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'payout-1' } }));
+  });
+
+  it('requires approval before a pending payout can be marked paid', async () => {
+    const update = jest.fn();
+    const service = buildPayoutService({
+      payout: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 500_000, status: 'PENDING' }),
+        update,
+      },
+    });
+
+    await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' }))
+      .rejects.toThrow('Approve this payout before marking it paid');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('treats a repeated payout decision as idempotent', async () => {
+    const update = jest.fn();
+    const auditCreate = jest.fn();
+    const service = buildPayoutService({
+      payout: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 500_000, status: 'PAID' }),
+        update,
+      },
+      auditLog: { create: auditCreate },
+    });
+
+    const result = await service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' });
+
+    expect(result).toMatchObject({ status: 'PAID', message: 'Payout request is already marked as paid.' });
+    expect(update).not.toHaveBeenCalled();
+    expect(auditCreate).not.toHaveBeenCalled();
+  });
+
+  it('does not reopen a rejected payout', async () => {
+    const update = jest.fn();
+    const service = buildPayoutService({
+      payout: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 500_000, status: 'REJECTED' }),
+        update,
+      },
+    });
+
+    await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'APPROVED' }))
+      .rejects.toThrow('A rejected payout cannot be changed to approved');
+    expect(update).not.toHaveBeenCalled();
   });
 });
 

@@ -1316,6 +1316,30 @@ export class SettingsService {
       throw new NotFoundException('Payout request not found.');
     }
 
+    if (existing.status === decision) {
+      return {
+        id: existing.id,
+        status: existing.status,
+        amount: existing.amountKobo,
+        amountLabel: this.formatMoney(existing.amountKobo),
+        message: `Payout request is already marked as ${decision.toLowerCase()}.`,
+      };
+    }
+
+    const allowedTransitions: Record<PayoutStatus, PayoutStatus[]> = {
+      PENDING: ['APPROVED', 'REJECTED'],
+      APPROVED: ['PAID'],
+      REJECTED: [],
+      PAID: [],
+    };
+    if (!allowedTransitions[existing.status].includes(decision as PayoutStatus)) {
+      throw new BadRequestException(
+        existing.status === 'PENDING' && decision === 'PAID'
+          ? 'Approve this payout before marking it paid.'
+          : `A ${existing.status.toLowerCase()} payout cannot be changed to ${decision.toLowerCase()}.`,
+      );
+    }
+
     const updated = await this.prisma.payout.update({
       where: { id },
       data: {

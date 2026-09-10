@@ -49,6 +49,15 @@ function expectValue(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Lifecycle assertion failed: ${message}`);
 }
 
+async function expectRejected(action: () => Promise<unknown>, message: string) {
+  try {
+    await action();
+  } catch {
+    return;
+  }
+  throw new Error(`Lifecycle assertion failed: ${message}`);
+}
+
 async function main() {
   assertSafeTestDatabase(baseDatabaseUrl);
   const schema = `tracko_lifecycle_${Date.now()}_${randomUUID().slice(0, 8).replace(/-/g, '')}`;
@@ -138,9 +147,17 @@ async function main() {
     const signature = createHmac('sha512', 'sk_test_lifecycle_only').update(rawWebhook).digest('hex');
     const funded = await payments.recordWebhook('paystack', 'charge.success', webhookBody, signature, rawWebhook);
     expectValue(funded.verified && funded.escrowUpdated, 'signed payment webhook funded escrow');
+    const replayed = await payments.recordWebhook('paystack', 'charge.success', webhookBody, signature, rawWebhook);
+    expectValue(replayed.alreadyProcessed && replayed.escrowUpdated, 'duplicate payment webhook was idempotent');
+    const [chargeCount] = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>('select count(*) as "count" from "BillingCharge" where "userId" = $1', customer.id);
+    expectValue(Number(chargeCount.count) === 1, 'payment replay did not create a duplicate billing charge');
 
     await shipments.approveShipment(shipment.id, adminUser.id, 'ADMIN');
     const assignment = await shipments.offerAssignment(shipment.id, { driverId: driver.id, vehicleId: vehicle.id }, dispatcher.role);
+    await expectRejected(
+      () => shipments.offerAssignment(shipment.id, { driverId: driver.id, vehicleId: vehicle.id }, dispatcher.role),
+      'a second pending assignment was accepted',
+    );
     await shipments.respondToAssignment(assignment.id, driver.id, 'ACCEPT');
     const driverActor = { sub: driver.id, role: driver.role, email: driver.email, verificationStatus: driver.verificationStatus };
     await tracking.recordLocation(shipment.id, driverActor, { latitude: 6.6018, longitude: 3.3515, note: 'Pickup confirmed.' });
@@ -164,10 +181,20 @@ async function main() {
     const withdrawalAmount = Math.max(100, Math.floor(initialized.amount / 2));
     const withdrawal = await settings.requestDriverWithdrawal(driver.id, { amountKobo: withdrawalAmount, note: 'Lifecycle test withdrawal.' });
     expectValue(withdrawal.status === 'PENDING', 'driver withdrawal entered finance queue');
+    await expectRejected(
+      () => settings.requestDriverWithdrawal(driver.id, { amountKobo: initialized.amount - withdrawalAmount + 1 }),
+      'driver could withdraw more than the remaining balance',
+    );
+    await expectRejected(
+      () => settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID' }),
+      'pending payout skipped finance approval',
+    );
     const approved = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'APPROVED', note: 'Lifecycle finance approval.' });
     expectValue(approved.status === 'APPROVED', 'admin approved payout');
     const paid = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID', note: 'Lifecycle payout settled.' });
     expectValue(paid.status === 'PAID', 'admin marked payout paid');
+    const paidReplay = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID' });
+    expectValue(paidReplay.status === 'PAID', 'repeated paid decision was idempotent');
 
     const persisted = await prisma.shipment.findUnique({ where: { id: shipment.id }, include: { escrow: true, assignments: true, deliveryProofs: true } });
     const payout = await prisma.payout.findUnique({ where: { id: withdrawal.id } });
@@ -176,11 +203,14 @@ async function main() {
     expectValue(persisted.assignments[0]?.status === 'ACCEPTED', 'accepted assignment persisted');
     expectValue(persisted.deliveryProofs.length === 1, 'one proof of delivery persisted');
     expectValue(payout?.status === 'PAID', 'paid payout persisted');
+    const payoutAuditCount = await prisma.auditLog.count({ where: { entity: 'Payout', entityId: withdrawal.id, action: 'PAYOUT_WITHDRAWAL_REVIEWED' } });
+    expectValue(payoutAuditCount === 2, 'payout approval and payment produced exactly two review audit entries');
 
     console.log('OK customer and verified driver created');
     console.log('OK shipment created and signed webhook funded escrow');
     console.log('OK admin approval, assignment, acceptance, pickup and delivery proof');
     console.log('OK escrow release, driver earnings, withdrawal approval and payout');
+    console.log('OK payment replay, duplicate assignment, over-withdrawal and payout transition guards');
     console.log('DONE Tracko temporary-database lifecycle passed');
   } finally {
     await prisma?.onModuleDestroy();
