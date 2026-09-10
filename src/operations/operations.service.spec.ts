@@ -424,3 +424,67 @@ describe('OperationsService.financeSummary', () => {
     await expect(service.financeSummary({ sub: 'c', role: 'CUSTOMER' } as OperationActor)).rejects.toThrow('Only operations users');
   });
 });
+
+describe('OperationsService.fraudSignals', () => {
+  const admin: OperationActor = { sub: 'admin-1', role: 'ADMIN' };
+
+  function build(rows: {
+    sharedIds?: unknown[];
+    sharedBvns?: unknown[];
+    unverifiedPayouts?: unknown[];
+    repeatDisputers?: unknown[];
+  }) {
+    const $queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('from "KycSubmission" ks') && sql.includes('ks."idNumber"')) return Promise.resolve(rows.sharedIds ?? []);
+      if (sql.includes('ks."bvn"')) return Promise.resolve(rows.sharedBvns ?? []);
+      if (sql.includes('from "BankAccount" b')) return Promise.resolve(rows.unverifiedPayouts ?? []);
+      if (sql.includes('from "Dispute" d')) return Promise.resolve(rows.repeatDisputers ?? []);
+      return Promise.resolve([]);
+    });
+    return new OperationsService({ $queryRawUnsafe } as unknown as PrismaService, {} as NotificationsService, {} as ShipmentsService);
+  }
+
+  it('flags a shared government ID as HIGH severity', async () => {
+    const service = build({
+      sharedIds: [{ idType: 'NIN', idNumber: '12345678901', accounts: 2n, emails: ['a@x.ng', 'b@x.ng'] }],
+    });
+    const result = await service.fraudSignals(admin);
+
+    expect(result.counts).toMatchObject({ high: 1, total: 1 });
+    expect(result.signals[0]).toMatchObject({ severity: 'HIGH', category: 'Identity' });
+    expect(result.signals[0].detail).toContain('8901');
+    expect(result.signals[0].affectedUserEmails).toEqual(['a@x.ng', 'b@x.ng']);
+  });
+
+  it('flags an unverified payout account and a repeat disputer as MEDIUM', async () => {
+    const service = build({
+      unverifiedPayouts: [{ userId: 'u-1', email: 'd@x.ng', bankName: 'GTB', holderName: 'Someone Else' }],
+      repeatDisputers: [{ customerId: 'c-1', email: 'c@x.ng', disputes: 4n }],
+    });
+    const result = await service.fraudSignals(admin);
+
+    expect(result.counts).toMatchObject({ medium: 2, high: 0, total: 2 });
+    expect(result.signals.map((s) => s.category).sort()).toEqual(['Disputes', 'Payout']);
+    expect(result.signals.find((s) => s.category === 'Disputes')?.detail).toContain('4 delivery disputes');
+  });
+
+  it('returns an empty, well-formed result when nothing is suspicious', async () => {
+    const result = await build({}).fraudSignals(admin);
+    expect(result.signals).toEqual([]);
+    expect(result.counts).toEqual({ high: 0, medium: 0, low: 0, total: 0 });
+    expect(result.generatedAt).toEqual(expect.any(String));
+  });
+
+  it('throws instead of made-up alerts when a read fails', async () => {
+    const service = new OperationsService(
+      { $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) } as unknown as PrismaService,
+      {} as NotificationsService,
+      {} as ShipmentsService,
+    );
+    await expect(service.fraudSignals(admin)).rejects.toThrow('Could not load fraud signals');
+  });
+
+  it('rejects a non-operations caller', async () => {
+    await expect(build({}).fraudSignals({ sub: 'x', role: 'DRIVER' } as OperationActor)).rejects.toThrow('Only operations users');
+  });
+});

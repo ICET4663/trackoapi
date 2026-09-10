@@ -755,6 +755,125 @@ export class OperationsService {
     }
   }
 
+  // Read-only fraud signals computed from existing data (no dedicated table). Each
+  // load recomputes; "resolving" a signal means fixing the underlying record
+  // (merging accounts, re-verifying a payout account, resolving disputes).
+  async fraudSignals(actor: OperationActor) {
+    this.assertCanOperate(actor.role);
+
+    try {
+      const [sharedIds, sharedBvns, unverifiedPayouts, repeatDisputers] = await Promise.all([
+        this.prisma.$queryRawUnsafe<Array<{ idType: string; idNumber: string; accounts: bigint; emails: string[] }>>(
+          `select ks."idType", ks."idNumber",
+                  count(distinct ks."userId") as "accounts",
+                  array_agg(distinct u."email") as "emails"
+           from "KycSubmission" ks
+           join "User" u on u."id" = ks."userId"
+           where length(trim(ks."idNumber")) >= 5
+           group by ks."idType", ks."idNumber"
+           having count(distinct ks."userId") > 1
+           order by count(distinct ks."userId") desc
+           limit 25`,
+        ),
+        this.prisma.$queryRawUnsafe<Array<{ bvn: string; accounts: bigint; emails: string[] }>>(
+          `select ks."bvn",
+                  count(distinct ks."userId") as "accounts",
+                  array_agg(distinct u."email") as "emails"
+           from "KycSubmission" ks
+           join "User" u on u."id" = ks."userId"
+           where ks."bvn" is not null and length(trim(ks."bvn")) >= 5
+           group by ks."bvn"
+           having count(distinct ks."userId") > 1
+           limit 25`,
+        ),
+        this.prisma.$queryRawUnsafe<Array<{ userId: string; email: string; bankName: string; holderName: string }>>(
+          `select b."userId", u."email", b."bankName", b."holderName"
+           from "BankAccount" b
+           join "User" u on u."id" = b."userId"
+           where b."verified" = false
+           order by b."updatedAt" desc
+           limit 25`,
+        ),
+        this.prisma.$queryRawUnsafe<Array<{ customerId: string; email: string; disputes: bigint }>>(
+          `select s."customerId", u."email", count(*) as "disputes"
+           from "Dispute" d
+           join "Shipment" s on s."id" = d."shipmentId"
+           join "User" u on u."id" = s."customerId"
+           group by s."customerId", u."email"
+           having count(*) >= 3
+           order by count(*) desc
+           limit 25`,
+        ),
+      ]);
+
+      type Signal = {
+        id: string;
+        severity: 'HIGH' | 'MEDIUM' | 'LOW';
+        category: string;
+        title: string;
+        detail: string;
+        affectedUserIds?: string[];
+        affectedUserEmails?: string[];
+      };
+      const signals: Signal[] = [];
+
+      for (const row of sharedIds) {
+        signals.push({
+          id: `dup-id:${row.idType}:${row.idNumber}`,
+          severity: 'HIGH',
+          category: 'Identity',
+          title: `Same ${row.idType.replace(/_/g, ' ').toLowerCase()} on ${Number(row.accounts)} accounts`,
+          detail: `ID number ending ${row.idNumber.slice(-4)} was submitted for KYC by ${Number(row.accounts)} different accounts.`,
+          affectedUserEmails: row.emails,
+        });
+      }
+      for (const row of sharedBvns) {
+        signals.push({
+          id: `dup-bvn:${row.bvn}`,
+          severity: 'HIGH',
+          category: 'Identity',
+          title: `Same BVN on ${Number(row.accounts)} accounts`,
+          detail: `BVN ending ${row.bvn.slice(-4)} is shared across ${Number(row.accounts)} accounts.`,
+          affectedUserEmails: row.emails,
+        });
+      }
+      for (const row of unverifiedPayouts) {
+        signals.push({
+          id: `payout-mismatch:${row.userId}`,
+          severity: 'MEDIUM',
+          category: 'Payout',
+          title: 'Payout account name mismatch',
+          detail: `${row.email} set a ${row.bankName} account ("${row.holderName}") that did not match their verified identity.`,
+          affectedUserIds: [row.userId],
+          affectedUserEmails: [row.email],
+        });
+      }
+      for (const row of repeatDisputers) {
+        signals.push({
+          id: `repeat-disputer:${row.customerId}`,
+          severity: 'MEDIUM',
+          category: 'Disputes',
+          title: `${Number(row.disputes)} disputes filed by one customer`,
+          detail: `${row.email} has filed ${Number(row.disputes)} delivery disputes - review for refund abuse.`,
+          affectedUserIds: [row.customerId],
+          affectedUserEmails: [row.email],
+        });
+      }
+
+      const counts = {
+        high: signals.filter((s) => s.severity === 'HIGH').length,
+        medium: signals.filter((s) => s.severity === 'MEDIUM').length,
+        low: signals.filter((s) => s.severity === 'LOW').length,
+        total: signals.length,
+      };
+
+      return { generatedAt: new Date().toISOString(), counts, signals };
+    } catch (error) {
+      this.logger.error(`fraudSignals() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not load fraud signals. Please try again.');
+    }
+  }
+
   async progressTrip(
     shipmentId: string,
     body: { status?: ShipmentStatus; note?: string; location?: string },

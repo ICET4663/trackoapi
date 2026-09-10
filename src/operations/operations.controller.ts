@@ -46,6 +46,12 @@ export class OperationsController {
     return this.operations.financeSummary(user);
   }
 
+  @Get('fraud-signals')
+  async fraudSignals(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'ADMIN');
+    return this.operations.fraudSignals(user);
+  }
+
   @Post('shipments/:id/progress')
   async progressShipment(
     @Param('id') id: string,
