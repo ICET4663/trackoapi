@@ -186,13 +186,19 @@ POST /v1/notifications/push-token
 The backend now has the first required compliance endpoints:
 
 ```text
-GET /v1/legal/privacy
+GET /v1/legal/privacy            # HTML, for the store data-safety URLs
 GET /v1/legal/terms
 GET /v1/legal/account-deletion
+GET /v1/legal/documents          # machine-readable list
+GET /v1/legal/documents/:id      # one document as { title, updated, sections[] }
 DELETE /v1/auth/account
 ```
 
-Before App Store or Google Play submission, replace the placeholder support email
-and company details in `src/legal/legal.controller.ts` with the real business
-information. Google Play also requires the external account deletion URL in Play
-Console. Apple requires the in-app delete account flow to be easy to find.
+All legal copy lives in one place, `src/legal/legal-content.ts`, rendered both as
+the HTML pages above and as the in-app document viewer (`/v1/legal-documents`).
+The privacy policy discloses foreground-only location use during active
+deliveries. Before App Store or Google Play submission, have counsel review the
+copy and replace the placeholder support email / company details in
+`legal-content.ts` with the real business information. Google Play also requires
+the external account deletion URL in Play Console; Apple requires the in-app
+delete-account flow to be easy to find.

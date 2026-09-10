@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { AuthService } from '../auth/auth.service';
+import { findLegalDocument, LEGAL_DOCUMENTS } from '../legal/legal-content';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NOTIFICATION_TEMPLATES } from '../notifications/notification-templates';
 import { PrismaService } from '../prisma/prisma.service';
@@ -91,12 +92,6 @@ const notificationPreferences: Record<PreferenceKey, boolean> = {
   sms: false,
   email: true,
 };
-
-const legalDocuments = [
-  { id: 'privacy-policy', title: 'Privacy Policy' },
-  { id: 'terms-of-service', title: 'Terms of Service' },
-  { id: 'account-deletion', title: 'Account Deletion' },
-];
 
 @Injectable()
 export class SettingsService {
@@ -803,26 +798,18 @@ export class SettingsService {
   }
 
   legalDocumentSummaries() {
-    return legalDocuments;
+    return LEGAL_DOCUMENTS.map(({ id, title }) => ({ id, title }));
   }
 
   legalDocument(id: string) {
-    const summary = legalDocuments.find((document) => document.id === id);
-    if (!summary) throw new NotFoundException('Legal document not found.');
-
+    const document = findLegalDocument(id);
+    if (!document) throw new NotFoundException('Legal document not found.');
     return {
-      ...summary,
-      updated: 'July 20, 2026',
-      clauses: [
-        {
-          heading: 'Preview notice',
-          body: 'This document is included so the app has the required legal page flow during development.',
-        },
-        {
-          heading: 'Production review',
-          body: 'Before store submission, legal counsel should review privacy, deletion, terms, payment, and KYC language.',
-        },
-      ],
+      id: document.id,
+      title: document.title,
+      updated: document.updated,
+      // The in-app viewer renders `clauses` as { heading, body }.
+      clauses: document.sections,
     };
   }
 
