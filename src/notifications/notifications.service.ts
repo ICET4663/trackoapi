@@ -2,6 +2,7 @@ import { Injectable, InternalServerErrorException, Logger, NotFoundException } f
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { interpolateTemplate, notificationTemplateDefault } from './notification-templates';
 
 type NotificationTone = 'INFO' | 'SUCCESS' | 'WARNING' | 'DANGER';
 
@@ -14,6 +15,11 @@ type NotificationInput = {
   entity?: string;
   entityId?: string;
   actionUrl?: string;
+  // When set, the body is taken from the admin-editable template for this key
+  // (see notification-templates.ts) with `{placeholder}` tokens filled from
+  // `vars`. `body` above stays as the last-resort fallback.
+  templateKey?: string;
+  vars?: Record<string, string | number>;
 };
 
 type NotificationRow = {
@@ -33,8 +39,29 @@ type NotificationRow = {
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
+  // Templates change rarely and create() runs on hot paths, so cache overrides
+  // briefly rather than hitting PlatformSetting on every notification.
+  private readonly templateCacheTtlMs = 60_000;
+  private readonly templateCache = new Map<string, { body: string; at: number }>();
 
   constructor(private readonly prisma: PrismaService) {}
+
+  private async resolveBody(input: NotificationInput): Promise<string> {
+    if (!input.templateKey) return input.body;
+    let cached = this.templateCache.get(input.templateKey);
+    if (!cached || Date.now() - cached.at > this.templateCacheTtlMs) {
+      const row = await this.prisma.platformSetting
+        .findUnique({ where: { key: input.templateKey } })
+        .catch(() => null);
+      cached = { body: row?.value?.trim() ?? '', at: Date.now() };
+      this.templateCache.set(input.templateKey, cached);
+    }
+    // Admin override wins; otherwise keep the literal body the call site passed
+    // (always a complete, current sentence). The shipped default is only a last
+    // resort for a call site that passes no body of its own.
+    const template = cached.body || input.body || notificationTemplateDefault(input.templateKey) || '';
+    return interpolateTemplate(template, input.vars ?? {});
+  }
 
   // This used to fall back to a fabricated, never-persisted notification on any insert
   // failure - every caller across the codebase (30+ call sites, most `await`ed with no
@@ -45,6 +72,7 @@ export class NotificationsService {
   // failure taking down the primary action), but a failure now returns null instead of
   // fake data. Log the failure so it's actually visible instead of invisible either way.
   async create(input: NotificationInput) {
+    const body = await this.resolveBody(input).catch(() => input.body);
     let rows: NotificationRow[];
     try {
       rows = await this.prisma.$queryRawUnsafe<NotificationRow[]>(
@@ -57,7 +85,7 @@ export class NotificationsService {
         input.userId && !input.userId.startsWith('preview-') ? input.userId : null,
         input.role ?? null,
         input.title,
-        input.body,
+        body,
         input.tone ?? 'INFO',
         input.entity ?? null,
         input.entityId ?? null,
@@ -75,7 +103,7 @@ export class NotificationsService {
     const record = this.toRecord(rows[0]);
     // Push delivery failing must never fail notification creation itself - the
     // notification is already real and in the recipient's in-app list either way.
-    await this.sendPushNotifications(input).catch((error) => {
+    await this.sendPushNotifications({ ...input, body }).catch((error) => {
       this.logger.error(`Push delivery failed for notification ${record.id}: ${this.errorMessage(error)}`);
     });
     return record;

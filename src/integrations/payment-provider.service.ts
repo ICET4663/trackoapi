@@ -560,6 +560,8 @@ export class PaymentProviderService {
         userId: shipment.customerId,
         title: 'Escrow funded',
         body: `${amountLabel} has been secured for shipment ${shipment.reference}. Admin review is now ready.`,
+        templateKey: 'notifyTpl.customerEscrowFunded',
+        vars: { amount: amountLabel, reference: shipment.reference },
         tone: 'SUCCESS',
         entity: 'Shipment',
         entityId: shipmentId,

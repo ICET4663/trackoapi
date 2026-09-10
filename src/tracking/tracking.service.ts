@@ -206,6 +206,7 @@ export class TrackingService {
       submittedAt: Date;
     }[];
     let customerId: string;
+    let shipmentReference: string = shipmentId;
     try {
       rows = await this.prisma.$queryRawUnsafe(
         `insert into "DeliveryProof" ("id", "shipmentId", "driverId", "photoUrl", "signatureUrl", "recipientName", "note", "status")
@@ -237,6 +238,7 @@ export class TrackingService {
         },
       });
       customerId = shipment.customerId;
+      shipmentReference = shipment.reference;
 
       await this.prisma.$executeRawUnsafe(
         `update "Escrow"
@@ -263,6 +265,8 @@ export class TrackingService {
         userId: customerId,
         title: 'Proof of delivery submitted',
         body: 'The driver uploaded delivery proof for your shipment.',
+        templateKey: 'notifyTpl.customerProofSubmitted',
+        vars: { reference: shipmentReference },
         tone: 'SUCCESS',
         entity: 'DeliveryProof',
         entityId: rows[0].id,

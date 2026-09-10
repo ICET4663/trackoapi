@@ -4,6 +4,7 @@ import { Prisma, PayoutStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { AuthService } from '../auth/auth.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { NOTIFICATION_TEMPLATES } from '../notifications/notification-templates';
 import { PrismaService } from '../prisma/prisma.service';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
@@ -1341,6 +1342,8 @@ export class SettingsService {
       userId: updated.driverId,
       title: decision === 'PAID' ? 'Withdrawal paid' : decision === 'APPROVED' ? 'Withdrawal approved' : 'Withdrawal rejected',
       body: `${this.formatMoney(updated.amountKobo)} payout request was marked ${decision.toLowerCase()}.`,
+      templateKey: decision === 'PAID' ? 'notifyTpl.driverWithdrawalPaid' : decision === 'APPROVED' ? 'notifyTpl.driverWithdrawalApproved' : undefined,
+      vars: { amount: this.formatMoney(updated.amountKobo) },
       tone: decision === 'REJECTED' ? 'DANGER' : 'SUCCESS',
       entity: 'Payout',
       entityId: updated.id,
@@ -1855,6 +1858,7 @@ export class SettingsService {
     type: 'number' | 'text' | 'boolean';
     min?: number;
     max?: number;
+    multiline?: boolean;
   }[] = [
     { key: 'fee', title: 'Platform fee', description: 'Default platform commission applied to new shipments.', label: 'Fee (%)', defaultValue: '7.5', helper: 'Applies to newly created shipments only; shipments already in progress keep their original rate.', type: 'number' },
     { key: 'pricingServiceFeePercent', title: 'Quote service fee', description: 'Service and escrow fee included in new customer quotes.', label: 'Service fee (%)', defaultValue: '3.5', helper: 'Allowed range: 0-20%. Existing shipment quotes remain unchanged.', type: 'number', min: 0, max: 20 },
@@ -1885,6 +1889,18 @@ export class SettingsService {
     { key: 'pauseRegistrations', title: 'Pause new registrations', description: 'Temporarily stop new customer, driver, and truck owner sign-ups.', label: 'Pause new registrations', defaultValue: 'false', helper: 'Blocks both the OTP request and account creation steps for new sign-ups while on. Existing accounts can still log in.', type: 'boolean' },
     { key: 'maintenanceMode', title: 'Maintenance mode', description: 'Block new shipment creation network-wide while on.', label: 'Maintenance mode', defaultValue: 'false', helper: 'Blocks new shipment creation with a clear message while on. Existing shipments, tracking, messaging, and login are unaffected - this does not take the whole app down.', type: 'boolean' },
     { key: 'supportHours', title: 'Support hours', description: 'Displayed to customers on the Help & support screen.', label: 'Hours', defaultValue: '24/7', helper: 'Free text, e.g. "Mon-Sat, 8am-8pm WAT".', type: 'text' },
+    ...NOTIFICATION_TEMPLATES.map((template) => ({
+      key: template.key,
+      title: template.title,
+      description: template.description,
+      label: 'Message',
+      defaultValue: template.defaultBody,
+      helper: template.placeholders.length
+        ? `Placeholders you can use: ${template.placeholders.map((name) => `{${name}}`).join(', ')}. Leave blank to use the default message.`
+        : 'Plain text. Leave blank to use the default message.',
+      type: 'text' as const,
+      multiline: true,
+    })),
   ];
 
   async platformSettings() {
@@ -1945,6 +1961,7 @@ export class SettingsService {
       : definition.type === 'number' && definition.key.endsWith('Ngn') ? `NGN ${Number(value).toLocaleString('en-US')}`
       : definition.key === 'pricingQuoteValidityMinutes' ? `${value} minutes`
       : definition.key === 'payout' ? value.charAt(0).toUpperCase() + value.slice(1)
+      : definition.multiline ? (value.length > 42 ? `${value.slice(0, 42).trimEnd()}…` : value)
       : value;
     return {
       key: definition.key,
@@ -1955,6 +1972,7 @@ export class SettingsService {
       displayValue,
       helper: definition.helper,
       type: definition.type,
+      multiline: definition.multiline ?? false,
     };
   }
 

@@ -87,6 +87,62 @@ describe('NotificationsService.create never fakes a persisted notification on fa
   });
 });
 
+// create() can take a `templateKey` + `vars`: the stored admin override for that key wins,
+// then the shipped default, then the literal `body`. `{placeholder}` tokens are filled from
+// `vars`. A missing/broken template must never drop the notification.
+describe('NotificationsService.create notification templates', () => {
+  function build(overrideValue: string | null) {
+    const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('resolvePushTokens') || sql.includes('PushToken')) return Promise.resolve([]);
+      return Promise.resolve([{
+        id: 'notif-1', userId: 'user-1', role: null, title: 'T', body: 'stored-later', tone: 'INFO',
+        entity: null, entityId: null, actionUrl: null, readAt: null, createdAt: new Date(),
+      }]);
+    });
+    const findUnique = jest.fn().mockResolvedValue(overrideValue === null ? null : { key: 'notifyTpl.customerEscrowFunded', value: overrideValue });
+    const prisma = { $queryRawUnsafe: queryRawUnsafe, platformSetting: { findUnique } } as unknown as PrismaService;
+    return { service: new NotificationsService(prisma), queryRawUnsafe };
+  }
+
+  it('keeps the literal call-site body when there is no admin override', async () => {
+    const { service, queryRawUnsafe } = build(null);
+    await service.create({
+      userId: 'user-1', title: 'Escrow funded', body: 'N466,232 has been secured for shipment TRK-9. Admin review is now ready.',
+      templateKey: 'notifyTpl.customerEscrowFunded', vars: { amount: 'N466,232', reference: 'TRK-9' },
+    });
+    expect(queryRawUnsafe.mock.calls[0][5]).toBe('N466,232 has been secured for shipment TRK-9. Admin review is now ready.');
+  });
+
+  it('falls back to the shipped default when a call site passes no body of its own', async () => {
+    const { service, queryRawUnsafe } = build(null);
+    await service.create({
+      userId: 'user-1', title: 'Escrow funded', body: '',
+      templateKey: 'notifyTpl.customerEscrowFunded', vars: { amount: 'N100', reference: 'TRK-1' },
+    });
+    expect(queryRawUnsafe.mock.calls[0][5]).toBe('N100 has been secured for shipment TRK-1. Admin review is now ready.');
+  });
+
+  it('uses the admin override when one is stored, filling the same placeholders', async () => {
+    const { service, queryRawUnsafe } = build('Payment received: {amount} for {reference}.');
+    await service.create({
+      userId: 'user-1', title: 'Escrow funded', body: 'fallback',
+      templateKey: 'notifyTpl.customerEscrowFunded', vars: { amount: 'N100', reference: 'TRK-1' },
+    });
+    expect(queryRawUnsafe.mock.calls[0][5]).toBe('Payment received: N100 for TRK-1.');
+  });
+
+  it('falls back to the literal body when the template lookup throws', async () => {
+    const { service, queryRawUnsafe } = build(null);
+    (service as unknown as { prisma: { platformSetting: { findUnique: jest.Mock } } }).prisma.platformSetting.findUnique
+      .mockRejectedValue(new Error('db down'));
+    await service.create({
+      userId: 'user-1', title: 'X', body: 'literal fallback body',
+      templateKey: 'notifyTpl.customerEscrowFunded', vars: {},
+    });
+    expect(queryRawUnsafe.mock.calls[0][5]).toBe('literal fallback body');
+  });
+});
+
 // list()/unreadCount()/markRead()/markAllRead()/registerPushToken() used to fall back to
 // fake data (a canned "preview" notification, a phantom "1 unread", a fake "read"
 // confirmation, "registered: true" for a token that was never saved) on any DB failure.
