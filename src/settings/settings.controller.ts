@@ -377,6 +377,12 @@ export class SettingsController {
     return this.settingsService.createUserByAdmin(admin.sub, body);
   }
 
+  @Delete('admin/users/:id')
+  async deleteUser(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const admin = await this.requestUser.requireRole(authorization, ['ADMIN']);
+    return this.settingsService.deleteUserByAdmin(admin.sub, id);
+  }
+
   @Get('admin/payout-requests')
   async payoutRequests(@Headers('authorization') authorization?: string) {
     await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);

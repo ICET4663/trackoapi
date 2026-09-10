@@ -202,6 +202,66 @@ describe('AuthService.createUserByAdmin', () => {
   });
 });
 
+describe('AuthService.deleteUserByAdmin', () => {
+  const { Prisma } = jest.requireActual('@prisma/client');
+
+  function buildService(opts: {
+    target?: { id: string; email: string; role: string; isActive: boolean } | null;
+    deleteError?: unknown;
+    adminCount?: number;
+  }) {
+    const userDelete = jest.fn();
+    if (opts.deleteError) userDelete.mockRejectedValue(opts.deleteError);
+    else userDelete.mockResolvedValue(undefined);
+    const userUpdate = jest.fn().mockResolvedValue(undefined);
+    const prisma = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(opts.target === undefined ? { id: 'u-2', email: 'x@y.ng', role: 'DISPATCHER', isActive: true } : opts.target),
+        count: jest.fn().mockResolvedValue(opts.adminCount ?? 3),
+        delete: userDelete,
+        update: userUpdate,
+      },
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const service = new AuthService(config, {} as JwtService, prisma, { assertAllowed: jest.fn() } as unknown as RateLimitService, {} as unknown as UsersService);
+    return { service, userDelete, userUpdate };
+  }
+
+  it('hard-deletes an account with no history', async () => {
+    const { service, userDelete } = buildService({ target: { id: 'u-2', email: 'x@y.ng', role: 'DISPATCHER', isActive: true } });
+    const result = await service.deleteUserByAdmin('admin-1', 'u-2');
+    expect(userDelete).toHaveBeenCalledWith({ where: { id: 'u-2' } });
+    expect(result.outcome).toBe('DELETED');
+  });
+
+  it('deactivates instead of deleting when the account has FK-protected history (P2003)', async () => {
+    const p2003 = new Prisma.PrismaClientKnownRequestError('FK', { code: 'P2003', clientVersion: 'x' });
+    const { service, userUpdate } = buildService({
+      target: { id: 'u-2', email: 'c@y.ng', role: 'CUSTOMER', isActive: true },
+      deleteError: p2003,
+    });
+    const result = await service.deleteUserByAdmin('admin-1', 'u-2');
+    expect(userUpdate).toHaveBeenCalledWith({ where: { id: 'u-2' }, data: { isActive: false, verificationStatus: 'SUSPENDED' } });
+    expect(result.outcome).toBe('DEACTIVATED');
+  });
+
+  it('refuses to delete your own account', async () => {
+    const { service } = buildService({ target: { id: 'admin-1', email: 'a@y.ng', role: 'ADMIN', isActive: true } });
+    await expect(service.deleteUserByAdmin('admin-1', 'admin-1')).rejects.toThrow('your own account');
+  });
+
+  it('refuses to remove the last active administrator', async () => {
+    const { service } = buildService({ target: { id: 'u-2', email: 'a2@y.ng', role: 'ADMIN', isActive: true }, adminCount: 1 });
+    await expect(service.deleteUserByAdmin('admin-1', 'u-2')).rejects.toThrow('last active administrator');
+  });
+
+  it('404s for an unknown user', async () => {
+    const { service } = buildService({ target: null });
+    await expect(service.deleteUserByAdmin('admin-1', 'nope')).rejects.toThrow('not found');
+  });
+});
+
 // refresh() previously never revoked the token it was given - every call just minted a
 // new session, so a stolen refresh token stayed valid for its full 30-day lifetime no
 // matter how many times the real user also refreshed. These tests pin down rotation

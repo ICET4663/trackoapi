@@ -288,6 +288,67 @@ export class AuthService {
     };
   }
 
+  // Admin-only account removal. Hard-deletes an account that never transacted
+  // (the User FKs on Shipment/Vehicle/DriverAssignment/Review have no cascade,
+  // so Prisma throws P2003 for anyone with history); otherwise it deactivates
+  // (isActive=false, SUSPENDED) so trip/escrow history stays intact. Refuses to
+  // remove yourself or the last remaining admin.
+  async deleteUserByAdmin(actorId: string, userId: string) {
+    if (actorId === userId) {
+      throw new BadRequestException('You cannot remove your own account from here. Use account settings.');
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, role: true, isActive: true },
+    });
+    if (!user) throw new NotFoundException('User not found.');
+
+    if (user.role === 'ADMIN') {
+      const activeAdmins = await this.prisma.user.count({ where: { role: 'ADMIN', isActive: true } });
+      if (activeAdmins <= 1) {
+        throw new BadRequestException('Cannot remove the last active administrator.');
+      }
+    }
+
+    let outcome: 'DELETED' | 'DEACTIVATED';
+    try {
+      await this.prisma.user.delete({ where: { id: userId } });
+      outcome = 'DELETED';
+    } catch (error) {
+      // P2003 = foreign key violation: the account has shipments / vehicles /
+      // assignments / reviews we must not orphan. Deactivate instead.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { isActive: false, verificationStatus: 'SUSPENDED' },
+        });
+        outcome = 'DEACTIVATED';
+      } else {
+        throw new InternalServerErrorException('Could not remove this account. Please try again.');
+      }
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId,
+        action: outcome === 'DELETED' ? 'ADMIN_USER_DELETED' : 'ADMIN_USER_DEACTIVATED',
+        entity: 'User',
+        entityId: userId,
+        metadata: { email: user.email, role: user.role, outcome },
+      },
+    }).catch(() => null);
+
+    return {
+      id: userId,
+      email: user.email,
+      role: user.role,
+      outcome,
+      message: outcome === 'DELETED'
+        ? 'Account removed.'
+        : 'Account has trip or payment history, so it was deactivated rather than deleted.',
+    };
+  }
+
   async login(dto: LoginDto) {
     await this.rateLimit.assertAllowed(`login:${dto.identifier.trim().toLowerCase()}`, {
       limit: Number(this.config.get<string>('AUTH_LOGIN_RATE_LIMIT') ?? 10),

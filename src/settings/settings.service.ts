@@ -1909,6 +1909,10 @@ export class SettingsService {
     return this.auth.createUserByAdmin(actorId, input);
   }
 
+  deleteUserByAdmin(actorId: string, userId: string) {
+    return this.auth.deleteUserByAdmin(actorId, userId);
+  }
+
   async platformSettings() {
     const rows = await this.prisma.platformSetting.findMany().catch(() => []);
     const overridesByKey = new Map(rows.map((row) => [row.key, row.value]));
