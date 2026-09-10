@@ -27,6 +27,7 @@
     "verify": "npm run typecheck && npm run prisma:validate",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "jest",
+    "test:lifecycle:db": "node -r ts-node/register/transpile-only -r tsconfig-paths/register scripts/test-lifecycle-db.ts",
     "test:watch": "jest --watch",
     "format": "prettier --write \"src/**/*.ts\" \"prisma/**/*.prisma\"",
     "prisma:validate": "set PRISMA_CLIENT_ENGINE_TYPE=binary&& set PRISMA_CLI_QUERY_ENGINE_TYPE=binary&& prisma validate",
