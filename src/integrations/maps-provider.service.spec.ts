@@ -188,6 +188,14 @@ describe('MapsProviderService route pricing', () => {
     expect(bulky.quotedPriceKobo).toBeGreaterThan(compact.quotedPriceKobo);
   });
 
+  it('allows a space-only quote without inventing cargo weight', async () => {
+    const quote = await createService().routeEstimate({ ...routeInput, weightTons: undefined, volumeM3: 22 });
+
+    expect(quote.pricingBreakdown.weightTons).toBe(0);
+    expect(quote.pricingBreakdown.volumeUtilization).toBe(0.4);
+    expect(quote.pricingBreakdown.limitingFactor).toBe('space');
+  });
+
   it('rejects cargo volume that exceeds the selected truck space', async () => {
     await expect(createService().routeEstimate({ ...routeInput, weightTons: 3, volumeM3: 56 })).rejects.toBeInstanceOf(
       BadRequestException,

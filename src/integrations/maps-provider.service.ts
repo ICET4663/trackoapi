@@ -382,7 +382,7 @@ export class MapsProviderService {
 
   private normalizeQuoteInput(input: RouteEstimateInput): NormalizedQuoteInput {
     const normalizeCoordinate = (value: number | undefined, fallback: number) => Number(Number(value ?? fallback).toFixed(6));
-    const weight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0 ? Number(input.weightTons) : 1;
+    const weight = Number.isFinite(input.weightTons) && Number(input.weightTons) > 0 ? Number(input.weightTons) : 0;
     const volume = Number.isFinite(input.volumeM3) && Number(input.volumeM3) > 0 ? Number(input.volumeM3) : 0;
     return {
       originLatitude: normalizeCoordinate(input.originLatitude, 6.5244),
