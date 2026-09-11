@@ -50,16 +50,6 @@ type DriverEscrowEarningRow = {
   updatedAt: Date;
 };
 
-type PayoutMetadata = {
-  amountKobo?: number;
-  status?: string;
-  note?: string | null;
-  bankLabel?: string;
-  reviewedAt?: string;
-  reviewedBy?: string;
-  reviewNote?: string | null;
-};
-
 type SupportTicketRow = {
   id: string;
   shipmentId: string | null;

@@ -1,4 +1,5 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { Public } from './common/decorators/public.decorator';
 import { DeploymentConfigService } from './config/deployment-config.service';
 import { PrismaService } from './prisma/prisma.service';
@@ -12,11 +13,12 @@ export class DemoReadinessController {
 
   @Get('readiness')
   @Public()
-  async readiness() {
+  async readiness(@Req() request: Request) {
     const deployment = this.deploymentConfig.summary();
     const database = await this.databaseStatus();
     const email = await this.deploymentConfig.emailDomainStatus();
     const storage = await this.deploymentConfig.storageStatus();
+    const apiBaseUrl = this.requestBaseUrl(request);
 
     return {
       ok: database.connected && deployment.required.ok,
@@ -48,7 +50,7 @@ export class DemoReadinessController {
         status: 'provider_ready',
         provider: this.integrationMode(deployment.integrations, 'payments'),
         paystackReady: this.integrationMode(deployment.integrations, 'payments') === 'configured',
-        paystackWebhookUrl: 'https://YOUR-BACKEND-DOMAIN/v1/payments/webhooks/paystack/charge.success',
+        paystackWebhookUrl: `${apiBaseUrl}/v1/payments/webhooks/paystack/charge.success`,
         webhookSecurity: 'Paystack x-paystack-signature is verified against the raw request body.',
         endpoints: [
           'POST /v1/payments/escrow/initialize',
@@ -106,8 +108,8 @@ export class DemoReadinessController {
         ],
       },
       frontendConnection: {
-        requiredEnv: 'EXPO_PUBLIC_API_BASE_URL=https://YOUR-BACKEND-URL/v1',
-        status: 'ready_after_backend_url_is_added_to_frontend_env',
+        requiredEnv: `EXPO_PUBLIC_API_BASE_URL=${apiBaseUrl}/v1`,
+        status: 'ready',
       },
       operationsWorkflow: {
         status: 'ready_for_preview',
@@ -148,5 +150,14 @@ export class DemoReadinessController {
 
   private integrationMode(integrations: { name: string; mode: string }[], name: string) {
     return integrations.find((integration) => integration.name === name)?.mode ?? 'mock';
+  }
+
+  private requestBaseUrl(request: Request) {
+    const forwardedProtocol = request.headers['x-forwarded-proto'];
+    const protocol = (Array.isArray(forwardedProtocol) ? forwardedProtocol[0] : forwardedProtocol)
+      ?.split(',')[0]
+      ?.trim() || request.protocol || 'https';
+    const host = request.get('host') || 'localhost:4000';
+    return `${protocol}://${host}`;
   }
 }

@@ -7,7 +7,6 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
 import { randomUUID } from "crypto";
 import type { AuthUser } from "../common/types/auth-user";
 import { TranslationProviderService } from "../integrations/translation-provider.service";
