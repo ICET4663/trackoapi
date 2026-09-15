@@ -49,6 +49,18 @@ readiness, assignment availability, integration status, and the escrow ledger.
 Override the role-specific email or password variables when demo credentials
 change, for example `SMOKE_ADMIN_EMAIL` or `SMOKE_ADMIN_PASSWORD`.
 
+After a customer completes and verifies a Paystack test checkout, resume the
+operations workflow using the shipment id printed by `smoke:payments`:
+
+```powershell
+$env:SMOKE_SHIPMENT_ID="paste-funded-shipment-id"
+npm run smoke:assignment
+```
+
+The assignment checkpoint refuses pending escrow, approves the funded shipment
+as admin, and either reuses its active assignment or offers it to the best
+eligible KYC-approved driver with a verified, current, capacity-matched truck.
+
 ## Required manual validation
 
 - Register a new customer with a real email and complete OTP verification.
