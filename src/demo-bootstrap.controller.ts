@@ -84,10 +84,10 @@ export class DemoBootstrapController {
       users,
       errors,
       links: {
-        customer: 'https://cargo-link-logistics-mm1c.vercel.app/customer',
-        driver: 'https://cargo-link-logistics-mm1c.vercel.app/driver',
-        admin: 'https://cargo-link-logistics-mm1c.vercel.app/admin',
-        dispatcher: 'https://cargo-link-logistics-mm1c.vercel.app/dispatcher',
+        customer: 'https://www.trako.com.ng/customer',
+        driver: 'https://www.trako.com.ng/driver',
+        admin: 'https://www.trako.com.ng/admin',
+        dispatcher: 'https://www.trako.com.ng/dispatcher',
       },
     };
   }
@@ -163,13 +163,14 @@ export class DemoBootstrapController {
   }
 
   private async setupVehicle(driverId: string) {
-    await this.prisma.vehicle.upsert({
+    const vehicle = await this.prisma.vehicle.upsert({
       where: { plateNumber: 'TRK-DRV-01' },
       update: {
         ownerId: driverId,
         assignedDriverId: driverId,
         type: 'Box truck',
         capacityKg: 30000,
+        capacityM3: 45,
         registrationState: 'Lagos',
         isActive: true,
       },
@@ -179,11 +180,33 @@ export class DemoBootstrapController {
         plateNumber: 'TRK-DRV-01',
         type: 'Box truck',
         capacityKg: 30000,
+        capacityM3: 45,
         registrationState: 'Lagos',
         isActive: true,
       },
     });
+
+    const expires = new Date();
+    expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+    const documents = [
+      { type: 'REGISTRATION', title: 'Vehicle registration' },
+      { type: 'INSURANCE', title: 'Insurance certificate' },
+      { type: 'ROADWORTHINESS', title: 'Roadworthiness certificate' },
+    ];
+    await Promise.all(documents.map((document) => this.prisma.$executeRawUnsafe(
+      `insert into "VehicleDocument" ("id", "vehicleId", "type", "title", "state", "number", "expires", "reviewNote", "reviewedAt")
+       values ($1, $2, $3, $4, 'VERIFIED'::"DriverDocumentState", $5, $6, $7, current_timestamp)
+       on conflict ("vehicleId", "type") do update set
+         "title" = excluded."title", "state" = excluded."state", "number" = excluded."number",
+         "expires" = excluded."expires", "reviewNote" = excluded."reviewNote", "reviewedAt" = current_timestamp,
+         "updatedAt" = current_timestamp`,
+      `${vehicle.id}-${document.type.toLowerCase()}`,
+      vehicle.id,
+      document.type,
+      document.title,
+      `DEMO-${document.type}`,
+      expires,
+      'Verified fixture for the Tracko test-mode workflow.',
+    )));
   }
 }
-
-
