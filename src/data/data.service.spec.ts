@@ -89,7 +89,7 @@ describe('DataService authorization gates', () => {
         phone: '+2348000000000',
         verificationStatus: 'VERIFIED',
         updatedAt: new Date(),
-        profile: { fullName: 'Tracko Driver', city: 'Ikeja', state: 'Lagos' },
+        profile: { fullName: 'Trako Driver', city: 'Ikeja', state: 'Lagos' },
         driverVehicles: [{ type: 'Box truck', plateNumber: 'TRK-DRV-01', isActive: true }],
         driverAssignments: [],
         driverReviews: [],
@@ -98,7 +98,7 @@ describe('DataService authorization gates', () => {
       const result = await service.list('seeking-drivers', 'owner-1', 'TRUCK_OWNER');
 
       expect(result[0]).toMatchObject({
-        name: 'Tracko Driver',
+        name: 'Trako Driver',
         state: 'Lagos',
         neededTruck: 'Box truck',
         completedTrips: 0,

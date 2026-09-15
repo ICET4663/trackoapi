@@ -164,7 +164,7 @@ describe('AuthService.createUserByAdmin', () => {
     } as unknown as PrismaService;
     const users = {
       create: usersCreate,
-      findByEmailOrPhone: jest.fn().mockResolvedValue({ id: 'u-new', email: 'new@tracko.ng', phone: '+2348030000009' }),
+      findByEmailOrPhone: jest.fn().mockResolvedValue({ id: 'u-new', email: 'new@trako.com.ng', phone: '+2348030000009' }),
     } as unknown as UsersService;
     const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
     return { service: new AuthService(config, {} as JwtService, prisma, rateLimit, users), usersCreate };
@@ -173,10 +173,10 @@ describe('AuthService.createUserByAdmin', () => {
   it('creates a staff account VERIFIED and never returns a password', async () => {
     const { service, usersCreate } = buildService({ id: 'u-new', verificationStatus: 'VERIFIED' });
     const result = await service.createUserByAdmin('admin-1', {
-      fullName: 'New Dispatcher', email: 'New@Tracko.NG', phone: '+234 803 000 0009', role: 'dispatcher',
+      fullName: 'New Dispatcher', email: 'New@Trako.com.ng', phone: '+234 803 000 0009', role: 'dispatcher',
     });
 
-    expect(usersCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'DISPATCHER', verificationStatus: 'VERIFIED', email: 'new@tracko.ng' }));
+    expect(usersCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'DISPATCHER', verificationStatus: 'VERIFIED', email: 'new@trako.com.ng' }));
     expect(result).not.toHaveProperty('password');
     expect(result).not.toHaveProperty('passwordHash');
     expect(result.passwordSetup).toBeDefined();

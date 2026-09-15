@@ -165,7 +165,7 @@ export class CommunicationService {
         return {
           id: conversation.id,
           role: user.role,
-          title: conversation.subject ?? "Tracko conversation",
+          title: conversation.subject ?? "Trako conversation",
           subtitle:
             lastMessage?.body ?? lastMessage?.transcript ?? "No messages yet",
           lastMessageAt:
@@ -189,7 +189,7 @@ export class CommunicationService {
       conversation = await this.prisma.conversation.upsert({
         where: { id: conversationId },
         update: {},
-        create: { id: conversationId, subject: "Tracko conversation" },
+        create: { id: conversationId, subject: "Trako conversation" },
       });
     } catch (error) {
       throw new InternalServerErrorException(
@@ -233,7 +233,7 @@ export class CommunicationService {
       .upsert({
         where: { id: conversationId },
         update: { updatedAt: new Date() },
-        create: { id: conversationId, subject: "Tracko conversation" },
+        create: { id: conversationId, subject: "Trako conversation" },
       })
       .catch((error) => {
         throw new InternalServerErrorException(

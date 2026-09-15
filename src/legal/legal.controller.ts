@@ -24,7 +24,7 @@ function renderPage(document: LegalDocument): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tracko ${escapeHtml(document.title)}</title>
+  <title>Trako ${escapeHtml(document.title)}</title>
   <style>
     body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 840px; margin: 40px auto; padding: 0 20px; color: #102033; }
     h1, h2 { color: #0b3558; }

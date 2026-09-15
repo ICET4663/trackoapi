@@ -200,7 +200,7 @@ export class SettingsService {
   }
 
   // This used to fall back to a fake identity - a hardcoded name/email/phone/verification
-  // status ("Tracko Preview User", VERIFIED) belonging to nobody - on any DB read failure
+  // status ("Trako Preview User", VERIFIED) belonging to nobody - on any DB read failure
   // or a genuinely-missing user row. A real authenticated user could see someone else's
   // (fake) name and a fake "VERIFIED" status on their own Personal Details screen.
   async profile(userId: string) {
@@ -306,7 +306,7 @@ export class SettingsService {
     await this.notifications.create({
       userId,
       title: 'Deletion request received',
-      body: 'Tracko will review your account deletion request and follow up according to our retention policy.',
+      body: 'Trako will review your account deletion request and follow up according to our retention policy.',
       tone: 'INFO',
       entity: 'User',
       entityId: userId,
@@ -316,7 +316,7 @@ export class SettingsService {
     return {
       id,
       status: 'PENDING_REVIEW',
-      message: 'Account deletion request received. Tracko will review and follow up.',
+      message: 'Account deletion request received. Trako will review and follow up.',
     };
   }
 
@@ -383,8 +383,8 @@ export class SettingsService {
       userId,
       title: 'Deletion request update',
       body: input.note
-        ? `Tracko reviewed your account deletion request: ${input.note}`
-        : 'Tracko reviewed your account deletion request and your account was not deleted. Contact support for details.',
+        ? `Trako reviewed your account deletion request: ${input.note}`
+        : 'Trako reviewed your account deletion request and your account was not deleted. Contact support for details.',
       tone: 'INFO',
       entity: 'User',
       entityId: userId,
@@ -509,7 +509,7 @@ export class SettingsService {
   supportArticle(id: string) {
     return {
       id,
-      title: id === 'payments' ? 'Payments and escrow' : 'Getting help with Tracko',
+      title: id === 'payments' ? 'Payments and escrow' : 'Getting help with Trako',
       intro: 'This preview article explains the workflow while the live support knowledge base is being connected.',
       sections: [
         {
@@ -574,7 +574,7 @@ export class SettingsService {
     }).catch(() => null);
 
     return {
-      message: 'Support request received. Tracko support will follow up.',
+      message: 'Support request received. Trako support will follow up.',
       conversationId: id,
       ticketId: id,
       status: 'OPEN',
@@ -586,7 +586,7 @@ export class SettingsService {
       ...input,
       topic: 'Safety emergency',
       action: 'SAFETY_EMERGENCY_REPORTED',
-      userMessage: 'Emergency alert received. Tracko operations has been notified.',
+      userMessage: 'Emergency alert received. Trako operations has been notified.',
     });
   }
 
@@ -595,7 +595,7 @@ export class SettingsService {
       ...input,
       topic: 'Driver safety incident',
       action: 'DRIVER_SAFETY_INCIDENT_REPORTED',
-      userMessage: 'Safety incident received. Tracko operations has been notified.',
+      userMessage: 'Safety incident received. Trako operations has been notified.',
     });
   }
 
@@ -716,7 +716,7 @@ export class SettingsService {
         id: row.id,
         shipmentId: row.shipmentId,
         userId: row.userId,
-        userName: row.userName ?? 'Tracko user',
+        userName: row.userName ?? 'Trako user',
         userEmail: row.userEmail ?? undefined,
         topic: row.topic,
         channel: row.channel,
@@ -728,7 +728,7 @@ export class SettingsService {
         resolvedAt: row.resolvedAt?.toISOString(),
       }));
     } catch (error) {
-      // Used to fall back to a single fabricated "Tracko Customer" support ticket on any
+      // Used to fall back to a single fabricated "Trako Customer" support ticket on any
       // read failure - an admin/dispatcher's support queue would show a made-up ticket
       // instead of an error.
       throw new InternalServerErrorException(`Could not load support tickets. Please try again: ${this.errorMessage(error)}`);
@@ -736,7 +736,7 @@ export class SettingsService {
   }
 
   async resolveSupportTicket(id: string, actorId: string, input: { resolution?: string }) {
-    const resolution = String(input.resolution ?? 'Resolved by Tracko support.');
+    const resolution = String(input.resolution ?? 'Resolved by Trako support.');
     try {
       const rows = await this.prisma.$queryRawUnsafe<SupportTicketRow[]>(
         `update "SupportTicket"
@@ -1232,7 +1232,7 @@ export class SettingsService {
     await this.notifications.create({
       userId,
       title: 'Withdrawal request submitted',
-      body: `${this.formatMoney(amountKobo)} is pending Tracko finance review.`,
+      body: `${this.formatMoney(amountKobo)} is pending Trako finance review.`,
       tone: 'INFO',
       entity: 'Payout',
       entityId: payout.id,
@@ -1249,7 +1249,7 @@ export class SettingsService {
   }
 
   // This used to catch ANY read failure (a DB outage, a bad query) and return a single
-  // fabricated pending withdrawal request - "Tracko Driver", "Preview Bank **** 0012",
+  // fabricated pending withdrawal request - "Trako Driver", "Preview Bank **** 0012",
   // N120,000 - indistinguishable from a real one on the admin finance queue. Worse,
   // reviewPayoutRequest() had a matching special case that let an admin "approve" or
   // "mark paid" that fake id without ever touching the real Payout table - an admin

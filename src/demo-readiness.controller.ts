@@ -23,8 +23,8 @@ export class DemoReadinessController {
     return {
       ok: database.connected && deployment.required.ok,
       message: database.connected
-        ? 'Tracko API is running and connected. Auth, escrow, and KYC integration endpoints are ready for preview.'
-        : 'Tracko API is running, but database connection needs attention.',
+        ? 'Trako API is running and connected. Auth, escrow, and KYC integration endpoints are ready for preview.'
+        : 'Trako API is running, but database connection needs attention.',
       api: {
         service: 'tracko-api',
         environment: deployment.environment,

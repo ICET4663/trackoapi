@@ -588,11 +588,11 @@ export class AuthService {
   }) {
     const provider = this.config.get<string>('EMAIL_PROVIDER') ?? 'mock';
     const resendKey = this.config.get<string>('RESEND_API_KEY');
-    const from = this.config.get<string>('EMAIL_FROM') ?? 'Tracko <onboarding@resend.dev>';
-    const subject = `Your Tracko ${input.purpose} code`;
+    const from = this.config.get<string>('EMAIL_FROM') ?? 'Trako <onboarding@resend.dev>';
+    const subject = `Your Trako ${input.purpose} code`;
     const roleLine = input.role ? `Role: ${input.role.replace('_', ' ')}` : 'Security verification';
-    const text = `Your Tracko ${input.purpose} OTP is ${input.code}. ${roleLine}. It expires at ${input.expiresAt.toISOString()}.`;
-    const html = `<p>Your Tracko ${input.purpose} OTP is:</p><h2>${input.code}</h2><p>${roleLine}</p><p>This code expires at ${input.expiresAt.toISOString()}.</p>`;
+    const text = `Your Trako ${input.purpose} OTP is ${input.code}. ${roleLine}. It expires at ${input.expiresAt.toISOString()}.`;
+    const html = `<p>Your Trako ${input.purpose} OTP is:</p><h2>${input.code}</h2><p>${roleLine}</p><p>This code expires at ${input.expiresAt.toISOString()}.</p>`;
 
     if (provider !== 'resend' || !resendKey) {
       return {

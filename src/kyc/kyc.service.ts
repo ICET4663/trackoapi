@@ -300,7 +300,7 @@ export class KycService {
           email: submission.email,
           phone: submission.phone,
           role: submission.role,
-          fullName: submission.fullName ?? submission.email ?? 'Tracko user',
+          fullName: submission.fullName ?? submission.email ?? 'Trako user',
           verificationStatus: submission.verificationStatus ?? 'PENDING',
         },
       };
@@ -421,7 +421,7 @@ export class KycService {
       updatedAt: this.isoDate(submission.updatedAt),
       reviewedAt: this.isoDate(submission.reviewedAt),
       reviewedBy: submission.reviewedBy,
-      fullName: submission.fullName ?? submission.email ?? 'Tracko user',
+      fullName: submission.fullName ?? submission.email ?? 'Trako user',
       email: submission.email,
       phone: submission.phone,
       verificationStatus: submission.verificationStatus ?? 'PENDING',
@@ -464,7 +464,7 @@ export class KycService {
         email: user.email,
         phone: user.phone,
         role: user.role,
-        fullName: user.fullName ?? user.email ?? 'Tracko user',
+        fullName: user.fullName ?? user.email ?? 'Trako user',
         verificationStatus: submission.verificationStatus,
       },
     };
@@ -494,7 +494,7 @@ export class KycService {
     if (reviewedAt) {
       history.push({
         action: resolvedStatus,
-        actor: reviewerId ?? 'Tracko reviewer',
+        actor: reviewerId ?? 'Trako reviewer',
         at: reviewedAt,
       });
     }
@@ -513,8 +513,8 @@ export class KycService {
       submittedAt,
       updatedAt,
       reviewedAt,
-      reviewedBy: reviewedAt ? reviewerId ?? 'Tracko reviewer' : null,
-      fullName: user.fullName ?? user.email ?? 'Tracko user',
+      reviewedBy: reviewedAt ? reviewerId ?? 'Trako reviewer' : null,
+      fullName: user.fullName ?? user.email ?? 'Trako user',
       email: user.email,
       phone: user.phone,
       verificationStatus: resolvedVerificationStatus,
@@ -607,7 +607,7 @@ export class KycService {
     if (submission.reviewedAt) {
       history.push({
         action: submission.status,
-        actor: submission.reviewedBy ?? 'Tracko reviewer',
+        actor: submission.reviewedBy ?? 'Trako reviewer',
         at: this.isoDate(submission.reviewedAt) ?? new Date().toISOString(),
       });
     }

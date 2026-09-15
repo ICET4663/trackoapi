@@ -226,7 +226,7 @@ export class ShipmentsService {
       // Read failure - fail open, see above.
     }
     if (setting?.value === 'true') {
-      throw new BadRequestException('Tracko is temporarily in maintenance mode. New shipments cannot be created right now - please try again shortly.');
+      throw new BadRequestException('Trako is temporarily in maintenance mode. New shipments cannot be created right now - please try again shortly.');
     }
   }
 
@@ -440,7 +440,7 @@ export class ShipmentsService {
         })),
       }));
     } catch (error) {
-      // Used to fall back to a single fabricated "Tracko Preview Driver" on any read
+      // Used to fall back to a single fabricated "Trako Preview Driver" on any read
       // failure - a dispatcher assigning a shipment during a DB hiccup could try to
       // offer it to a driver who doesn't exist.
       this.logger.error(`availableDrivers() failed: ${this.errorMessage(error)}`);
@@ -899,7 +899,7 @@ export class ShipmentsService {
         userId: updated.driverId,
         role: 'DRIVER',
         title: 'Shipment offer withdrawn',
-        body: 'Tracko operations withdrew this offer. It is no longer available to accept.',
+        body: 'Trako operations withdrew this offer. It is no longer available to accept.',
         tone: 'WARNING',
         entity: 'DriverAssignment',
         entityId: updated.id,

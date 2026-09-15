@@ -624,7 +624,7 @@ describe('ShipmentsService core shipment CRUD never fakes success on failure', (
 });
 
 // availableDrivers()/listAssignments()/offerAssignment() used to fall back to a single
-// fabricated "Tracko Preview Driver" / "OFFERED" assignment (fake truck, fake plate
+// fabricated "Trako Preview Driver" / "OFFERED" assignment (fake truck, fake plate
 // number) on any read failure - dispatch could try to assign a shipment to a driver who
 // doesn't exist, or see "Assignment offered!" when nothing was queried or written.
 describe('ShipmentsService driver/assignment lookups never fake data on failure', () => {

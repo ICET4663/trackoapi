@@ -41,25 +41,25 @@ export class DemoBootstrapController {
       {
         email: (body.customerEmail ?? 'customer@tracko.ng').trim().toLowerCase(),
         phone: '+2348035550144',
-        fullName: 'Tracko Customer',
+        fullName: 'Trako Customer',
         role: 'CUSTOMER',
       },
       {
         email: (body.driverEmail ?? 'driver@tracko.ng').trim().toLowerCase(),
         phone: '+2348035550143',
-        fullName: 'Tracko Driver',
+        fullName: 'Trako Driver',
         role: 'DRIVER',
       },
       {
         email: (body.adminEmail ?? 'admin@tracko.ng').trim().toLowerCase(),
         phone: '+2348035550146',
-        fullName: 'Tracko Admin',
+        fullName: 'Trako Admin',
         role: 'ADMIN',
       },
       {
         email: (body.dispatcherEmail ?? 'dispatcher@tracko.ng').trim().toLowerCase(),
         phone: '+2348035550145',
-        fullName: 'Tracko Dispatcher',
+        fullName: 'Trako Dispatcher',
         role: 'DISPATCHER',
       },
     ];
@@ -137,7 +137,7 @@ export class DemoBootstrapController {
       update: {
         bankName: 'Preview Bank',
         maskedNumber: '**** 0012',
-        holderName: 'Tracko Driver',
+        holderName: 'Trako Driver',
         verified: true,
         payoutSchedule: 'Weekly',
         pendingPayout: 'N0',
@@ -146,7 +146,7 @@ export class DemoBootstrapController {
         userId: driverId,
         bankName: 'Preview Bank',
         maskedNumber: '**** 0012',
-        holderName: 'Tracko Driver',
+        holderName: 'Trako Driver',
         verified: true,
         payoutSchedule: 'Weekly',
         pendingPayout: 'N0',
@@ -206,7 +206,7 @@ export class DemoBootstrapController {
       document.title,
       `DEMO-${document.type}`,
       expires,
-      'Verified fixture for the Tracko test-mode workflow.',
+      'Verified fixture for the Trako test-mode workflow.',
     )));
   }
 }

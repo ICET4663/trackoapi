@@ -1,4 +1,4 @@
-// Single source of truth for Tracko's legal documents. Both the public HTML
+// Single source of truth for Trako's legal documents. Both the public HTML
 // pages (LegalController - used for the app-store data-safety / policy URLs) and
 // the in-app document viewer (SettingsService.legalDocument) render from here so
 // they can never drift.
@@ -8,8 +8,8 @@
 // Protection Act 2023) and to satisfy the Play/App Store location-disclosure
 // requirement, since drivers share live location during active deliveries.
 
-export const LEGAL_COMPANY_NAME = 'Tracko Logistics';
-export const LEGAL_SUPPORT_EMAIL = 'support@tracko.example';
+export const LEGAL_COMPANY_NAME = 'Trako Logistics';
+export const LEGAL_SUPPORT_EMAIL = 'support@trako.com.ng';
 export const LEGAL_LAST_UPDATED = 'September 10, 2026';
 
 export type LegalSection = { heading: string; body: string };
@@ -30,7 +30,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     slug: 'privacy',
     title: 'Privacy Policy',
     updated: LEGAL_LAST_UPDATED,
-    summary: 'What Tracko collects, why, how long it is kept, and your rights.',
+    summary: 'What Trako collects, why, how long it is kept, and your rights.',
     sections: [
       {
         heading: 'Overview',
@@ -42,15 +42,15 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Location data',
-        body: 'When a driver has an active accepted trip, the app shares the device location with Tracko so the customer, the truck owner and dispatch can follow the shipment and so we can confirm pickup and delivery. Location is collected only while a trip is active and the app is in use (foreground); Tracko does not collect background location. Customers and dispatch see the driver location only for shipments they are party to. A driver can stop sharing by ending or declining trips and by revoking the location permission in the device settings; doing so prevents accepting new trips. Location points attached to a completed shipment are retained with that shipment record.',
+        body: 'When a driver has an active accepted trip, the app shares the device location with Trako so the customer, the truck owner and dispatch can follow the shipment and so we can confirm pickup and delivery. Location is collected only while a trip is active and the app is in use (foreground); Trako does not collect background location. Customers and dispatch see the driver location only for shipments they are party to. A driver can stop sharing by ending or declining trips and by revoking the location permission in the device settings; doing so prevents accepting new trips. Location points attached to a completed shipment are retained with that shipment record.',
       },
       {
         heading: 'How data is used',
-        body: 'To operate the Tracko logistics service, verify users, price quotes, assign and track shipments, move funds through escrow, translate messages into a recipient\'s preferred language, process support and disputes, secure accounts, and meet legal, tax or regulatory obligations. Automated matching ranks eligible drivers by capacity, rating, proximity and availability; a dispatcher or admin can always override it.',
+        body: 'To operate the Trako logistics service, verify users, price quotes, assign and track shipments, move funds through escrow, translate messages into a recipient\'s preferred language, process support and disputes, secure accounts, and meet legal, tax or regulatory obligations. Automated matching ranks eligible drivers by capacity, rating, proximity and availability; a dispatcher or admin can always override it.',
       },
       {
         heading: 'Sharing',
-        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Tracko operations for that shipment only. We use third-party processors for payments (Paystack), email delivery, maps and geocoding, push delivery and, where enabled, speech-to-text and translation. Processors receive only what they need for their function. We may disclose data where required by law or to protect safety and prevent fraud.',
+        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Trako operations for that shipment only. We use third-party processors for payments (Paystack), email delivery, maps and geocoding, push delivery and, where enabled, speech-to-text and translation. Processors receive only what they need for their function. We may disclose data where required by law or to protect safety and prevent fraud.',
       },
       {
         heading: 'Retention and deletion',
@@ -71,35 +71,35 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     slug: 'terms',
     title: 'Terms of Service',
     updated: LEGAL_LAST_UPDATED,
-    summary: 'The rules for using the Tracko platform.',
+    summary: 'The rules for using the Trako platform.',
     sections: [
       {
         heading: 'The service',
-        body: 'Tracko is a logistics coordination platform connecting customers, drivers, truck owners, dispatchers and administrators. Tracko facilitates matching, tracking, communication and escrow; the transport itself is performed by independent drivers and truck owners.',
+        body: 'Trako is a logistics coordination platform connecting customers, drivers, truck owners, dispatchers and administrators. Trako facilitates matching, tracking, communication and escrow; the transport itself is performed by independent drivers and truck owners.',
       },
       {
         heading: 'Eligibility and accounts',
-        body: 'You must provide accurate account, shipment, vehicle, driver and contact information and keep it current. Customer, driver and truck-owner accounts self-register with email verification; dispatcher and administrator accounts are created by Tracko. You are responsible for activity under your account and for keeping your credentials secure.',
+        body: 'You must provide accurate account, shipment, vehicle, driver and contact information and keep it current. Customer, driver and truck-owner accounts self-register with email verification; dispatcher and administrator accounts are created by Trako. You are responsible for activity under your account and for keeping your credentials secure.',
       },
       {
         heading: 'Verification (KYC)',
-        body: 'Customers must complete identity verification before creating a shipment or funding escrow. Drivers and truck owners must additionally verify a driver licence and vehicle documents before accepting or being assigned loads. Tracko may pause or reject verification and may re-review it at any time.',
+        body: 'Customers must complete identity verification before creating a shipment or funding escrow. Drivers and truck owners must additionally verify a driver licence and vehicle documents before accepting or being assigned loads. Trako may pause or reject verification and may re-review it at any time.',
       },
       {
         heading: 'Shipments, payments and escrow',
-        body: 'Quotes are calculated by Tracko from route, vehicle class and load, and are valid for a limited window. Escrow must be funded through the in-app Paystack flow before a shipment is dispatched. Funds are released to the truck owner/driver after delivery is confirmed and the dispute window passes, or refunded where a dispute is resolved in the customer\'s favour. Features labelled preview or demo are not production financial services.',
+        body: 'Quotes are calculated by Trako from route, vehicle class and load, and are valid for a limited window. Escrow must be funded through the in-app Paystack flow before a shipment is dispatched. Funds are released to the truck owner/driver after delivery is confirmed and the dispute window passes, or refunded where a dispute is resolved in the customer\'s favour. Features labelled preview or demo are not production financial services.',
       },
       {
         heading: 'Conduct and content',
-        body: 'You are responsible for the messages, voice notes, documents and photos you upload. Do not upload unlawful, abusive, misleading, infringing or unsafe content, and do not misuse the platform (spoofing location, circumventing escrow, harassment). Tracko may restrict content, shipments or accounts that break these rules or platform safety policies.',
+        body: 'You are responsible for the messages, voice notes, documents and photos you upload. Do not upload unlawful, abusive, misleading, infringing or unsafe content, and do not misuse the platform (spoofing location, circumventing escrow, harassment). Trako may restrict content, shipments or accounts that break these rules or platform safety policies.',
       },
       {
         heading: 'Disclaimers and liability',
-        body: 'The service is provided on an "as is" basis. Tracko is not the carrier and does not guarantee the acts of independent drivers or truck owners. To the extent permitted by law, Tracko is not liable for indirect or consequential loss; nothing limits liability that cannot be limited by law.',
+        body: 'The service is provided on an "as is" basis. Trako is not the carrier and does not guarantee the acts of independent drivers or truck owners. To the extent permitted by law, Trako is not liable for indirect or consequential loss; nothing limits liability that cannot be limited by law.',
       },
       {
         heading: 'Changes and contact',
-        body: `Tracko may update these terms; material changes will be notified in the app. Continued use after an update means you accept it. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
+        body: `Trako may update these terms; material changes will be notified in the app. Continued use after an update means you accept it. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
       },
     ],
   },
@@ -108,11 +108,11 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     slug: 'account-deletion',
     title: 'Account Deletion',
     updated: LEGAL_LAST_UPDATED,
-    summary: 'How to delete your Tracko account and what happens to your data.',
+    summary: 'How to delete your Trako account and what happens to your data.',
     sections: [
       {
         heading: 'How to request',
-        body: `In the app: Account → Legal & policies → Request account deletion. By email: message ${LEGAL_SUPPORT_EMAIL} with the subject "Delete my Tracko account". Include your registered email, phone number and account role so we can locate the account.`,
+        body: `In the app: Account → Legal & policies → Request account deletion. By email: message ${LEGAL_SUPPORT_EMAIL} with the subject "Delete my Trako account". Include your registered email, phone number and account role so we can locate the account.`,
       },
       {
         heading: 'What happens next',

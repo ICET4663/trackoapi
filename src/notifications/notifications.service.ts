@@ -157,7 +157,7 @@ export class NotificationsService {
     return error instanceof Error ? error.message : String(error);
   }
 
-  // This used to fall back to a single fabricated "Tracko preview is ready" notification
+  // This used to fall back to a single fabricated "Trako preview is ready" notification
   // whenever the read failed OR the user genuinely had zero real notifications - the
   // latter being the normal state for a brand-new account, so most new users saw a fake
   // notification that never happened. A read failure now surfaces as a real error (the

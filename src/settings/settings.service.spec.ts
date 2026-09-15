@@ -300,7 +300,7 @@ describe('SettingsService pricing report uses accepted quote audit records', () 
         id: 'audit-quote-1',
         entityId: 'shipment-1',
         createdAt: new Date('2026-08-20T10:00:00.000Z'),
-        actor: { email: 'customer@tracko.ng', profile: { fullName: 'Tracko Customer' } },
+        actor: { email: 'customer@tracko.ng', profile: { fullName: 'Trako Customer' } },
         metadata: {
           quotedPriceKobo: 30_000_000,
           distanceKm: 300,
@@ -344,7 +344,7 @@ describe('SettingsService pricing report uses accepted quote audit records', () 
     });
     expect(report.latestQuotes[0]).toMatchObject({
       shipmentId: 'shipment-1',
-      customer: 'Tracko Customer',
+      customer: 'Trako Customer',
       truckType: 'Flatbed',
     });
   });
@@ -580,7 +580,7 @@ describe('SettingsService.updatePreferredLanguage', () => {
 });
 
 // profile()/updateProfile() used to fall back to a fake identity - hardcoded name
-// "Tracko Preview User", email customer@tracko.ng, phone +234 800 000 0000, and a fake
+// "Trako Preview User", email customer@tracko.ng, phone +234 800 000 0000, and a fake
 // "VERIFIED" status belonging to nobody - on any DB read failure or a genuinely-missing
 // user row. A real authenticated user could see someone else's fake identity on their
 // own Personal Details screen.
@@ -698,7 +698,7 @@ describe('SettingsService saved addresses never fake success', () => {
 });
 
 // adminPayoutRequests()/reviewPayoutRequest() used to fall back to a single fabricated
-// "Tracko Driver, N120,000, Preview Bank **** 0012" pending withdrawal on any read
+// "Trako Driver, N120,000, Preview Bank **** 0012" pending withdrawal on any read
 // failure, and reviewPayoutRequest() had a matching special case that let an admin
 // "approve"/"mark paid" that fake id without ever touching the real Payout table - an
 // admin could believe they'd paid a driver N120,000 when nothing happened on either side.
