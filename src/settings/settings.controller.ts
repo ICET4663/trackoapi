@@ -395,7 +395,7 @@ export class SettingsController {
     @Body() body: { decision?: string; note?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
     return this.settingsService.reviewPayoutRequest(id, user.sub, body);
   }
 

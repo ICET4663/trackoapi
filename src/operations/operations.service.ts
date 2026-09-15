@@ -668,7 +668,7 @@ export class OperationsService {
 
     try {
       const [escrowRows, payoutRows, countRows] = await Promise.all([
-        this.prisma.$queryRawUnsafe<Array<{
+        this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           collected: bigint | null;
           held: bigint | null;
           disputed: bigint | null;
@@ -682,8 +682,8 @@ export class OperationsService {
              coalesce(sum("amount") filter (where "status" = 'RELEASED'::"EscrowStatus"), 0) as "released",
              coalesce(sum("amount") filter (where "status" = 'REFUNDED'::"EscrowStatus"), 0) as "refunded"
            from "Escrow"`,
-        ),
-        this.prisma.$queryRawUnsafe<Array<{
+        )),
+        this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           paid: bigint | null;
           approved: bigint | null;
           pending: bigint | null;
@@ -695,8 +695,8 @@ export class OperationsService {
              coalesce(sum("amountKobo") filter (where "status" = 'PENDING'::"PayoutStatus"), 0) as "pending",
              coalesce(sum("amountKobo") filter (where "status" = 'REJECTED'::"PayoutStatus"), 0) as "rejected"
            from "Payout"`,
-        ),
-        this.prisma.$queryRawUnsafe<Array<{
+        )),
+        this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           fundedShipments: bigint | null;
           openDisputes: bigint | null;
           pendingPayouts: bigint | null;
@@ -705,7 +705,7 @@ export class OperationsService {
              (select count(*) from "Escrow" where "status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")) as "fundedShipments",
              (select count(*) from "Dispute" where "status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")) as "openDisputes",
              (select count(*) from "Payout" where "status" in ('PENDING'::"PayoutStatus", 'APPROVED'::"PayoutStatus")) as "pendingPayouts"`,
-        ),
+        )),
       ]);
 
       const n = (value: bigint | null | undefined) => Number(value ?? 0);
@@ -1256,6 +1256,15 @@ export class OperationsService {
 
   private errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private async retryDatabaseRead<T>(read: () => Promise<T>): Promise<T> {
+    try {
+      return await read();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      return read();
+    }
   }
 
   private async countRaw(query: string) {
