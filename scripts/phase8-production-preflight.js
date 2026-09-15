@@ -5,6 +5,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.PREFLIGHT_TIMEOUT_MS || 12000);
 const PREFLIGHT_ACCESS_TOKEN = process.env.PREFLIGHT_ACCESS_TOKEN;
 
 const results = [];
+let canonicalAppUrl = APP_URL;
 
 async function request(url, options = {}) {
   const controller = new AbortController();
@@ -62,7 +63,38 @@ async function main() {
     const response = await request(APP_URL);
     requireValue(response.ok, `HTTP ${response.status}`);
     requireValue(new URL(response.url).hostname.endsWith('trako.com.ng'), `redirected to ${response.url}`);
-    return `HTTP ${response.status}`;
+    canonicalAppUrl = new URL(response.url).origin;
+    return `HTTP ${response.status}; canonical ${canonicalAppUrl}`;
+  });
+
+  await check('web application bundle', 'required', async () => {
+    const response = await request(`${canonicalAppUrl}/login`);
+    requireValue(response.ok, `login route returned HTTP ${response.status}`);
+    const html = await response.text();
+    requireValue(html.includes('id="root"'), 'Expo application root is missing');
+    const bundlePath = html.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
+    requireValue(bundlePath, 'JavaScript application bundle is missing');
+    const bundleResponse = await request(new URL(bundlePath, canonicalAppUrl).toString());
+    requireValue(bundleResponse.ok, `application bundle returned HTTP ${bundleResponse.status}`);
+    requireValue(
+      (bundleResponse.headers.get('content-type') || '').includes('javascript'),
+      `application bundle has unexpected content type ${bundleResponse.headers.get('content-type') || 'missing'}`,
+    );
+    const bundleBytes = (await bundleResponse.arrayBuffer()).byteLength;
+    requireValue(bundleBytes > 100_000, `application bundle is unexpectedly small (${bundleBytes} bytes)`);
+    return `${Math.ceil(bundleBytes / 1024)} KB bundle`;
+  });
+
+  await check('web deep links', 'required', async () => {
+    const routes = ['/login', '/register', '/customer', '/driver', '/owner', '/dispatcher', '/admin'];
+    const responses = await Promise.all(routes.map(async (route) => {
+      const response = await request(`${canonicalAppUrl}${route}`);
+      const contentType = response.headers.get('content-type') || '';
+      requireValue(response.ok, `${route} returned HTTP ${response.status}`);
+      requireValue(contentType.includes('text/html'), `${route} returned ${contentType || 'no content type'}`);
+      return route;
+    }));
+    return `${responses.length} routes available`;
   });
 
   await check('API health', 'required', async () => {
@@ -73,18 +105,24 @@ async function main() {
   });
 
   await check('frontend CORS', 'required', async () => {
-    const response = await request(`${API_BASE_URL}/v1/auth/login`, {
-      method: 'OPTIONS',
-      headers: {
-        Origin: APP_URL,
-        'Access-Control-Request-Method': 'POST',
-        'Access-Control-Request-Headers': 'content-type,authorization',
-      },
-    });
-    requireValue(response.ok || response.status === 204, `preflight returned HTTP ${response.status}`);
-    const allowedOrigin = response.headers.get('access-control-allow-origin');
-    requireValue(allowedOrigin === APP_URL || allowedOrigin === '*', `allowed origin is ${allowedOrigin || 'missing'}`);
-    return allowedOrigin;
+    const origins = [...new Set([APP_URL, canonicalAppUrl])];
+    for (const origin of origins) {
+      const response = await request(`${API_BASE_URL}/v1/auth/login`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'content-type,authorization',
+        },
+      });
+      requireValue(response.ok || response.status === 204, `${origin} preflight returned HTTP ${response.status}`);
+      const allowedOrigin = response.headers.get('access-control-allow-origin');
+      requireValue(
+        allowedOrigin === origin || allowedOrigin === '*',
+        `${origin} allowed origin is ${allowedOrigin || 'missing'}`,
+      );
+    }
+    return origins.join(', ');
   });
 
   let integrations;

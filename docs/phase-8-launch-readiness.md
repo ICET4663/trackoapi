@@ -12,7 +12,8 @@ cd "C:\Users\hp\Desktop\trackoapi-clean"
 npm run smoke:production
 ```
 
-The command checks the custom domain, API health, CORS, Paystack configuration,
+The command checks the custom domain, canonical domain CORS, Expo application
+bundle, authentication and role deep links, API health, Paystack configuration,
 Google routing, database connectivity, the verified Resend domain, Supabase
 Storage, and published legal documents. It reports automated KYC and multilingual
 voice as advisories until those paid providers are active.
