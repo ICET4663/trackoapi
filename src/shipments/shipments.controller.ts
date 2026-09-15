@@ -120,7 +120,7 @@ export class ShipmentsController {
     @Param('check') check: string,
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    const user = await this.requestUser.requireRole(authorization, ['CUSTOMER', 'DRIVER', 'DISPATCHER', 'ADMIN']);
     return this.shipmentsService.confirmEscrowCheck(id, check, user.role);
   }
 
@@ -130,7 +130,7 @@ export class ShipmentsController {
     @Body() body: { note?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.shipmentsService.releaseEscrow(id, user.role, body.note);
   }
 
@@ -150,7 +150,7 @@ export class ShipmentsController {
     @Body() body: { note?: string },
     @Headers('authorization') authorization?: string,
   ) {
-    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DISPATCHER');
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
     return this.shipmentsService.refundEscrow(id, user.role, body.note);
   }
 

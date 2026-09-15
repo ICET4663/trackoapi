@@ -16,6 +16,7 @@
     "deploy:check": "npm run verify && npm run build",
     "smoke:auth": "node scripts/smoke-auth.js",
     "smoke:assignment": "node scripts/smoke-assignment.js",
+    "smoke:delivery": "node scripts/smoke-delivery.js",
     "smoke:kyc": "node scripts/smoke-kyc.js",
     "smoke:maps": "node scripts/smoke-maps.js",
     "smoke:mvp": "node scripts/smoke-mvp.js",
