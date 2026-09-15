@@ -81,43 +81,52 @@ async function main() {
     return;
   }
 
-  const quoteInput = {
-    originLatitude: 6.5244,
-    originLongitude: 3.3792,
-    destinationLatitude: 7.3775,
-    destinationLongitude: 3.947,
-    truckType: 'Box truck',
-    weightTons: 8,
-    volumeM3: 24,
-  };
-  const quote = await request('/v1/maps/route-estimate', {
-    method: 'POST',
-    accessToken: customer.accessToken,
-    body: quoteInput,
-  });
-  if (!quote.quoteToken || !quote.quotedPriceKobo) {
-    throw new Error('The route estimate did not return a signed quote.');
-  }
-  console.log('OK signed quote', `${quote.distanceKm}km`, `${quote.quotedPriceKobo} kobo`);
-
-  const shipment = await request('/v1/shipments', {
-    method: 'POST',
-    accessToken: customer.accessToken,
-    body: {
-      origin: 'Lagos',
-      destination: 'Ibadan',
-      originCoordinates: { latitude: 6.5244, longitude: 3.3792 },
-      destinationCoordinates: { latitude: 7.3775, longitude: 3.947 },
-      cargoType: 'Payment smoke test cargo',
-      quantity: '1 truckload',
+  let shipment;
+  const existingShipmentId = process.env.SMOKE_SHIPMENT_ID?.trim();
+  if (existingShipmentId) {
+    shipment = await request(`/v1/shipments/${encodeURIComponent(existingShipmentId)}`, {
+      accessToken: customer.accessToken,
+    });
+    console.log('OK existing shipment loaded', shipment.id);
+  } else {
+    const quoteInput = {
+      originLatitude: 6.5244,
+      originLongitude: 3.3792,
+      destinationLatitude: 7.3775,
+      destinationLongitude: 3.947,
+      truckType: 'Box truck',
       weightTons: 8,
       volumeM3: 24,
-      truckType: 'Box truck',
-      pickupContactPhone: '+2348000000000',
-      quoteToken: quote.quoteToken,
-    },
-  });
-  console.log('OK shipment created', shipment.id);
+    };
+    const quote = await request('/v1/maps/route-estimate', {
+      method: 'POST',
+      accessToken: customer.accessToken,
+      body: quoteInput,
+    });
+    if (!quote.quoteToken || !quote.quotedPriceKobo) {
+      throw new Error('The route estimate did not return a signed quote.');
+    }
+    console.log('OK signed quote', `${quote.distanceKm}km`, `${quote.quotedPriceKobo} kobo`);
+
+    shipment = await request('/v1/shipments', {
+      method: 'POST',
+      accessToken: customer.accessToken,
+      body: {
+        origin: 'Lagos',
+        destination: 'Ibadan',
+        originCoordinates: { latitude: 6.5244, longitude: 3.3792 },
+        destinationCoordinates: { latitude: 7.3775, longitude: 3.947 },
+        cargoType: 'Payment smoke test cargo',
+        quantity: '1 truckload',
+        weightTons: 8,
+        volumeM3: 24,
+        truckType: 'Box truck',
+        pickupContactPhone: '+2348000000000',
+        quoteToken: quote.quoteToken,
+      },
+    });
+    console.log('OK shipment created', shipment.id);
+  }
 
   const payment = await request('/v1/payments/escrow/initialize', {
     method: 'POST',
