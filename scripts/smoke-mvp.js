@@ -75,11 +75,6 @@ async function main() {
     return readiness.ok ? 'deployable' : 'needs attention';
   });
 
-  await check('integrations status', async () => {
-    const integrations = await request('/v1/integrations/status');
-    return `payments=${integrations.payments?.mode || 'unknown'}, kyc=${integrations.kyc?.mode || 'unknown'}, maps=${integrations.maps?.mode || 'unknown'}`;
-  });
-
   await check('customer login', async () => {
     customer = await login(process.env.SMOKE_CUSTOMER_EMAIL || 'customer@tracko.ng', 'CUSTOMER');
     if (!customer.accessToken) throw new Error('Customer login did not return an access token.');
@@ -96,6 +91,12 @@ async function main() {
     admin = await login(process.env.SMOKE_ADMIN_EMAIL || 'admin@tracko.ng', 'ADMIN');
     if (!admin.accessToken) throw new Error('Admin login did not return an access token.');
     return admin.user?.email || 'admin';
+  });
+
+  await check('integrations status', async () => {
+    if (!admin?.accessToken) throw new Error('Admin session missing.');
+    const integrations = await request('/v1/integrations/status', { accessToken: admin.accessToken });
+    return `payments=${integrations.payments?.mode || 'unknown'}, kyc=${integrations.kyc?.mode || 'unknown'}, maps=${integrations.maps?.mode || 'unknown'}`;
   });
 
   await check('customer KYC status', async () => {

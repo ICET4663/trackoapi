@@ -31,6 +31,24 @@ npm run smoke:production
 The preflight never logs in, creates shipments, charges a card, or changes live
 data. The authenticated workflow smoke tests remain separate.
 
+## Authenticated read-only gates
+
+After the production preflight passes, verify the demo sessions and protected
+operations data without creating or changing production records:
+
+```powershell
+$env:API_BASE_URL="https://trackoapi.vercel.app"
+$env:SMOKE_PASSWORD="password123"
+npm run smoke:auth
+npm run smoke:mvp
+```
+
+`smoke:auth` validates customer, driver, dispatcher, and admin identity plus
+anonymous/invalid-login rejection. `smoke:mvp` validates KYC status, operations
+readiness, assignment availability, integration status, and the escrow ledger.
+Override the role-specific email or password variables when demo credentials
+change, for example `SMOKE_ADMIN_EMAIL` or `SMOKE_ADMIN_PASSWORD`.
+
 ## Required manual validation
 
 - Register a new customer with a real email and complete OTP verification.
