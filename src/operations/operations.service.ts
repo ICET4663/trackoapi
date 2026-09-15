@@ -33,6 +33,9 @@ type AssignmentQueueShipmentRow = {
   assignedVehicleId: string | null;
   assignmentStatus: string | null;
   assignmentOfferedAt: Date | string | null;
+  proposedPriceKobo: number | null;
+  proposedNote: string | null;
+  proposedAt: Date | string | null;
   rejectedDriverIds: string[] | null;
   createdAt: Date | string;
 };
@@ -152,6 +155,7 @@ export class OperationsService {
             da."id" as "assignmentId", da."driverId" as "assignedDriverId",
             da."vehicleId" as "assignedVehicleId", da."status"::text as "assignmentStatus",
             da."offeredAt" as "assignmentOfferedAt",
+            da."proposedPriceKobo", da."proposedNote", da."proposedAt",
             coalesce((
               select json_agg(distinct history."driverId")
               from "DriverAssignment" history
@@ -161,7 +165,7 @@ export class OperationsService {
           from "Shipment" s
           join "Escrow" e on e."shipmentId" = s."id"
           left join lateral (
-            select "id", "driverId", "vehicleId", "status", "offeredAt"
+            select "id", "driverId", "vehicleId", "status", "offeredAt", "proposedPriceKobo", "proposedNote", "proposedAt"
             from "DriverAssignment"
             where "shipmentId" = s."id"
             order by "offeredAt" desc
@@ -235,6 +239,9 @@ export class OperationsService {
                 expiresAt: shipment.assignmentOfferedAt
                   ? new Date(new Date(shipment.assignmentOfferedAt).getTime() + offerWindow.validityMinutes * 60_000).toISOString()
                   : null,
+                proposedPriceKobo: shipment.proposedPriceKobo,
+                proposedNote: shipment.proposedNote,
+                proposedAt: this.isoDate(shipment.proposedAt),
               }
             : null,
           createdAt: this.isoDate(shipment.createdAt),

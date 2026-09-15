@@ -729,3 +729,132 @@ describe('ShipmentsService automatic best-match assignment', () => {
     );
   });
 });
+
+describe('ShipmentsService driver counteroffers', () => {
+  function buildService(overrides: {
+    assignment?: Record<string, unknown> | null;
+    updatedAssignment?: Record<string, unknown>;
+  } = {}) {
+    const baseAssignment = {
+      id: 'assignment-1',
+      driverId: 'driver-1',
+      shipmentId: 'shipment-1',
+      status: 'OFFERED',
+      offeredAt: new Date(),
+      proposedPriceKobo: null,
+      shipment: { id: 'shipment-1', status: 'ESCROW_FUNDED', customerId: 'customer-1', escrow: { amount: 5_000_000 } },
+    };
+    const assignment = overrides.assignment === undefined ? baseAssignment : overrides.assignment;
+    const updatedAssignment = overrides.updatedAssignment ?? { ...baseAssignment, driver: undefined, vehicle: undefined };
+
+    const prisma = {
+      driverAssignment: {
+        findUnique: jest.fn().mockResolvedValue(assignment),
+        update: jest.fn().mockResolvedValue(updatedAssignment),
+      },
+      shipment: { update: jest.fn().mockResolvedValue(undefined) },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService;
+    const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
+    return { service, prisma, notifications };
+  }
+
+  describe('proposeCounterOffer', () => {
+    it('rejects a non-positive amount before touching the database', async () => {
+      const { service, prisma } = buildService();
+      await expect(service.proposeCounterOffer('assignment-1', 'driver-1', 0, 'too low')).rejects.toThrow(
+        'Enter a valid proposed amount.',
+      );
+      expect((prisma.driverAssignment.findUnique as jest.Mock)).not.toHaveBeenCalled();
+    });
+
+    it('refuses a driver proposing on an assignment that belongs to someone else', async () => {
+      const { service } = buildService({ assignment: { id: 'a1', driverId: 'someone-else', status: 'OFFERED', shipment: {} } });
+      await expect(service.proposeCounterOffer('assignment-1', 'driver-1', 400_000, undefined)).rejects.toThrow(
+        'This assignment belongs to another driver.',
+      );
+    });
+
+    it('refuses a counteroffer once the offer is no longer open', async () => {
+      const { service } = buildService({ assignment: { id: 'a1', driverId: 'driver-1', status: 'ACCEPTED', shipment: {} } });
+      await expect(service.proposeCounterOffer('assignment-1', 'driver-1', 400_000, undefined)).rejects.toThrow(
+        'This load offer is no longer open.',
+      );
+    });
+
+    it('records the proposal and notifies the customer', async () => {
+      const { service, prisma, notifications } = buildService();
+
+      await service.proposeCounterOffer('assignment-1', 'driver-1', 480_000, 'Backhaul discount');
+
+      expect(prisma.driverAssignment.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'assignment-1' },
+        data: { proposedPriceKobo: 480_000, proposedNote: 'Backhaul discount', proposedAt: expect.any(Date) },
+      }));
+      expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'customer-1', title: 'Driver proposed a different price' }));
+    });
+  });
+
+  describe('respondToCounterOffer', () => {
+    const pendingAssignment = {
+      id: 'assignment-1',
+      driverId: 'driver-1',
+      shipmentId: 'shipment-1',
+      offeredAt: new Date(),
+      proposedPriceKobo: 480_000,
+      shipment: { id: 'shipment-1', status: 'ESCROW_FUNDED', escrow: { amount: 5_000_000 } },
+    };
+
+    it('blocks anyone but dispatch or an admin', async () => {
+      const { service } = buildService();
+      await expect(service.respondToCounterOffer('assignment-1', 'CUSTOMER', 'ACCEPT')).rejects.toThrow(
+        'Only dispatch or an admin can respond to a driver counteroffer.',
+      );
+    });
+
+    it('refuses to respond when there is no pending counteroffer', async () => {
+      const { service } = buildService({ assignment: { ...pendingAssignment, proposedPriceKobo: null } });
+      await expect(service.respondToCounterOffer('assignment-1', 'ADMIN', 'ACCEPT')).rejects.toThrow(
+        'This assignment has no pending counteroffer.',
+      );
+    });
+
+    it('never accepts a counteroffer above the amount already funded in escrow', async () => {
+      const { service, prisma } = buildService({
+        assignment: { ...pendingAssignment, proposedPriceKobo: 6_000_000, shipment: { ...pendingAssignment.shipment, escrow: { amount: 5_000_000 } } },
+      });
+      await expect(service.respondToCounterOffer('assignment-1', 'ADMIN', 'ACCEPT')).rejects.toThrow(
+        /cannot be accepted without additional customer payment/,
+      );
+      expect(prisma.shipment.update).not.toHaveBeenCalled();
+    });
+
+    it('accepting a counteroffer at or below the funded amount updates the quote and clears the proposal', async () => {
+      const { service, prisma, notifications } = buildService({ assignment: pendingAssignment });
+
+      await service.respondToCounterOffer('assignment-1', 'ADMIN', 'ACCEPT');
+
+      expect(prisma.shipment.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'shipment-1' },
+        data: expect.objectContaining({ quotedPriceKobo: 480_000 }),
+      }));
+      expect(prisma.driverAssignment.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: { proposedPriceKobo: null, proposedNote: null, proposedAt: null },
+      }));
+      expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', title: 'Your proposed price was accepted' }));
+    });
+
+    it('rejecting a counteroffer leaves the quote untouched but clears the proposal', async () => {
+      const { service, prisma, notifications } = buildService({ assignment: pendingAssignment });
+
+      await service.respondToCounterOffer('assignment-1', 'DISPATCHER', 'REJECT');
+
+      expect(prisma.shipment.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ quotedPriceKobo: expect.anything() }) }));
+      expect(prisma.driverAssignment.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: { proposedPriceKobo: null, proposedNote: null, proposedAt: null },
+      }));
+      expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', title: 'Your proposed price was declined' }));
+    });
+  });
+});

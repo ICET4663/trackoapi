@@ -68,6 +68,9 @@ type AssignmentRecordInput = {
   offeredAt: Date | string;
   acceptedAt?: Date | string | null;
   rejectedAt?: Date | string | null;
+  proposedPriceKobo?: number | null;
+  proposedNote?: string | null;
+  proposedAt?: Date | string | null;
   shipment?: ShipmentRecordInput;
   driver?: {
     id: string;
@@ -722,6 +725,127 @@ export class ShipmentsService {
       if (error instanceof HttpException) throw error;
       this.logger.error(`respondToAssignment(${assignmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
       throw new InternalServerErrorException('Could not update this driver assignment. Please try again.');
+    }
+  }
+
+  // A driver's counteroffer on an open load. This never moves money by itself - escrow
+  // is already funded (at the original quote) by the time a driver ever sees an OFFERED
+  // assignment, so "accepting" a counteroffer below the funded amount only updates the
+  // quote the driver will be paid against; any refund of the difference to the customer
+  // remains a separate, explicit admin action via the existing escrow refund tool. A
+  // counteroffer above the funded amount can never be accepted here - that needs a fresh
+  // quote and a new customer payment, not a silent price bump on an already-paid escrow.
+  async proposeCounterOffer(assignmentId: string, driverId: string, amountKobo: number, note: string | undefined) {
+    if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
+      throw new BadRequestException('Enter a valid proposed amount.');
+    }
+    try {
+      const assignment = await this.prisma.driverAssignment.findUnique({
+        where: { id: assignmentId },
+        include: { shipment: true },
+      });
+      if (!assignment) throw new NotFoundException('Assignment not found.');
+      if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
+      if (assignment.status !== 'OFFERED') throw new BadRequestException('This load offer is no longer open.');
+
+      const updated = await this.prisma.driverAssignment.update({
+        where: { id: assignmentId },
+        data: { proposedPriceKobo: Math.round(amountKobo), proposedNote: note?.trim() || null, proposedAt: new Date() },
+        include: {
+          driver: { include: { profile: true } },
+          vehicle: true,
+          shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
+        },
+      });
+
+      await this.updateShipmentTimeline(
+        assignment.shipmentId,
+        assignment.shipment.status,
+        `Driver proposed ${this.formatMoney(amountKobo)}${note?.trim() ? `: ${note.trim()}` : '.'}`,
+      );
+      await this.notifications.create({
+        userId: assignment.shipment.customerId,
+        title: 'Driver proposed a different price',
+        body: `Your matched driver proposed ${this.formatMoney(amountKobo)} for this shipment. Dispatch will review it.`,
+        tone: 'INFO',
+        entity: 'Shipment',
+        entityId: assignment.shipmentId,
+        actionUrl: `/shipments/${assignment.shipmentId}`,
+      }).catch(() => null);
+
+      const validityMinutes = await this.assignmentOfferValidityMinutes();
+      return this.toAssignmentRecord(updated, validityMinutes);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error(`proposeCounterOffer(${assignmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new InternalServerErrorException('Could not submit this counteroffer. Please try again.');
+    }
+  }
+
+  async respondToCounterOffer(assignmentId: string, actorRole: UserRole, decision: 'ACCEPT' | 'REJECT') {
+    if (actorRole !== 'ADMIN' && actorRole !== 'DISPATCHER') {
+      throw new ForbiddenException('Only dispatch or an admin can respond to a driver counteroffer.');
+    }
+    try {
+      const assignment = await this.prisma.driverAssignment.findUnique({
+        where: { id: assignmentId },
+        include: { shipment: { include: { escrow: true } } },
+      });
+      if (!assignment) throw new NotFoundException('Assignment not found.');
+      if (assignment.proposedPriceKobo == null) throw new BadRequestException('This assignment has no pending counteroffer.');
+
+      const proposedKobo = assignment.proposedPriceKobo;
+      if (decision === 'ACCEPT') {
+        const fundedKobo = assignment.shipment.escrow?.amount ?? 0;
+        if (proposedKobo > fundedKobo) {
+          throw new BadRequestException(
+            `Escrow is funded for ${this.formatMoney(fundedKobo)}. A higher price cannot be accepted without additional customer payment - decline this counteroffer or cancel and re-quote the shipment.`,
+          );
+        }
+        await this.prisma.shipment.update({
+          where: { id: assignment.shipmentId },
+          data: {
+            quotedPriceKobo: proposedKobo,
+            timeline: { create: { status: assignment.shipment.status, note: `Dispatch accepted the driver's proposed ${this.formatMoney(proposedKobo)}.` } },
+          },
+        });
+      } else {
+        await this.updateShipmentTimeline(
+          assignment.shipmentId,
+          assignment.shipment.status,
+          'Dispatch declined the driver’s proposed price. The original quote stands.',
+        );
+      }
+
+      const updated = await this.prisma.driverAssignment.update({
+        where: { id: assignmentId },
+        data: { proposedPriceKobo: null, proposedNote: null, proposedAt: null },
+        include: {
+          driver: { include: { profile: true } },
+          vehicle: true,
+          shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
+        },
+      });
+
+      await this.notifications.create({
+        userId: assignment.driverId,
+        title: decision === 'ACCEPT' ? 'Your proposed price was accepted' : 'Your proposed price was declined',
+        body:
+          decision === 'ACCEPT'
+            ? `Dispatch accepted ${this.formatMoney(proposedKobo)} for this load.`
+            : 'Dispatch kept the original quote for this load.',
+        tone: decision === 'ACCEPT' ? 'SUCCESS' : 'WARNING',
+        entity: 'Shipment',
+        entityId: assignment.shipmentId,
+        actionUrl: `/shipments/${assignment.shipmentId}`,
+      }).catch(() => null);
+
+      const validityMinutes = await this.assignmentOfferValidityMinutes();
+      return this.toAssignmentRecord(updated, validityMinutes);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error(`respondToCounterOffer(${assignmentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new InternalServerErrorException('Could not respond to this counteroffer. Please try again.');
     }
   }
 
@@ -1710,6 +1834,10 @@ export class ShipmentsService {
         assignment.acceptedAt instanceof Date ? assignment.acceptedAt.toISOString() : assignment.acceptedAt ?? undefined,
       rejectedAt:
         assignment.rejectedAt instanceof Date ? assignment.rejectedAt.toISOString() : assignment.rejectedAt ?? undefined,
+      proposedPriceKobo: assignment.proposedPriceKobo ?? undefined,
+      proposedNote: assignment.proposedNote ?? undefined,
+      proposedAt:
+        assignment.proposedAt instanceof Date ? assignment.proposedAt.toISOString() : assignment.proposedAt ?? undefined,
       driver: assignment.driver
         ? {
             id: assignment.driver.id,

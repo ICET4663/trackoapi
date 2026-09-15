@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { RequestUserService } from '../common/request-user.service';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
@@ -52,6 +52,29 @@ export class ShipmentsController {
   async rejectAssignment(@Param('assignmentId') assignmentId: string, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
     return this.shipmentsService.respondToAssignment(assignmentId, user.sub, 'REJECT');
+  }
+
+  @Post('assignments/:assignmentId/counter-offer')
+  async proposeCounterOffer(
+    @Param('assignmentId') assignmentId: string,
+    @Body() body: { amountKobo?: number; note?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
+    return this.shipmentsService.proposeCounterOffer(assignmentId, user.sub, Number(body?.amountKobo), body?.note);
+  }
+
+  @Post('assignments/:assignmentId/counter-offer/respond')
+  async respondToCounterOffer(
+    @Param('assignmentId') assignmentId: string,
+    @Body() body: { decision?: 'ACCEPT' | 'REJECT' },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    if (body?.decision !== 'ACCEPT' && body?.decision !== 'REJECT') {
+      throw new BadRequestException('decision must be ACCEPT or REJECT.');
+    }
+    return this.shipmentsService.respondToCounterOffer(assignmentId, user.role, body.decision);
   }
 
   @Post('assignments/:assignmentId/cancel')

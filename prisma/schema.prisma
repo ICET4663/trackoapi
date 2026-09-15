@@ -352,6 +352,12 @@ model DriverAssignment {
   acceptedAt DateTime?
   rejectedAt DateTime?
 
+  // A driver's counteroffer on the quoted price for this offer. Cleared (all null)
+  // once dispatch accepts or rejects it, or once the driver accepts the offer as-is.
+  proposedPriceKobo Int?
+  proposedNote      String?
+  proposedAt        DateTime?
+
   shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
   driver   User     @relation(fields: [driverId], references: [id])
   vehicle  Vehicle? @relation(fields: [vehicleId], references: [id])

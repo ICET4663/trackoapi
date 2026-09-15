@@ -60,3 +60,47 @@ describe('ShipmentsController escrow role routing', () => {
     expect(shipments.refundEscrow).toHaveBeenCalledWith('shipment-1', 'ADMIN', 'Refunded.');
   });
 });
+
+describe('ShipmentsController counteroffer routing', () => {
+  function setup(role: 'DRIVER' | 'ADMIN' | 'DISPATCHER' | 'CUSTOMER') {
+    const shipments = {
+      proposeCounterOffer: jest.fn().mockResolvedValue({ id: 'assignment-1', proposedPriceKobo: 480_000 }),
+      respondToCounterOffer: jest.fn().mockResolvedValue({ id: 'assignment-1', proposedPriceKobo: null }),
+    } as unknown as ShipmentsService;
+    const requestUser = {
+      fromAuthorizationHeader: jest.fn().mockResolvedValue({ sub: 'driver-1', role: 'DRIVER', email: 'd@tracko.ng', verificationStatus: 'VERIFIED' }),
+      requireRole: jest.fn().mockResolvedValue({ sub: `${role.toLowerCase()}-1`, role, email: `${role.toLowerCase()}@tracko.ng`, verificationStatus: 'VERIFIED' }),
+    } as unknown as RequestUserService;
+    return {
+      controller: new ShipmentsController(shipments, requestUser),
+      shipments: shipments as unknown as { proposeCounterOffer: jest.Mock; respondToCounterOffer: jest.Mock },
+      requestUser: requestUser as unknown as { fromAuthorizationHeader: jest.Mock; requireRole: jest.Mock },
+    };
+  }
+
+  it('lets an authenticated driver propose a counteroffer', async () => {
+    const { controller, shipments } = setup('DRIVER');
+
+    await controller.proposeCounterOffer('assignment-1', { amountKobo: 480_000, note: 'Backhaul' }, 'Bearer token');
+
+    expect(shipments.proposeCounterOffer).toHaveBeenCalledWith('assignment-1', 'driver-1', 480_000, 'Backhaul');
+  });
+
+  it('restricts responding to a counteroffer to admin or dispatcher', async () => {
+    const { controller, shipments, requestUser } = setup('ADMIN');
+
+    await controller.respondToCounterOffer('assignment-1', { decision: 'ACCEPT' }, 'Bearer token');
+
+    expect(requestUser.requireRole).toHaveBeenCalledWith('Bearer token', ['ADMIN', 'DISPATCHER']);
+    expect(shipments.respondToCounterOffer).toHaveBeenCalledWith('assignment-1', 'ADMIN', 'ACCEPT');
+  });
+
+  it('rejects an invalid decision before reaching the service', async () => {
+    const { controller, shipments } = setup('DISPATCHER');
+
+    await expect(controller.respondToCounterOffer('assignment-1', { decision: 'MAYBE' as never }, 'Bearer token')).rejects.toThrow(
+      'decision must be ACCEPT or REJECT.',
+    );
+    expect(shipments.respondToCounterOffer).not.toHaveBeenCalled();
+  });
+});
