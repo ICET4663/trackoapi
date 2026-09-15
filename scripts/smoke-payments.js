@@ -58,13 +58,47 @@ async function main() {
 
   const health = await request('/v1/health');
   console.log('OK health', health.service || 'tracko-api');
-
-  const integrations = await request('/v1/integrations/status');
-  console.log('OK payment mode', integrations.payments?.provider, integrations.payments?.mode);
+  const paymentIntegration = health.integrations?.find?.((integration) => integration.name === 'payments');
+  if (paymentIntegration?.mode !== 'configured') {
+    throw new Error(`Paystack is not configured (${paymentIntegration?.mode || 'unknown'}).`);
+  }
+  console.log('OK payment mode paystack configured');
 
   const customerEmail = process.env.SMOKE_CUSTOMER_EMAIL || 'customer@tracko.ng';
   const customer = await login(customerEmail, 'CUSTOMER');
   console.log('OK customer login', customer.user?.email || 'customer');
+
+  if (process.env.PAYSTACK_VERIFY_REFERENCE) {
+    const reference = process.env.PAYSTACK_VERIFY_REFERENCE;
+    const verification = await request(`/v1/payments/paystack/verify/${encodeURIComponent(reference)}`, {
+      accessToken: customer.accessToken,
+    });
+    if (!verification.verified) {
+      throw new Error(verification.message || `Paystack reference ${reference} is not verified.`);
+    }
+    console.log('OK Paystack reference verified', reference);
+    console.log('DONE Tracko payment verification passed');
+    return;
+  }
+
+  const quoteInput = {
+    originLatitude: 6.5244,
+    originLongitude: 3.3792,
+    destinationLatitude: 7.3775,
+    destinationLongitude: 3.947,
+    truckType: 'Box truck',
+    weightTons: 8,
+    volumeM3: 24,
+  };
+  const quote = await request('/v1/maps/route-estimate', {
+    method: 'POST',
+    accessToken: customer.accessToken,
+    body: quoteInput,
+  });
+  if (!quote.quoteToken || !quote.quotedPriceKobo) {
+    throw new Error('The route estimate did not return a signed quote.');
+  }
+  console.log('OK signed quote', `${quote.distanceKm}km`, `${quote.quotedPriceKobo} kobo`);
 
   const shipment = await request('/v1/shipments', {
     method: 'POST',
@@ -77,8 +111,10 @@ async function main() {
       cargoType: 'Payment smoke test cargo',
       quantity: '1 truckload',
       weightTons: 8,
+      volumeM3: 24,
       truckType: 'Box truck',
       pickupContactPhone: '+2348000000000',
+      quoteToken: quote.quoteToken,
     },
   });
   console.log('OK shipment created', shipment.id);
@@ -88,15 +124,17 @@ async function main() {
     accessToken: customer.accessToken,
     body: {
       shipmentId: shipment.id,
-      amount: shipment.quotedPriceKobo || 25000000,
       currency: 'NGN',
-      customerEmail: customer.user?.email,
+      method: process.env.SMOKE_PAYMENT_METHOD || 'card',
+      callbackUrl: process.env.SMOKE_PAYMENT_CALLBACK_URL || 'https://www.trako.com.ng/customer/escrow',
     },
   });
   console.log('OK escrow initialized', payment.provider, payment.providerReference);
 
   if (payment.authorizationUrl) {
     console.log('OK checkout URL returned', payment.authorizationUrl);
+    console.log('NEXT Complete the Paystack test checkout, then verify this reference:');
+    console.log(`$env:PAYSTACK_VERIFY_REFERENCE="${payment.providerReference}"; npm run smoke:payments`);
   } else {
     console.log('OK mock/no-checkout mode', payment.message);
   }
@@ -105,15 +143,6 @@ async function main() {
     accessToken: customer.accessToken,
   });
   console.log('OK escrow status', escrow.status);
-
-  if (process.env.PAYSTACK_VERIFY_REFERENCE) {
-    const verification = await request(`/v1/payments/paystack/verify/${encodeURIComponent(process.env.PAYSTACK_VERIFY_REFERENCE)}`, {
-      accessToken: customer.accessToken,
-    });
-    console.log('OK Paystack reference checked', verification.verified, verification.message);
-  } else {
-    console.log('SKIP Paystack verification: set PAYSTACK_VERIFY_REFERENCE after making a test payment.');
-  }
 
   console.log('DONE Tracko payment smoke passed');
 }
