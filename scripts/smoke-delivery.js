@@ -50,12 +50,28 @@ async function main() {
   console.log(`Tracko delivery smoke: ${API_BASE_URL}`);
   console.log(`Shipment: ${SHIPMENT_ID}`);
 
-  const [customer, driver, admin] = await Promise.all([
+  const [customer, driver] = await Promise.all([
     login('CUSTOMER', 'customer@tracko.ng'),
     login('DRIVER', 'driver@tracko.ng'),
-    login('ADMIN', 'admin@tracko.ng'),
   ]);
-  console.log('OK customer, driver and admin login');
+  console.log('OK customer and driver login');
+
+  let escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow`, {
+    accessToken: customer.accessToken,
+  });
+  if (escrow.status === 'RELEASED') {
+    console.log('OK escrow was already released');
+    const earnings = await request('/v1/driver/earnings', { accessToken: driver.accessToken });
+    if (!earnings.availableBalance || earnings.availableBalance <= 0) {
+      throw new Error('Driver earnings are missing even though escrow is released.');
+    }
+    console.log('OK driver earnings available', earnings.availableBalanceLabel || earnings.availableBalance);
+    console.log('DONE Tracko funded shipment was already completed through driver earnings');
+    return;
+  }
+
+  const admin = await login('ADMIN', 'admin@tracko.ng');
+  console.log('OK admin login');
 
   const assignments = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/assignments`, {
     accessToken: admin.accessToken,
@@ -126,20 +142,31 @@ async function main() {
     console.log('OK shipment already delivered');
   }
 
-  for (const check of ['customerDeliveryConfirmed', 'disputeWindowClear']) {
-    await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow/checks/${check}`, {
-      method: 'POST',
-      accessToken: customer.accessToken,
-    });
-    console.log('OK customer check', check);
-  }
-  await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow/checks/platformApproved`, {
-    method: 'POST',
-    accessToken: admin.accessToken,
+  escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow`, {
+    accessToken: customer.accessToken,
   });
-  console.log('OK admin platform approval');
+  for (const check of ['customerDeliveryConfirmed', 'disputeWindowClear']) {
+    if (!escrow.releaseChecks?.[check]) {
+      escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow/checks/${check}`, {
+        method: 'POST',
+        accessToken: customer.accessToken,
+      });
+      console.log('OK customer check', check);
+    } else {
+      console.log('OK customer check already complete', check);
+    }
+  }
+  if (!escrow.releaseChecks?.platformApproved) {
+    escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow/checks/platformApproved`, {
+      method: 'POST',
+      accessToken: admin.accessToken,
+    });
+    console.log('OK admin platform approval');
+  } else {
+    console.log('OK admin platform approval already complete');
+  }
 
-  let escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow`, {
+  escrow = await request(`/v1/shipments/${encodeURIComponent(SHIPMENT_ID)}/escrow`, {
     accessToken: admin.accessToken,
   });
   if (escrow.status !== 'RELEASED') {

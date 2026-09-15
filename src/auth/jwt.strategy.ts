@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -20,8 +20,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('A valid login session is required.');
     }
 
-    const user = await this.users.findById(payload.sub).catch(() => null);
-    if (!user || !user.isActive || user.verificationStatus === 'SUSPENDED') {
+    const user = await this.findSessionUser(payload.sub);
+    if (!user.isActive || user.verificationStatus === 'SUSPENDED') {
       throw new UnauthorizedException('This account is no longer active.');
     }
 
@@ -35,5 +35,27 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       email: user.email,
       verificationStatus: user.verificationStatus,
     };
+  }
+
+  private async findSessionUser(userId: string) {
+    try {
+      return await this.users.findById(userId);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw new UnauthorizedException('This account is no longer active.');
+      }
+    }
+
+    // Serverless database pools can briefly reject a connection. Retry once, then
+    // report availability trouble without falsely telling the client to discard its session.
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    try {
+      return await this.users.findById(userId);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw new UnauthorizedException('This account is no longer active.');
+      }
+      throw new ServiceUnavailableException('Login session validation is temporarily unavailable. Please try again.');
+    }
   }
 }
