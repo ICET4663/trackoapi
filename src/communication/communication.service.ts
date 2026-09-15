@@ -242,11 +242,14 @@ export class CommunicationService {
       });
     await this.assertConversationAccess(conversation, user);
 
-    const translation = await this.translateForRecipient(
-      conversation,
-      senderId,
-      dto,
-    ).catch(() => null);
+    const suppliedEnglishTranscript = dto.englishTranscript?.trim();
+    const translation = suppliedEnglishTranscript
+      ? null
+      : await this.translateForRecipient(
+          conversation,
+          senderId,
+          dto,
+        ).catch(() => null);
 
     let message;
     try {
@@ -258,11 +261,14 @@ export class CommunicationService {
           kind: dto.kind,
           body: dto.body,
           attachmentUrl: dto.attachmentUrl ?? dto.attachmentUri,
-          transcript: dto.transcript,
+          transcript: dto.sourceTranscript?.trim() || dto.transcript,
           durationSeconds: dto.durationSeconds,
-          translatedText: translation?.translatedText,
-          translatedLanguage: translation?.translatedLanguage,
-          sourceLanguage: translation?.sourceLanguage,
+          translatedText:
+            suppliedEnglishTranscript || translation?.translatedText,
+          translatedLanguage: suppliedEnglishTranscript
+            ? "en"
+            : translation?.translatedLanguage,
+          sourceLanguage: dto.sourceLanguage ?? translation?.sourceLanguage,
         },
         include: { sender: { include: { profile: true } } },
       });

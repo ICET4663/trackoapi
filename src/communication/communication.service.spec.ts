@@ -285,6 +285,55 @@ describe("CommunicationService.sendMessage translation for the recipient", () =>
 
     expect(result.id).toBe("msg-1");
   });
+
+  it("stores both the original voice transcript and its supplied English translation", async () => {
+    const translate = jest.fn();
+    const messageCreate = jest.fn().mockResolvedValue({
+      id: "msg-voice",
+      conversationId: "conv-1",
+      senderId: "customer-1",
+      kind: "VOICE",
+      body: "Voice note sent",
+      attachmentUrl: "https://media.example/voice.webm",
+      transcript: "Ututu oma",
+      durationSeconds: 4,
+      translatedText: "Good morning",
+      translatedLanguage: "en",
+      sourceLanguage: "ig",
+      deliveryStatus: "SENT",
+      readAt: null,
+      createdAt: new Date(),
+    });
+    const prisma = buildPrisma({
+      message: { create: messageCreate, findMany: jest.fn() },
+    });
+    const service = buildService(prisma, translate);
+
+    await service.sendMessage(
+      "conv-1",
+      "customer-1",
+      {
+        kind: "VOICE",
+        body: "Voice note sent",
+        sourceTranscript: "Ututu oma",
+        englishTranscript: "Good morning",
+        sourceLanguage: "ig",
+      } as never,
+      customer,
+    );
+
+    expect(translate).not.toHaveBeenCalled();
+    expect(messageCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          transcript: "Ututu oma",
+          translatedText: "Good morning",
+          translatedLanguage: "en",
+          sourceLanguage: "ig",
+        }),
+      }),
+    );
+  });
 });
 
 // transcribeVoiceNote() used to be an unconditional stub that never called anything real.

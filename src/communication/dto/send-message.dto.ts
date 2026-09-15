@@ -30,6 +30,18 @@ export class SendMessageDto {
   transcript?: string;
 
   @IsOptional()
+  @IsString()
+  sourceTranscript?: string;
+
+  @IsOptional()
+  @IsString()
+  englishTranscript?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceLanguage?: string;
+
+  @IsOptional()
   @IsNumber()
   durationSeconds?: number;
 }
