@@ -1732,6 +1732,134 @@ export class SettingsService {
     return vehicle;
   }
 
+  private isVehicleDocumentsReady(documents: Array<{ type: string; state: string; expires: Date | string | null }>) {
+    const now = Date.now();
+    return this.requiredVehicleDocuments.every((required) => documents.some((document) =>
+      document.type === required.type
+      && document.state === 'VERIFIED'
+      && (!document.expires || new Date(document.expires).getTime() > now),
+    ));
+  }
+
+  // Without this, no real (non-seed) driver could ever be matched to a shipment: both
+  // manual dispatch (shipments.service.ts's offerAssignment()) and automatic best-match
+  // only ever consider a driver's `driverVehicles` relation, and nothing else in the app
+  // ever wrote Vehicle.assignedDriverId - a registered truck and a verified driver could
+  // exist side by side forever with no way to link them.
+  async fleetAssignments() {
+    try {
+      const [vehicles, drivers] = await Promise.all([
+        this.prisma.vehicle.findMany({
+          where: { isActive: true },
+          include: {
+            owner: { include: { profile: true } },
+            assignedDriver: { include: { profile: true } },
+            documents: { select: { type: true, state: true, expires: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+        }),
+        this.prisma.user.findMany({
+          where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
+          include: {
+            profile: true,
+            driverVehicles: { where: { isActive: true }, select: { id: true, plateNumber: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+        }),
+      ]);
+      return {
+        vehicles: vehicles.map((vehicle) => ({
+          id: vehicle.id,
+          plateNumber: vehicle.plateNumber,
+          type: vehicle.type,
+          capacityKg: vehicle.capacityKg,
+          capacityM3: vehicle.capacityM3,
+          ownerId: vehicle.ownerId,
+          ownerName: vehicle.owner.profile?.fullName ?? vehicle.owner.email,
+          documentsReady: this.isVehicleDocumentsReady(vehicle.documents),
+          assignedDriverId: vehicle.assignedDriverId,
+          assignedDriverName: vehicle.assignedDriver
+            ? (vehicle.assignedDriver.profile?.fullName ?? vehicle.assignedDriver.email)
+            : null,
+        })),
+        drivers: drivers.map((driver) => ({
+          id: driver.id,
+          fullName: driver.profile?.fullName ?? driver.email,
+          email: driver.email,
+          phone: driver.phone,
+          assignedVehicleId: driver.driverVehicles[0]?.id ?? null,
+          assignedVehiclePlate: driver.driverVehicles[0]?.plateNumber ?? null,
+        })),
+      };
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load fleet assignments. Please try again: ${this.errorMessage(error)}`);
+    }
+  }
+
+  async assignDriverToVehicle(vehicleId: string, driverId: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+      include: { documents: { select: { type: true, state: true, expires: true } } },
+    });
+    if (!vehicle) throw new NotFoundException('Truck not found.');
+    if (!this.isVehicleDocumentsReady(vehicle.documents)) {
+      throw new BadRequestException('This truck cannot be assigned until registration, insurance, and roadworthiness documents are verified and current.');
+    }
+    const driver = await this.prisma.user.findUnique({ where: { id: driverId } });
+    if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
+      throw new BadRequestException('Only KYC-verified active drivers can be assigned to a truck.');
+    }
+
+    // A driver drives one truck at a time - clear any other vehicle they were on before
+    // linking the new one, so matching logic never has to reason about a driver "having"
+    // more than one active assignment source.
+    const [, updated] = await this.prisma.$transaction([
+      this.prisma.vehicle.updateMany({
+        where: { assignedDriverId: driverId, id: { not: vehicleId } },
+        data: { assignedDriverId: null },
+      }),
+      this.prisma.vehicle.update({ where: { id: vehicleId }, data: { assignedDriverId: driverId } }),
+    ]).catch((error) => {
+      throw new InternalServerErrorException(`Could not assign this driver: ${this.errorMessage(error)}`);
+    });
+
+    await Promise.all([
+      this.notifications.create({
+        userId: driverId, role: 'DRIVER', title: 'Truck assigned',
+        body: `You've been assigned to drive ${updated.plateNumber}. You can now receive shipment offers.`,
+        tone: 'SUCCESS', entity: 'Vehicle', entityId: updated.id, actionUrl: '/driver/jobs',
+      }),
+      this.notifications.create({
+        userId: vehicle.ownerId, title: 'Driver assigned to your truck',
+        body: `Trako operations assigned a driver to ${updated.plateNumber}.`,
+        tone: 'INFO', entity: 'Vehicle', entityId: updated.id, actionUrl: `/owner/vehicle-documents/${updated.id}`,
+      }),
+    ]);
+
+    return { id: updated.id, plateNumber: updated.plateNumber, assignedDriverId: updated.assignedDriverId };
+  }
+
+  async unassignDriverFromVehicle(vehicleId: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle) throw new NotFoundException('Truck not found.');
+    if (!vehicle.assignedDriverId) return { id: vehicle.id, plateNumber: vehicle.plateNumber, assignedDriverId: null };
+
+    const previousDriverId = vehicle.assignedDriverId;
+    const updated = await this.prisma.vehicle.update({ where: { id: vehicleId }, data: { assignedDriverId: null } }).catch((error) => {
+      throw new InternalServerErrorException(`Could not unassign this driver: ${this.errorMessage(error)}`);
+    });
+
+    await this.notifications.create({
+      userId: previousDriverId, role: 'DRIVER', title: 'Truck unassigned',
+      body: `You are no longer assigned to ${updated.plateNumber}.`,
+      tone: 'WARNING', entity: 'Vehicle', entityId: updated.id,
+    });
+
+    return { id: updated.id, plateNumber: updated.plateNumber, assignedDriverId: null };
+  }
+
   // A real read failure used to be indistinguishable from "no row yet" (the normal state
   // before a driver has ever touched a safety toggle) - both fell back to the same fake
   // defaults, including a fabricated emergencyContact phone number that was never

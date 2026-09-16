@@ -12,6 +12,7 @@ type StaffInput = {
   driverEmail?: string;
   adminEmail?: string;
   dispatcherEmail?: string;
+  truckOwnerEmail?: string;
 };
 
 type StaffAccount = {
@@ -62,6 +63,12 @@ export class DemoBootstrapController {
         fullName: 'Trako Dispatcher',
         role: 'DISPATCHER',
       },
+      {
+        email: (body.truckOwnerEmail ?? 'truckowner@tracko.ng').trim().toLowerCase(),
+        phone: '+2348035550147',
+        fullName: 'Trako Truck Owner',
+        role: 'TRUCK_OWNER',
+      },
     ];
 
     const users = [];
@@ -70,6 +77,7 @@ export class DemoBootstrapController {
       try {
         const user = await this.upsertStaff(account, password);
         if (account.role === 'DRIVER') await this.ensureDriverFixtures(user.id);
+        if (account.role === 'TRUCK_OWNER') await this.ensureTruckOwnerFixtures(user.id);
         users.push(user);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -88,6 +96,7 @@ export class DemoBootstrapController {
         driver: 'https://www.trako.com.ng/driver',
         admin: 'https://www.trako.com.ng/admin',
         dispatcher: 'https://www.trako.com.ng/dispatcher',
+        truckOwner: 'https://www.trako.com.ng/owner',
       },
     };
   }
@@ -186,6 +195,38 @@ export class DemoBootstrapController {
       },
     });
 
+    await this.verifyVehicleDocuments(vehicle.id);
+  }
+
+  // Seeds a second, owner-registered truck with no driver assigned - lets the
+  // "Fleet assignments" admin/dispatcher screen be exercised immediately after bootstrap
+  // instead of only ever having the driver's own self-owned demo truck to look at.
+  private async ensureTruckOwnerFixtures(ownerId: string) {
+    const vehicle = await this.prisma.vehicle.upsert({
+      where: { plateNumber: 'TRK-OWN-01' },
+      update: {
+        ownerId,
+        type: 'Flatbed',
+        capacityKg: 30000,
+        capacityM3: 55,
+        registrationState: 'Lagos',
+        isActive: true,
+      },
+      create: {
+        ownerId,
+        plateNumber: 'TRK-OWN-01',
+        type: 'Flatbed',
+        capacityKg: 30000,
+        capacityM3: 55,
+        registrationState: 'Lagos',
+        isActive: true,
+      },
+    });
+
+    await this.verifyVehicleDocuments(vehicle.id);
+  }
+
+  private async verifyVehicleDocuments(vehicleId: string) {
     const expires = new Date();
     expires.setUTCFullYear(expires.getUTCFullYear() + 1);
     const documents = [
@@ -200,8 +241,8 @@ export class DemoBootstrapController {
          "title" = excluded."title", "state" = excluded."state", "number" = excluded."number",
          "expires" = excluded."expires", "reviewNote" = excluded."reviewNote", "reviewedAt" = current_timestamp,
          "updatedAt" = current_timestamp`,
-      `${vehicle.id}-${document.type.toLowerCase()}`,
-      vehicle.id,
+      `${vehicleId}-${document.type.toLowerCase()}`,
+      vehicleId,
       document.type,
       document.title,
       `DEMO-${document.type}`,

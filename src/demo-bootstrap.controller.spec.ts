@@ -38,12 +38,18 @@ describe('DemoBootstrapController', () => {
     const result = await controller.bootstrapStaff('bootstrap-secret', { password: 'password123' });
 
     expect(result.ok).toBe(true);
-    expect(result.users).toHaveLength(4);
+    expect(result.users).toHaveLength(5);
     expect(vehicleUpsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({ capacityKg: 30000, capacityM3: 45 }),
       create: expect.objectContaining({ capacityKg: 30000, capacityM3: 45 }),
     }));
-    expect(executeRawUnsafe).toHaveBeenCalledTimes(3);
+    // The truck owner's own registered truck - deliberately left with no assignedDriverId
+    // so the "Fleet assignments" admin/dispatcher screen has something real to link.
+    expect(vehicleUpsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { plateNumber: 'TRK-OWN-01' },
+      create: expect.not.objectContaining({ assignedDriverId: expect.anything() }),
+    }));
+    expect(executeRawUnsafe).toHaveBeenCalledTimes(6);
     expect(executeRawUnsafe).toHaveBeenCalledWith(
       expect.stringContaining(`'VERIFIED'::"DriverDocumentState"`),
       expect.any(String),
@@ -55,6 +61,7 @@ describe('DemoBootstrapController', () => {
       expect.stringContaining('Verified fixture'),
     );
     expect(result.links.admin).toBe('https://www.trako.com.ng/admin');
+    expect(result.links.truckOwner).toBe('https://www.trako.com.ng/owner');
   });
 
   it('rejects an invalid bootstrap secret', async () => {

@@ -244,13 +244,21 @@ export class DataService {
           // and the truck vanished on reload.
           const plateNumber = String(item.reg ?? item.plateNumber ?? '').trim().toUpperCase();
           if (!plateNumber) throw new BadRequestException('A registration/plate number is required.');
+          // A truck with no parseable/plausible capacity would silently never match any
+          // shipment (matching treats a null capacityKg as 0), leaving the owner with a
+          // truck that looks registered but can never receive work and no error telling
+          // them why - reject bad input up front instead.
+          const capacityKg = this.parseCapacityKg(item.capacity);
+          if (!capacityKg) throw new BadRequestException('Enter a valid weight capacity, e.g. "30 tons" or "30000 kg".');
+          const capacityM3 = this.parseCapacityM3(item.volumeCapacity ?? item.capacityM3);
+          if (!capacityM3) throw new BadRequestException('Enter a valid body volume in cubic meters, e.g. "55".');
           const vehicle = await this.prisma.vehicle.create({
             data: {
               ownerId: userId,
               plateNumber,
               type: String(item.type ?? 'Flatbed'),
-              capacityKg: this.parseCapacityKg(item.capacity),
-              capacityM3: this.parseCapacityM3(item.volumeCapacity ?? item.capacityM3),
+              capacityKg,
+              capacityM3,
               registrationState: item.base ? String(item.base) : null,
             },
           });
@@ -650,7 +658,12 @@ export class DataService {
     if (!match) return null;
     const value = Number(match[0]);
     if (!Number.isFinite(value) || value <= 0) return null;
-    return raw.includes('kg') ? Math.round(value) : Math.round(value * 1000);
+    const kg = raw.includes('kg') ? Math.round(value) : Math.round(value * 1000);
+    // The heaviest road-legal Nigerian articulated combination is well under 100 tons -
+    // a value outside this range almost always means the owner typed a bare number
+    // meaning kg (e.g. "18000") that the tons-by-default heuristic above misread as
+    // 18000 tons, rather than a truck that actually exists.
+    return kg >= 300 && kg <= 100_000 ? kg : null;
   }
 
   private parseCapacityM3(input: unknown): number | null {

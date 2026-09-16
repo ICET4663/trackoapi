@@ -111,6 +111,31 @@ export class SettingsController {
     return this.settingsService.reviewVehicleDocument(documentId, reviewer.sub, body);
   }
 
+  @Get('admin/fleet-assignments')
+  async fleetAssignments(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.fleetAssignments();
+  }
+
+  @Post('admin/fleet-assignments')
+  async assignDriverToVehicle(
+    @Body() body: { vehicleId?: string; driverId?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    if (!body?.vehicleId || !body?.driverId) throw new BadRequestException('A truck and a driver must both be selected.');
+    return this.settingsService.assignDriverToVehicle(body.vehicleId, body.driverId);
+  }
+
+  @Delete('admin/fleet-assignments/:vehicleId')
+  async unassignDriverFromVehicle(
+    @Param('vehicleId') vehicleId: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);
+    return this.settingsService.unassignDriverFromVehicle(vehicleId);
+  }
+
   @Get('settings/notification-preferences')
   async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);

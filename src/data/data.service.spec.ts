@@ -148,7 +148,7 @@ describe('DataService never fakes success on a real failure', () => {
     const service = new DataService(prisma);
 
     await expect(
-      service.create('owner-trucks', { reg: 'LAG-204-TK', type: 'Flatbed' }, 'owner-1'),
+      service.create('owner-trucks', { reg: 'LAG-204-TK', type: 'Flatbed', capacity: '30 tons', volumeCapacity: '55' }, 'owner-1'),
     ).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
@@ -157,6 +157,27 @@ describe('DataService never fakes success on a real failure', () => {
     const service = new DataService(prisma);
 
     await expect(service.create('owner-trucks', {}, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a weight capacity with no plausible unit instead of silently unmatchable truck', async () => {
+    const prisma = { vehicle: { create: jest.fn() } } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(
+      service.create('owner-trucks', { reg: 'LAG-204-TK', capacity: '18000', volumeCapacity: '55' }, 'owner-1'),
+    ).rejects.toThrow('valid weight capacity');
+    expect(prisma.vehicle.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts an explicit kg capacity without misreading it as tons', async () => {
+    const create = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-204-TK', type: 'Flatbed' });
+    const executeRawUnsafe = jest.fn().mockResolvedValue(1);
+    const prisma = { vehicle: { create }, $executeRawUnsafe: executeRawUnsafe } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await service.create('owner-trucks', { reg: 'LAG-204-TK', capacity: '18000 kg', volumeCapacity: '55' }, 'owner-1');
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ capacityKg: 18000 }) }));
   });
 
   it('prevents a non-owner account from registering a truck', async () => {

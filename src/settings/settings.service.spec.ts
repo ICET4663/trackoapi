@@ -487,6 +487,104 @@ describe('SettingsService vehicle document review', () => {
   });
 });
 
+describe('SettingsService fleet assignments', () => {
+  const readyDocuments = [
+    { type: 'REGISTRATION', state: 'VERIFIED', expires: null },
+    { type: 'INSURANCE', state: 'VERIFIED', expires: null },
+    { type: 'ROADWORTHINESS', state: 'VERIFIED', expires: null },
+  ];
+  const verifiedDriver = { id: 'driver-1', role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' };
+
+  function buildService(prismaOverrides: Record<string, unknown> = {}) {
+    const notificationsCreate = jest.fn().mockResolvedValue({ id: 'notice-1' });
+    const prisma = { ...prismaOverrides } as unknown as PrismaService;
+    const service = new SettingsService(
+      prisma,
+      { create: notificationsCreate } as unknown as NotificationsService,
+      { get: jest.fn() } as unknown as ConfigService,
+      noopAuthService,
+    );
+    return { service, notificationsCreate };
+  }
+
+  it('flags a truck as not ready when a required document is missing or expired', async () => {
+    const vehicleFindMany = jest.fn().mockResolvedValue([{
+      id: 'vehicle-1', plateNumber: 'LAG-1', type: 'Flatbed', capacityKg: 5000, capacityM3: 20,
+      ownerId: 'owner-1', owner: { profile: { fullName: 'Owner One' }, email: 'owner@tracko.ng' },
+      assignedDriverId: null, assignedDriver: null,
+      documents: [{ type: 'REGISTRATION', state: 'VERIFIED', expires: null }],
+    }]);
+    const userFindMany = jest.fn().mockResolvedValue([]);
+    const { service } = buildService({ vehicle: { findMany: vehicleFindMany }, user: { findMany: userFindMany } });
+
+    const result = await service.fleetAssignments();
+
+    expect(result.vehicles[0]).toMatchObject({ id: 'vehicle-1', documentsReady: false });
+  });
+
+  it('rejects assigning a driver to a truck whose documents are not fully verified', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({
+      id: 'vehicle-1', plateNumber: 'LAG-1', ownerId: 'owner-1',
+      documents: [{ type: 'REGISTRATION', state: 'PENDING_REVIEW', expires: null }],
+    });
+    const { service } = buildService({ vehicle: { findUnique: vehicleFindUnique } });
+
+    await expect(service.assignDriverToVehicle('vehicle-1', 'driver-1')).rejects.toThrow('documents are verified');
+  });
+
+  it('rejects assigning a driver who is not an active, KYC-verified DRIVER', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', ownerId: 'owner-1', documents: readyDocuments });
+    const userFindUnique = jest.fn().mockResolvedValue({ id: 'driver-1', role: 'DRIVER', isActive: true, verificationStatus: 'PENDING' });
+    const { service } = buildService({ vehicle: { findUnique: vehicleFindUnique }, user: { findUnique: userFindUnique } });
+
+    await expect(service.assignDriverToVehicle('vehicle-1', 'driver-1')).rejects.toThrow('KYC-verified');
+  });
+
+  it('assigns a verified driver to a ready truck, clears their other trucks, and notifies both parties', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', ownerId: 'owner-1', documents: readyDocuments });
+    const userFindUnique = jest.fn().mockResolvedValue(verifiedDriver);
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const update = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: 'driver-1' });
+    const transaction = jest.fn(async (ops: unknown[]) => [await updateMany(), await update()]);
+    const { service, notificationsCreate } = buildService({
+      vehicle: { findUnique: vehicleFindUnique, updateMany, update },
+      user: { findUnique: userFindUnique },
+      $transaction: transaction,
+    });
+
+    const result = await service.assignDriverToVehicle('vehicle-1', 'driver-1');
+
+    expect(result).toMatchObject({ id: 'vehicle-1', assignedDriverId: 'driver-1' });
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { assignedDriverId: 'driver-1', id: { not: 'vehicle-1' } },
+      data: { assignedDriverId: null },
+    }));
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', tone: 'SUCCESS' }));
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-1' }));
+  });
+
+  it('unassigning a truck with no driver is a no-op', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: null });
+    const { service, notificationsCreate } = buildService({ vehicle: { findUnique: vehicleFindUnique } });
+
+    const result = await service.unassignDriverFromVehicle('vehicle-1');
+
+    expect(result).toMatchObject({ id: 'vehicle-1', assignedDriverId: null });
+    expect(notificationsCreate).not.toHaveBeenCalled();
+  });
+
+  it('unassigns a driver from a truck and notifies them', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: 'driver-1' });
+    const update = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: null });
+    const { service, notificationsCreate } = buildService({ vehicle: { findUnique: vehicleFindUnique, update } });
+
+    const result = await service.unassignDriverFromVehicle('vehicle-1');
+
+    expect(result).toMatchObject({ id: 'vehicle-1', assignedDriverId: null });
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', tone: 'WARNING' }));
+  });
+});
+
 describe('SettingsService.billingHistory is real per-account/per-card data, not fabricated invoices', () => {
   function buildService(queryRawUnsafe: jest.Mock) {
     const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
