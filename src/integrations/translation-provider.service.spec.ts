@@ -172,6 +172,7 @@ describe('TranslationProviderService never fabricates a result on failure', () =
   it.each([
     ['yo', 'yo-NG', 'E kaaro'],
     ['ig', 'ig-NG', 'Ututu oma'],
+    ['ha', 'ha-NG', 'Ina kwana'],
   ])('transcribes %s with Speech v2 Chirp using the selected language', async (language, languageCode, transcript) => {
     jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
     const service = buildServiceWith({
