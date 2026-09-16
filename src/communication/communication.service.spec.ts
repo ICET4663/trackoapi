@@ -124,6 +124,25 @@ describe("CommunicationService never fakes success on failure", () => {
     expect(result.body).toBe("hello");
   });
 
+  it("allows the currently offered driver to open shipment chat before accepting", async () => {
+    const assignmentFindFirst = jest.fn().mockResolvedValue({ driverId: "driver-1" });
+    const conversationUpsert = jest.fn().mockResolvedValue({
+      id: "conv-1", shipmentId: "shipment-1", customerId: "customer-1", driverId: "driver-1",
+    });
+    const prisma = buildPrisma({
+      shipment: { findUnique: jest.fn().mockResolvedValue({ id: "shipment-1", reference: "TRK-1", customerId: "customer-1" }) },
+      driverAssignment: { findFirst: assignmentFindFirst },
+      conversation: { upsert: conversationUpsert, update: jest.fn() },
+    });
+    const service = buildService(prisma);
+    const driver = { sub: "driver-1", email: "driver@x.com", role: "DRIVER" } as AuthUser;
+
+    await expect(service.getOrCreateShipmentConversation("shipment-1", driver)).resolves.toMatchObject({ id: "conv-1" });
+    expect(assignmentFindFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ driverId: "driver-1", status: { in: ["OFFERED", "ACCEPTED"] } }),
+    }));
+  });
+
   it("allows the owner of the assigned truck to read the shipment conversation", async () => {
     const prisma = buildPrisma({
       conversation: {
@@ -631,3 +650,4 @@ describe("CommunicationService.uploadMedia never fakes success on failure", () =
     }
   });
 });
+
