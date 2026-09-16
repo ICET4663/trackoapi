@@ -168,5 +168,37 @@ describe('TranslationProviderService never fabricates a result on failure', () =
 
     expect(result).toEqual({ transcript: 'good morning', detectedLanguage: 'en' });
   });
+
+  it.each([
+    ['yo', 'yo-NG', 'E kaaro'],
+    ['ig', 'ig-NG', 'Ututu oma'],
+  ])('transcribes %s with Speech v2 Chirp using the selected language', async (language, languageCode, transcript) => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+      GOOGLE_SPEECH_LOCATION: 'us-central1',
+      GOOGLE_SPEECH_MODEL: 'chirp_2',
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        results: [{ alternatives: [{ transcript }], languageCode }],
+      }),
+    }) as never;
+
+    const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', language);
+
+    expect(result).toEqual({ transcript, detectedLanguage: language });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://speech.googleapis.com/v2/projects/project-1/locations/us-central1/recognizers/_:recognize',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer access-token' }),
+        body: expect.stringContaining(`"languageCodes":["${languageCode}"]`),
+      }),
+    );
+  });
 });
 
