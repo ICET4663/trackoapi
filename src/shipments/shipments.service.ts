@@ -1223,7 +1223,8 @@ export class ShipmentsService {
     const shipments = await this.prisma.shipment.findMany({
       where: {
         adminApproved: false,
-        status: { notIn: ['DRAFT', 'QUOTED', 'PENDING_PAYMENT', 'CANCELLED'] },
+        escrow: { is: { status: { in: ['FUNDED', 'HELD', 'RELEASE_READY'] } } },
+        status: { notIn: ['CANCELLED', 'COMPLETED'] },
       },
       include: { escrow: true, timeline: { orderBy: { createdAt: 'asc' } } },
       orderBy: { updatedAt: 'desc' },
@@ -1247,14 +1248,18 @@ export class ShipmentsService {
     }
     if (shipment.adminApproved) return this.toShipmentRecord(shipment, { escrow: shipment.escrow });
 
+    const reconciledStatus = ['DRAFT', 'QUOTED', 'PENDING_PAYMENT'].includes(shipment.status)
+      ? 'ESCROW_FUNDED'
+      : shipment.status;
     const updated = await this.prisma.shipment.update({
       where: { id: shipmentId },
       data: {
+        status: reconciledStatus,
         adminApproved: true,
         adminApprovedAt: new Date(),
         adminApprovedById: reviewerId,
         timeline: {
-          create: { status: shipment.status, note: 'Approved by platform operations - ready for driver matching.' },
+          create: { status: reconciledStatus, note: 'Approved by platform operations - ready for driver matching.' },
         },
       },
       include: { timeline: { orderBy: { createdAt: 'asc' } } },
@@ -1860,3 +1865,4 @@ export class ShipmentsService {
   }
 
 }
+
