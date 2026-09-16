@@ -387,7 +387,7 @@ export class CommunicationService {
       transcript: "",
       durationSeconds: dto.durationSeconds,
       unavailableReason: this.translationProvider.status().transcriptionEnabled
-        ? "Could not transcribe this recording. Use Chrome or Edge browser speech recognition for live transcript instead."
+        ? "Server transcription could not process this recording. Check the microphone, select the spoken language, and try a short, clear recording."
         : "Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.",
     };
   }
@@ -644,3 +644,4 @@ export class CommunicationService {
     return error instanceof Error ? error.message : String(error);
   }
 }
+
