@@ -114,6 +114,35 @@ describe('TranslationProviderService never fabricates a result on failure', () =
     );
   });
 
+  it('translates Igbo to English through authenticated Translation v3', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        translations: [{ translatedText: 'Good morning', detectedLanguageCode: 'ig' }],
+      }),
+    }) as never;
+
+    const result = await service.translate('Ututu oma', 'en', 'ig');
+
+    expect(result).toEqual({
+      translatedText: 'Good morning',
+      detectedSourceLanguage: 'ig',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://translation.googleapis.com/v3/projects/project-1:translateText',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"sourceLanguageCode":"ig"'),
+      }),
+    );
+  });
+
   it('translate() rejects an unsupported target language before ever calling fetch', async () => {
     const service = buildService('key123');
     const fetchMock = jest.fn();
