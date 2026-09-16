@@ -37,7 +37,7 @@ export class TranslationProviderService {
     return {
       provider: "google",
       mode: apiKey || speechV2 ? "configured" : "mock",
-      translationEnabled: Boolean(apiKey),
+      translationEnabled: Boolean(speechV2 || apiKey),
       transcriptionEnabled: Boolean(speechV2 || apiKey),
       transcriptionApi: speechV2
         ? "speech-to-text-v2-chirp"
@@ -68,10 +68,25 @@ export class TranslationProviderService {
     translatedText: string;
     detectedSourceLanguage?: string;
   } | null> {
-    const apiKey = this.config.get<string>("GOOGLE_CLOUD_API_KEY");
     const trimmed = text.trim();
-    if (!apiKey || !trimmed || !isSupportedLanguage(targetLanguage))
-      return null;
+    if (!trimmed || !isSupportedLanguage(targetLanguage)) return null;
+
+    // Prefer Translation v3 with the same service account used by Chirp. This avoids
+    // coupling voice translation to a browser/Maps-restricted API key. Keep v2 as a
+    // fallback for deployments that only have GOOGLE_CLOUD_API_KEY configured.
+    const credentials = this.speechV2Credentials();
+    if (credentials) {
+      const authenticated = await this.translateV3(
+        trimmed,
+        targetLanguage,
+        sourceLanguage,
+        credentials,
+      );
+      if (authenticated) return authenticated;
+    }
+
+    const apiKey = this.config.get<string>("GOOGLE_CLOUD_API_KEY");
+    if (!apiKey) return null;
 
     try {
       const response = await fetch(
@@ -112,6 +127,72 @@ export class TranslationProviderService {
     } catch (error) {
       this.logger.warn(
         `translate() threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async translateV3(
+    text: string,
+    targetLanguage: SupportedLanguage,
+    sourceLanguage: string | undefined,
+    credentials: { projectId: string; clientEmail: string; privateKey: string },
+  ): Promise<{
+    translatedText: string;
+    detectedSourceLanguage?: string;
+  } | null> {
+    try {
+      const auth = new GoogleAuth({
+        credentials: {
+          client_email: credentials.clientEmail,
+          private_key: credentials.privateKey,
+        },
+        projectId: credentials.projectId,
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      });
+      const accessToken = await auth.getAccessToken();
+      if (!accessToken) return null;
+
+      const response = await fetch(
+        `https://translation.googleapis.com/v3/projects/${encodeURIComponent(credentials.projectId)}:translateText`,
+        {
+          method: "POST",
+          signal: AbortSignal.timeout(12_000),
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contents: [text],
+            mimeType: "text/plain",
+            targetLanguageCode: targetLanguage,
+            ...(sourceLanguage && isSupportedLanguage(sourceLanguage)
+              ? { sourceLanguageCode: sourceLanguage }
+              : {}),
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => null)) as {
+        translations?: {
+          translatedText?: string;
+          detectedLanguageCode?: string;
+        }[];
+        error?: { message?: string };
+      } | null;
+      const translation = payload?.translations?.[0];
+      if (!response.ok || !translation?.translatedText?.trim()) {
+        this.logger.warn(
+          `translateV3() failed: ${payload?.error?.message ?? response.statusText}`,
+        );
+        return null;
+      }
+      return {
+        translatedText: translation.translatedText,
+        detectedSourceLanguage: translation.detectedLanguageCode,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `translateV3() threw: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -296,3 +377,4 @@ export class TranslationProviderService {
     return undefined;
   }
 }
+
