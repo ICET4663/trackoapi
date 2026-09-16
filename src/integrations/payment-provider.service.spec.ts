@@ -32,8 +32,8 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
     prisma = {
       shipment: { findUnique: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue(undefined) },
       $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
-        if (sql.includes('select "amount", "currency"')) {
-          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING' }]);
+        if (sql.includes('select e."amount", e."currency"')) {
+          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING', shipmentStatus: 'PENDING_PAYMENT' }]);
         }
         return Promise.resolve([]);
       }),
@@ -100,6 +100,23 @@ describe('PaymentProviderService.initializeEscrow - Paystack channel selection',
     });
 
     expect(new URL(paystackRequestBody().callback_url).origin).toBe('https://cargo-link-logistics-mm1c.vercel.app');
+  });
+
+  it('does not reopen checkout or regress shipment status after escrow is funded', async () => {
+    prisma.shipment.findUnique.mockResolvedValue({
+      id: 'ship-funded', customerId: 'customer-1', quotedPriceKobo: 500000, cargoValueKobo: null,
+    });
+    prisma.$queryRawUnsafe.mockImplementation((sql: string) => {
+      if (sql.includes('verificationStatus')) return Promise.resolve([{ verificationStatus: 'VERIFIED' }]);
+      if (sql.includes('from "Escrow" where "shipmentId"')) return Promise.resolve([{ status: 'FUNDED' }]);
+      return Promise.resolve([]);
+    });
+
+    await expect(service.initializeEscrow({
+      shipmentId: 'ship-funded', customerId: 'customer-1', customerEmail: 'customer@trako.com.ng',
+    })).rejects.toThrow('Escrow is already funded');
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -191,10 +208,11 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
     } as unknown as ConfigService;
     const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
     const paymentMethodCreate = jest.fn().mockResolvedValue({ id: 'pm-99' });
+    const shipmentUpdate = jest.fn().mockResolvedValue(undefined);
     const prisma = {
       $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
-        if (sql.includes('select "amount", "currency"')) {
-          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING' }]);
+        if (sql.includes('select e."amount", e."currency"')) {
+          return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING', shipmentStatus: 'PENDING_PAYMENT' }]);
         }
         return Promise.resolve([]);
       }),
@@ -207,7 +225,7 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
           quotedPriceKobo: 500000,
           reference: 'TRK-1',
         }),
-        update: jest.fn().mockResolvedValue(undefined),
+        update: shipmentUpdate,
       },
       paymentMethod: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -217,16 +235,20 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
     } as unknown as PrismaService;
     const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
     const service = new PaymentProviderService(config, prisma, notifications);
-    return { service, executeRawUnsafe, paymentMethodCreate };
+    return { service, executeRawUnsafe, paymentMethodCreate, shipmentUpdate };
   }
 
   it('saves the card, then inserts the BillingCharge tagged with that card\'s id', async () => {
-    const { service, executeRawUnsafe, paymentMethodCreate } = buildService();
+    const { service, executeRawUnsafe, paymentMethodCreate, shipmentUpdate } = buildService();
     const signature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
 
     const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), signature, rawBody);
 
     expect(result.escrowUpdated).toBe(true);
+    expect(shipmentUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'ship-1' },
+      data: expect.objectContaining({ status: 'ESCROW_FUNDED' }),
+    }));
     expect(paymentMethodCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ userId: 'cust-1', maskedNumber: '**** 4242' }),
     }));
@@ -313,3 +335,4 @@ describe('PaymentProviderService customer payment verification ownership', () =>
       .rejects.toThrow('This payment belongs to another customer account.');
   });
 });
+
