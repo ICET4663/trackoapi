@@ -95,6 +95,16 @@ export class PaymentProviderService {
       }
     }
 
+    if (input.shipmentId) {
+      const [existingEscrow] = await this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
+        `select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1`,
+        input.shipmentId,
+      );
+      if (existingEscrow && ['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(existingEscrow.status)) {
+        throw new BadRequestException('Escrow is already funded for this shipment. Continue to admin review and driver assignment.');
+      }
+    }
+
     const amount = shipment?.quotedPriceKobo ?? shipment?.cargoValueKobo ?? input.amount ?? 0;
     if (!amount || amount <= 0) {
       throw new BadRequestException('A valid escrow amount is required.');
@@ -482,9 +492,17 @@ export class PaymentProviderService {
     },
   ) {
     try {
-      const [escrow] = await this.prisma.$queryRawUnsafe<Array<{ amount: number; currency: string; status: string }>>(
-        `select "amount", "currency", "status"::text as "status"
-         from "Escrow" where "shipmentId" = $1 limit 1`,
+      const [escrow] = await this.prisma.$queryRawUnsafe<Array<{
+        amount: number;
+        currency: string;
+        status: string;
+        shipmentStatus?: string;
+      }>>(
+        `select e."amount", e."currency", e."status"::text as "status",
+                s."status"::text as "shipmentStatus"
+         from "Escrow" e
+         join "Shipment" s on s."id" = e."shipmentId"
+         where e."shipmentId" = $1 limit 1`,
         shipmentId,
       );
       if (!escrow || !Number.isFinite(amount) || amount !== escrow.amount || !currency || currency !== escrow.currency) {
@@ -494,26 +512,39 @@ export class PaymentProviderService {
         );
         return false;
       }
-      if (escrow.status !== 'PENDING') return ['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(escrow.status);
-      await this.prisma.$queryRawUnsafe(
-        `update "Escrow"
-         set "status" = 'FUNDED'::"EscrowStatus",
-             "updatedAt" = current_timestamp
-         where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"`,
-        shipmentId,
-      );
-      await this.prisma.shipment.update({
-        where: { id: shipmentId },
-        data: {
-          status: 'ESCROW_FUNDED',
-          timeline: {
-            create: {
-              status: 'ESCROW_FUNDED',
-              note: `Escrow funded by ${provider}.`,
+      const wasPending = escrow.status === 'PENDING';
+      if (!wasPending && !['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(escrow.status)) return false;
+      if (wasPending) {
+        await this.prisma.$queryRawUnsafe(
+          `update "Escrow"
+           set "status" = 'FUNDED'::"EscrowStatus",
+               "updatedAt" = current_timestamp
+           where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"`,
+          shipmentId,
+        );
+      }
+
+      // Paystack verification can be replayed safely. Besides making the callback
+      // idempotent, this repairs legacy split states where Escrow reached FUNDED but
+      // a later checkout initialization (or a transient DB failure) left Shipment at
+      // PENDING_PAYMENT. Without this reconciliation admin review and driver matching
+      // both hide a payment that was genuinely completed.
+      if (escrow.shipmentStatus && ['DRAFT', 'QUOTED', 'PENDING_PAYMENT'].includes(escrow.shipmentStatus)) {
+        await this.prisma.shipment.update({
+          where: { id: shipmentId },
+          data: {
+            status: 'ESCROW_FUNDED',
+            timeline: {
+              create: {
+                status: 'ESCROW_FUNDED',
+                note: wasPending ? `Escrow funded by ${provider}.` : 'Funded escrow status reconciled.',
+              },
             },
           },
-        },
-      });
+        });
+      }
+
+      if (!wasPending) return true;
       // Resolve/save the card *before* recording the charge, so the charge can be
       // attributed to it - the two used to run independently, leaving every BillingCharge
       // row with a NULL paymentMethodId and every "billing history for this card" screen
@@ -699,3 +730,4 @@ export class PaymentProviderService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 }
+
