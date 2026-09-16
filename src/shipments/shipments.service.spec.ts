@@ -698,6 +698,32 @@ describe('ShipmentsService funded shipment approval', () => {
     );
     expect(prisma.shipment.update).not.toHaveBeenCalled();
   });
+
+  it('repairs a funded shipment left in PENDING_PAYMENT while approving it', async () => {
+    const update = jest.fn().mockResolvedValue({
+      id: 'shipment-1', customerId: 'customer-1', reference: 'TRK-1', status: 'ESCROW_FUNDED',
+      adminApproved: true, timeline: [],
+    });
+    const prisma = {
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shipment-1', customerId: 'customer-1', reference: 'TRK-1', status: 'PENDING_PAYMENT',
+          pickupLabel: 'Lagos', destinationLabel: 'Abuja', cargoDescription: 'Food',
+          adminApproved: false, escrow: { id: 'escrow-1', amount: 500000, currency: 'NGN', status: 'FUNDED' }, timeline: [],
+        }),
+        update,
+      },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notification-1' }) } as unknown as NotificationsService;
+    const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
+
+    await service.approveShipment('shipment-1', 'admin-1', 'ADMIN');
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'shipment-1' },
+      data: expect.objectContaining({ status: 'ESCROW_FUNDED', adminApproved: true }),
+    }));
+  });
 });
 
 describe('ShipmentsService automatic best-match assignment', () => {
@@ -858,3 +884,4 @@ describe('ShipmentsService driver counteroffers', () => {
     });
   });
 });
+
