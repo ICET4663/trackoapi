@@ -74,7 +74,7 @@ export class CommunicationService {
     let driverId: string | null = null;
     if (user.role === "DRIVER") {
       const assignment = await this.prisma.driverAssignment.findFirst({
-        where: { shipmentId, driverId: user.sub, status: "ACCEPTED" },
+        where: { shipmentId, driverId: user.sub, status: { in: ["OFFERED", "ACCEPTED"] } },
         select: { driverId: true },
       });
       if (!assignment)
@@ -91,7 +91,7 @@ export class CommunicationService {
       const ownerAssignment = await this.prisma.driverAssignment.findFirst({
         where: {
           shipmentId,
-          status: "ACCEPTED",
+          status: { in: ["OFFERED", "ACCEPTED"] },
           vehicle: { ownerId: user.sub },
         },
         select: { driverId: true },
@@ -107,7 +107,8 @@ export class CommunicationService {
 
     if (!driverId) {
       const acceptedAssignment = await this.prisma.driverAssignment.findFirst({
-        where: { shipmentId, status: "ACCEPTED" },
+        where: { shipmentId, status: { in: ["OFFERED", "ACCEPTED"] } },
+        orderBy: { offeredAt: "desc" },
         select: { driverId: true },
       });
       driverId = acceptedAssignment?.driverId ?? null;
@@ -644,4 +645,5 @@ export class CommunicationService {
     return error instanceof Error ? error.message : String(error);
   }
 }
+
 
