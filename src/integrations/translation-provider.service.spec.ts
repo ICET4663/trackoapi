@@ -1,9 +1,17 @@
 import { ConfigService } from '@nestjs/config';
+import { GoogleAuth } from 'google-auth-library';
 import { TranslationProviderService } from './translation-provider.service';
 
 function buildService(apiKey: string | undefined) {
   const config = {
     get: jest.fn((key: string) => key === 'GOOGLE_CLOUD_API_KEY' ? apiKey : undefined),
+  } as unknown as ConfigService;
+  return new TranslationProviderService(config);
+}
+
+function buildServiceWith(values: Record<string, string | undefined>) {
+  const config = {
+    get: jest.fn((key: string) => values[key]),
   } as unknown as ConfigService;
   return new TranslationProviderService(config);
 }
@@ -16,6 +24,20 @@ describe('TranslationProviderService.status', () => {
   it('reports configured mode when a key is present', () => {
     expect(buildService('key123').status()).toMatchObject({ mode: 'configured', translationEnabled: true, transcriptionEnabled: true });
   });
+
+  it('reports translation enabled when service-account credentials are configured without an API key', () => {
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+
+    expect(service.status()).toMatchObject({
+      mode: 'configured',
+      translationEnabled: true,
+      multilingualTranscriptionEnabled: true,
+    });
+  });
 });
 
 // Both translate() and transcribe() must return null - never a fabricated
@@ -27,7 +49,10 @@ describe('TranslationProviderService never fabricates a result on failure', () =
   // Confirmed this was actually happening: it broke an unrelated file's tests
   // (maps-provider.service.spec.ts) when both ran in the same worker.
   const originalFetch = global.fetch;
-  afterEach(() => { global.fetch = originalFetch; });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
 
   it('translate() returns null, not a fake translation, when unconfigured', async () => {
     const service = buildService(undefined);
@@ -60,6 +85,35 @@ describe('TranslationProviderService never fabricates a result on failure', () =
     expect(result).toEqual({ translatedText: 'bawo ni', detectedSourceLanguage: 'en' });
   });
 
+  it('translates Yoruba to English through authenticated Translation v3', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        translations: [{ translatedText: 'Good morning', detectedLanguageCode: 'yo' }],
+      }),
+    }) as never;
+
+    const result = await service.translate('E kaaro', 'en', 'yo');
+
+    expect(result).toEqual({
+      translatedText: 'Good morning',
+      detectedSourceLanguage: 'yo',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://translation.googleapis.com/v3/projects/project-1:translateText',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer access-token' }),
+      }),
+    );
+  });
+
   it('translate() rejects an unsupported target language before ever calling fetch', async () => {
     const service = buildService('key123');
     const fetchMock = jest.fn();
@@ -86,3 +140,4 @@ describe('TranslationProviderService never fabricates a result on failure', () =
     expect(result).toEqual({ transcript: 'good morning', detectedLanguage: 'en' });
   });
 });
+
