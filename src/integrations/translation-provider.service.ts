@@ -227,7 +227,7 @@ export class TranslationProviderService {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(30_000),
           body: JSON.stringify({
             config: {
               encoding: this.encodingForMimeType(mimeType),
@@ -293,6 +293,10 @@ export class TranslationProviderService {
     const model =
       this.config.get<string>("GOOGLE_SPEECH_MODEL")?.trim() || "chirp_2";
 
+    this.logger.log(
+      `Transcribing ${language} voice audio (${Math.round((base64Audio.length * 3) / 4 / 1024)} KB) with ${model} in ${location}`,
+    );
+
     try {
       const auth = new GoogleAuth({
         credentials: {
@@ -309,7 +313,7 @@ export class TranslationProviderService {
         `https://speech.googleapis.com/v2/projects/${encodeURIComponent(credentials.projectId)}/locations/${encodeURIComponent(location)}/recognizers/_:recognize`,
         {
           method: "POST",
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(30_000),
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
