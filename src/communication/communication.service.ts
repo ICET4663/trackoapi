@@ -388,7 +388,7 @@ export class CommunicationService {
       durationSeconds: dto.durationSeconds,
       unavailableReason: this.translationProvider.status().transcriptionEnabled
         ? "Server transcription could not process this recording. Check the microphone, select the spoken language, and try a short, clear recording."
-        : "Server transcription is not configured yet. Use Chrome or Edge browser speech recognition for live transcript, or add a speech-to-text provider key for backend transcription.",
+        : "Server transcription is not configured yet. Add Google Speech service-account credentials before retrying multilingual voice notes.",
     };
   }
 
