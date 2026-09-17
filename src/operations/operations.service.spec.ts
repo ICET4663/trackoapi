@@ -353,6 +353,19 @@ describe('OperationsService admin/dispatcher screens never fake data on failure'
     await expect(service.workflowReadiness(admin)).rejects.toThrow('Could not load workflow readiness');
   });
 
+  it('returns assignment links inside the admin route group for admins', async () => {
+    const service = buildService({
+      user: { count: jest.fn().mockResolvedValueOnce(0).mockResolvedValueOnce(1) },
+      driverAssignment: { count: jest.fn().mockResolvedValue(0) },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ count: 2 }]),
+    });
+
+    const result = await service.workflowReadiness(admin);
+    const assignment = result.nextActions.find((action) => action.key === 'assign-funded-shipments');
+
+    expect(assignment).toMatchObject({ count: 2, route: '/admin/assignment' });
+  });
+
   it('escrowLedger() throws instead of a fake "total held" figure when the read fails', async () => {
     const service = buildService({
       $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')),
@@ -488,3 +501,4 @@ describe('OperationsService.fraudSignals', () => {
     await expect(build({}).fraudSignals({ sub: 'x', role: 'DRIVER' } as OperationActor)).rejects.toThrow('Only operations users');
   });
 });
+
