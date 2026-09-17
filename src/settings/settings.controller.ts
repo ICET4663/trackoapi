@@ -127,6 +127,16 @@ export class SettingsController {
     return this.settingsService.assignDriverToVehicle(body.vehicleId, body.driverId);
   }
 
+  @Post('owner/fleet-assignments')
+  async assignDriverToOwnedVehicle(
+    @Body() body: { vehicleId?: string; driverId?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    if (!body?.vehicleId || !body?.driverId) throw new BadRequestException('A truck and a driver must both be selected.');
+    return this.settingsService.assignDriverToOwnedVehicle(body.vehicleId, body.driverId, owner.sub);
+  }
+
   @Delete('admin/fleet-assignments/:vehicleId')
   async unassignDriverFromVehicle(
     @Param('vehicleId') vehicleId: string,
