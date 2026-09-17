@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -1799,6 +1799,17 @@ export class SettingsService {
   }
 
   async assignDriverToVehicle(vehicleId: string, driverId: string) {
+    return this.assignDriverToVehicleInternal(vehicleId, driverId, 'Trako operations');
+  }
+
+  async assignDriverToOwnedVehicle(vehicleId: string, driverId: string, ownerId: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { ownerId: true } });
+    if (!vehicle) throw new NotFoundException('Truck not found.');
+    if (vehicle.ownerId !== ownerId) throw new ForbiddenException('You can only assign drivers to trucks that belong to your fleet.');
+    return this.assignDriverToVehicleInternal(vehicleId, driverId, 'The truck owner');
+  }
+
+  private async assignDriverToVehicleInternal(vehicleId: string, driverId: string, assignedBy: string) {
     const vehicle = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
       include: { documents: { select: { type: true, state: true, expires: true } } },
@@ -1833,7 +1844,7 @@ export class SettingsService {
       }),
       this.notifications.create({
         userId: vehicle.ownerId, title: 'Driver assigned to your truck',
-        body: `Trako operations assigned a driver to ${updated.plateNumber}.`,
+        body: `${assignedBy} assigned a driver to ${updated.plateNumber}.`,
         tone: 'INFO', entity: 'Vehicle', entityId: updated.id, actionUrl: `/owner/vehicle-documents/${updated.id}`,
       }),
     ]);
