@@ -563,6 +563,32 @@ describe('SettingsService fleet assignments', () => {
     expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-1' }));
   });
 
+  it('lets an owner assign a verified driver to a ready truck in their own fleet', async () => {
+    const vehicleFindUnique = jest.fn()
+      .mockResolvedValueOnce({ ownerId: 'owner-1' })
+      .mockResolvedValueOnce({ id: 'vehicle-1', plateNumber: 'LAG-1', ownerId: 'owner-1', documents: readyDocuments });
+    const userFindUnique = jest.fn().mockResolvedValue(verifiedDriver);
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const update = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', ownerId: 'owner-1', assignedDriverId: 'driver-1' });
+    const transaction = jest.fn(async () => [await updateMany(), await update()]);
+    const { service } = buildService({
+      vehicle: { findUnique: vehicleFindUnique, updateMany, update },
+      user: { findUnique: userFindUnique },
+      $transaction: transaction,
+    });
+
+    await expect(service.assignDriverToOwnedVehicle('vehicle-1', 'driver-1', 'owner-1'))
+      .resolves.toMatchObject({ id: 'vehicle-1', assignedDriverId: 'driver-1' });
+  });
+
+  it('prevents an owner from assigning a truck outside their fleet', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ ownerId: 'different-owner' });
+    const { service } = buildService({ vehicle: { findUnique: vehicleFindUnique } });
+
+    await expect(service.assignDriverToOwnedVehicle('vehicle-1', 'driver-1', 'owner-1'))
+      .rejects.toThrow('belong to your fleet');
+  });
+
   it('unassigning a truck with no driver is a no-op', async () => {
     const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: null });
     const { service, notificationsCreate } = buildService({ vehicle: { findUnique: vehicleFindUnique } });
