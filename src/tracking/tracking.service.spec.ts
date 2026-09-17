@@ -62,6 +62,31 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
   });
 });
 
+describe('TrackingService.shipmentEvidence', () => {
+  it('returns pickup photos, pickup notes and delivery proof for an authorized shipment', async () => {
+    const now = new Date('2026-09-17T10:00:00.000Z');
+    const queryRawUnsafe = jest.fn()
+      .mockResolvedValueOnce([{ id: 'media-1', url: 'https://files.example/pickup.jpg', label: 'Pickup cargo condition 1 - TRK-1', createdAt: now }])
+      .mockResolvedValueOnce([{ id: 'proof-1', photoUrl: 'https://files.example/delivery.jpg', signatureUrl: null, recipientName: 'Ada', note: 'Sealed', status: 'SUBMITTED', submittedAt: now }])
+      .mockResolvedValueOnce([{ note: 'Loaded without damage.', createdAt: now }]);
+    const prisma = buildPrisma({ $queryRawUnsafe: queryRawUnsafe });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    const result = await service.shipmentEvidence('shp-1', adminUser);
+
+    expect(result.pickup.photos[0].url).toContain('pickup.jpg');
+    expect(result.pickup.note).toBe('Loaded without damage.');
+    expect(result.delivery.proofs[0].photoUrl).toContain('delivery.jpg');
+  });
+
+  it('surfaces evidence query failures instead of reporting an empty evidence set', async () => {
+    const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.shipmentEvidence('shp-1', adminUser)).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});
+
 // recordLocation() used to echo the driver's submitted coordinates straight back as a
 // fake "saved" ping whenever the INSERT failed - so a driver's GPS trail could silently
 // stop being recorded with no error surfaced anywhere.
@@ -187,3 +212,4 @@ describe('TrackingService.submitDeliveryProof never fakes a recorded delivery', 
     expect(executeRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('"proofOfDeliveryUploaded" = true'), 'shp-1');
   });
 });
+

@@ -37,6 +37,12 @@ export class TrackingController {
     return this.tracking.deliveryProofs(id, user);
   }
 
+  @Get('shipments/:id/evidence')
+  async shipmentEvidence(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.tracking.shipmentEvidence(id, user);
+  }
+
   @Post('shipments/:id/proof-of-delivery')
   async submitDeliveryProof(
     @Param('id') id: string,
@@ -47,3 +53,4 @@ export class TrackingController {
     return this.tracking.submitDeliveryProof(id, user, body);
   }
 }
+

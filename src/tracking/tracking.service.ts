@@ -321,6 +321,77 @@ export class TrackingService {
     return [];
   }
 
+  async shipmentEvidence(shipmentId: string, user: AuthUser) {
+    shipmentId = await this.assertShipmentAccess(shipmentId, user);
+    try {
+      const pickupPhotos = await this.prisma.$queryRawUnsafe<
+        { id: string; url: string | null; label: string; createdAt: Date }[]
+      >(
+        `select "id", "url", "label", "createdAt"
+         from "MediaAsset"
+         where "shipmentId" = $1
+           and "kind" = 'CARGO_PHOTO'::"MediaKind"
+           and "label" like 'Pickup cargo condition%'
+         order by "createdAt" asc`,
+        shipmentId,
+      );
+      const deliveryProofs = await this.prisma.$queryRawUnsafe<
+        {
+          id: string;
+          photoUrl: string | null;
+          signatureUrl: string | null;
+          recipientName: string | null;
+          note: string | null;
+          status: string;
+          submittedAt: Date;
+        }[]
+      >(
+        `select "id", "photoUrl", "signatureUrl", "recipientName", "note",
+                "status"::text as "status", "submittedAt"
+         from "DeliveryProof"
+         where "shipmentId" = $1
+         order by "submittedAt" desc`,
+        shipmentId,
+      );
+      const pickupTimelineRows = await this.prisma.$queryRawUnsafe<
+        { note: string | null; createdAt: Date }[]
+      >(
+        `select "note", "createdAt"
+         from "ShipmentTimeline"
+         where "shipmentId" = $1
+           and "status" = 'PICKED_UP'::"ShipmentStatus"
+         order by "createdAt" desc
+         limit 1`,
+        shipmentId,
+      );
+      const pickupTimeline = pickupTimelineRows[0];
+
+      return {
+        shipmentId,
+        pickup: {
+          note: pickupTimeline?.note ?? undefined,
+          confirmedAt: pickupTimeline?.createdAt.toISOString(),
+          photos: pickupPhotos
+            .filter((photo) => Boolean(photo.url))
+            .map((photo) => ({ ...photo, url: photo.url!, createdAt: photo.createdAt.toISOString() })),
+        },
+        delivery: {
+          proofs: deliveryProofs.map((proof) => ({
+            id: proof.id,
+            photoUrl: proof.photoUrl ?? undefined,
+            signatureUrl: proof.signatureUrl ?? undefined,
+            recipientName: proof.recipientName ?? undefined,
+            note: proof.note ?? undefined,
+            status: proof.status,
+            submittedAt: proof.submittedAt.toISOString(),
+          })),
+        },
+      };
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load shipment evidence. Please try again: ${this.errorMessage(error)}`);
+    }
+  }
+
   private toLocation(row: {
     id: string;
     shipmentId: string;
@@ -373,3 +444,4 @@ export class TrackingService {
     return error instanceof Error ? error.message : String(error);
   }
 }
+
