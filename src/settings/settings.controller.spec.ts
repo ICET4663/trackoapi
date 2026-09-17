@@ -20,3 +20,22 @@ describe('SettingsController payout authorization', () => {
       .toHaveBeenCalledWith('payout-1', 'admin-1', { decision: 'APPROVED' });
   });
 });
+
+describe('SettingsController owner fleet assignment', () => {
+  it('requires a truck-owner session and passes the authenticated owner id to the service', async () => {
+    const settings = {
+      assignDriverToOwnedVehicle: jest.fn().mockResolvedValue({ id: 'vehicle-1', assignedDriverId: 'driver-1' }),
+    } as unknown as SettingsService;
+    const requestUser = {
+      requireRole: jest.fn().mockResolvedValue({ sub: 'owner-1', role: 'TRUCK_OWNER' }),
+    } as unknown as RequestUserService;
+    const controller = new SettingsController(settings, requestUser);
+
+    await controller.assignDriverToOwnedVehicle({ vehicleId: 'vehicle-1', driverId: 'driver-1' }, 'Bearer owner-token');
+
+    expect((requestUser as unknown as { requireRole: jest.Mock }).requireRole)
+      .toHaveBeenCalledWith('Bearer owner-token', ['TRUCK_OWNER']);
+    expect((settings as unknown as { assignDriverToOwnedVehicle: jest.Mock }).assignDriverToOwnedVehicle)
+      .toHaveBeenCalledWith('vehicle-1', 'driver-1', 'owner-1');
+  });
+});
