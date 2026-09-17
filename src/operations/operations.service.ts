@@ -542,48 +542,49 @@ export class OperationsService {
         ),
       ]);
 
+      const admin = actor.role === 'ADMIN';
       const nextActions = [
         {
           key: 'kyc-review',
           label: 'Review pending KYC',
           count: pendingKyc,
           priority: pendingKyc > 0 ? 'HIGH' : 'LOW',
-          route: '/admin/verifications',
+          route: admin ? '/admin/verifications' : '/dispatcher/verifications',
         },
         {
           key: 'assign-funded-shipments',
           label: 'Assign funded shipments',
           count: fundedUnassignedEscrows,
           priority: fundedUnassignedEscrows > 0 ? 'HIGH' : 'LOW',
-          route: '/dispatcher/assignment',
+          route: admin ? '/admin/assignment' : '/dispatcher/assignment',
         },
         {
           key: 'driver-offers',
           label: 'Follow up driver offers',
           count: offeredAssignments,
           priority: offeredAssignments > 0 ? 'MEDIUM' : 'LOW',
-          route: '/dispatcher/shipments',
+          route: admin ? '/admin/assignment' : '/dispatcher/shipments',
         },
         {
           key: 'release-escrow',
           label: 'Release ready escrow',
           count: releaseReadyEscrows,
           priority: releaseReadyEscrows > 0 ? 'HIGH' : 'LOW',
-          route: '/admin/finance',
+          route: admin ? '/admin/finance' : '/dispatcher/assignment',
         },
         {
           key: 'disputes',
           label: 'Resolve open disputes',
           count: openDisputes,
           priority: openDisputes > 0 ? 'HIGH' : 'LOW',
-          route: '/dispatcher/disputes',
+          route: admin ? '/admin/operations' : '/dispatcher/disputes',
         },
         {
           key: 'support',
           label: 'Handle support tickets',
           count: openSupportTickets,
           priority: openSupportTickets > 0 ? 'MEDIUM' : 'LOW',
-          route: '/dispatcher/support',
+          route: admin ? '/admin/support' : '/dispatcher/support',
         },
       ];
 
@@ -1284,3 +1285,4 @@ export class OperationsService {
   }
 
 }
+
