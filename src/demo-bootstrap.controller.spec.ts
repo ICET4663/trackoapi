@@ -38,7 +38,7 @@ describe('DemoBootstrapController', () => {
     const result = await controller.bootstrapStaff('bootstrap-secret', { password: 'password123' });
 
     expect(result.ok).toBe(true);
-    expect(result.users).toHaveLength(5);
+    expect(result.users).toHaveLength(6);
     expect(vehicleUpsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({ capacityKg: 30000, capacityM3: 45 }),
       create: expect.objectContaining({ capacityKg: 30000, capacityM3: 45 }),
@@ -49,6 +49,11 @@ describe('DemoBootstrapController', () => {
       where: { plateNumber: 'TRK-OWN-01' },
       create: expect.not.objectContaining({ assignedDriverId: expect.anything() }),
     }));
+    // Only the first driver's truck (TRK-DRV-01) and the owner's truck (TRK-OWN-01) -
+    // the second driver must NOT get a vehicle of their own, or there would be nothing
+    // real to demonstrate the "assign an existing driver to an existing truck" flow with.
+    expect(vehicleUpsert).toHaveBeenCalledTimes(2);
+    expect(bankAccountUpsert).toHaveBeenCalledTimes(2);
     expect(executeRawUnsafe).toHaveBeenCalledTimes(6);
     expect(executeRawUnsafe).toHaveBeenCalledWith(
       expect.stringContaining(`'VERIFIED'::"DriverDocumentState"`),

@@ -10,6 +10,7 @@ type StaffInput = {
   password?: string;
   customerEmail?: string;
   driverEmail?: string;
+  driverEmail2?: string;
   adminEmail?: string;
   dispatcherEmail?: string;
   truckOwnerEmail?: string;
@@ -20,6 +21,10 @@ type StaffAccount = {
   phone: string;
   fullName: string;
   role: UserRole;
+  // Only the first driver owns and drives a truck out of the box (TRK-DRV-01).
+  // The second is deliberately truck-less, so the "Fleet assignments" screen has
+  // a real verified driver available to link to TRK-OWN-01 right after bootstrap.
+  fixtures?: 'driver-with-truck' | 'driver-without-truck';
 };
 
 @Controller('demo')
@@ -50,6 +55,14 @@ export class DemoBootstrapController {
         phone: '+2348035550143',
         fullName: 'Trako Driver',
         role: 'DRIVER',
+        fixtures: 'driver-with-truck',
+      },
+      {
+        email: (body.driverEmail2 ?? 'driver2@tracko.ng').trim().toLowerCase(),
+        phone: '+2348035550148',
+        fullName: 'Trako Driver Two',
+        role: 'DRIVER',
+        fixtures: 'driver-without-truck',
       },
       {
         email: (body.adminEmail ?? 'admin@tracko.ng').trim().toLowerCase(),
@@ -76,7 +89,8 @@ export class DemoBootstrapController {
     for (const account of accounts) {
       try {
         const user = await this.upsertStaff(account, password);
-        if (account.role === 'DRIVER') await this.ensureDriverFixtures(user.id);
+        if (account.fixtures === 'driver-with-truck') await this.ensureDriverFixtures(user.id);
+        if (account.fixtures === 'driver-without-truck') await this.ensureDriverBankAccount(user.id);
         if (account.role === 'TRUCK_OWNER') await this.ensureTruckOwnerFixtures(user.id);
         users.push(user);
       } catch (error) {
@@ -141,6 +155,11 @@ export class DemoBootstrapController {
   }
 
   private async ensureDriverFixtures(driverId: string) {
+    await this.ensureDriverBankAccount(driverId);
+    await this.setupVehicle(driverId);
+  }
+
+  private async ensureDriverBankAccount(driverId: string) {
     await this.prisma.bankAccount.upsert({
       where: { userId: driverId },
       update: {
@@ -161,8 +180,6 @@ export class DemoBootstrapController {
         pendingPayout: 'N0',
       },
     });
-
-    await this.setupVehicle(driverId);
   }
 
   private secretsMatch(expected: string, presented: string) {
