@@ -201,5 +201,56 @@ describe('TranslationProviderService never fabricates a result on failure', () =
       }),
     );
   });
+
+  it('retries with the "chirp" model when the default "chirp_2" model rejects the language, and no model was explicitly configured', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 400, statusText: 'Bad Request', json: async () => ({ error: { message: 'chirp_2 does not support yo-NG' } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ results: [{ alternatives: [{ transcript: 'E kaaro' }], languageCode: 'yo-NG' }] }) });
+    global.fetch = fetchMock as never;
+
+    const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo');
+
+    expect(result).toEqual({ transcript: 'E kaaro', detectedLanguage: 'yo' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][1].body).toEqual(expect.stringContaining('"model":"chirp_2"'));
+    expect(fetchMock.mock.calls[1][1].body).toEqual(expect.stringContaining('"model":"chirp"'));
+  });
+
+  it('does not retry with a different model when GOOGLE_SPEECH_MODEL was explicitly configured', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+      GOOGLE_SPEECH_MODEL: 'chirp_2',
+    });
+    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 400, statusText: 'Bad Request', json: async () => ({ error: { message: 'unsupported' } }) });
+    global.fetch = fetchMock as never;
+
+    const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo');
+
+    expect(result).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('transcribe() returns null when the access token cannot be obtained, without throwing', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue(undefined as never);
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as never;
+
+    expect(await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 

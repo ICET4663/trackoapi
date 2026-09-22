@@ -290,15 +290,15 @@ export class TranslationProviderService {
     const location =
       this.config.get<string>("GOOGLE_SPEECH_LOCATION")?.trim() ||
       "us-central1";
-    const model =
-      this.config.get<string>("GOOGLE_SPEECH_MODEL")?.trim() || "chirp_2";
+    const configuredModel = this.config
+      .get<string>("GOOGLE_SPEECH_MODEL")
+      ?.trim();
+    const model = configuredModel || "chirp_2";
 
-    this.logger.log(
-      `Transcribing ${language} voice audio (${Math.round((base64Audio.length * 3) / 4 / 1024)} KB) with ${model} in ${location}`,
-    );
-
+    let auth: GoogleAuth;
+    let accessToken: string | null | undefined;
     try {
-      const auth = new GoogleAuth({
+      auth = new GoogleAuth({
         credentials: {
           client_email: credentials.clientEmail,
           private_key: credentials.privateKey,
@@ -306,11 +306,58 @@ export class TranslationProviderService {
         projectId: credentials.projectId,
         scopes: ["https://www.googleapis.com/auth/cloud-platform"],
       });
-      const accessToken = await auth.getAccessToken();
-      if (!accessToken) return null;
+      accessToken = await auth.getAccessToken();
+    } catch (error) {
+      this.logger.warn(
+        `transcribeV2() could not authenticate with the service account: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+    if (!accessToken) {
+      this.logger.warn(
+        "transcribeV2() got an empty access token from the service account - check GOOGLE_CLOUD_CLIENT_EMAIL/GOOGLE_CLOUD_PRIVATE_KEY.",
+      );
+      return null;
+    }
 
+    const attempt = (recognitionModel: string) =>
+      this.recognizeV2(
+        base64Audio,
+        language,
+        credentials.projectId,
+        location,
+        recognitionModel,
+        accessToken as string,
+      );
+
+    let result = await attempt(model);
+    // Chirp 2 has narrower language coverage than the original Chirp (universal) model -
+    // a Hausa/Yoruba/Igbo recording can fail on chirp_2 specifically while working on
+    // "chirp". Retry once with the older model before giving up, unless the deployment
+    // explicitly pinned a model via env (respect that override, no silent retry).
+    if (!result && !configuredModel && model !== "chirp") {
+      this.logger.warn(
+        `transcribeV2() retrying ${language} with model "chirp" after "${model}" failed`,
+      );
+      result = await attempt("chirp");
+    }
+    return result;
+  }
+
+  private async recognizeV2(
+    base64Audio: string,
+    language: SupportedLanguage,
+    projectId: string,
+    location: string,
+    model: string,
+    accessToken: string,
+  ): Promise<{ transcript: string; detectedLanguage?: string } | null> {
+    this.logger.log(
+      `Transcribing ${language} voice audio (${Math.round((base64Audio.length * 3) / 4 / 1024)} KB) with ${model} in ${location}`,
+    );
+    try {
       const response = await fetch(
-        `https://speech.googleapis.com/v2/projects/${encodeURIComponent(credentials.projectId)}/locations/${encodeURIComponent(location)}/recognizers/_:recognize`,
+        `https://speech.googleapis.com/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/recognizers/_:recognize`,
         {
           method: "POST",
           signal: AbortSignal.timeout(30_000),
@@ -334,7 +381,7 @@ export class TranslationProviderService {
           alternatives?: { transcript?: string }[];
           languageCode?: string;
         }[];
-        error?: { message?: string };
+        error?: { message?: string; status?: string; details?: unknown };
       } | null;
       const transcript = payload?.results
         ?.flatMap(
@@ -345,7 +392,7 @@ export class TranslationProviderService {
         .trim();
       if (!response.ok || !transcript) {
         this.logger.warn(
-          `transcribeV2() failed: ${payload?.error?.message ?? response.statusText}`,
+          `recognizeV2(model=${model}) failed: HTTP ${response.status} ${response.statusText} - ${payload?.error ? JSON.stringify(payload.error) : "(no transcript in response)"}`,
         );
         return null;
       }
@@ -358,7 +405,7 @@ export class TranslationProviderService {
       };
     } catch (error) {
       this.logger.warn(
-        `transcribeV2() threw: ${error instanceof Error ? error.message : String(error)}`,
+        `recognizeV2(model=${model}) threw: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
