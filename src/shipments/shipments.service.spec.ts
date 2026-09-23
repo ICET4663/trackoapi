@@ -776,13 +776,40 @@ describe('ShipmentsService automatic best-match assignment', () => {
   });
 
   it('returns a clear blocker when no eligible driver and verified truck are available', async () => {
-    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    const prisma = {
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
     service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) as never;
     jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
 
     await expect(service.offerBestEligibleDriver('shipment-1', 'ADMIN')).rejects.toThrow(
       'No eligible driver and verified truck are currently available.',
     );
+  });
+
+  it('returns an offer that was persisted when a later automatic-matching step failed', async () => {
+    const offeredAt = new Date('2026-09-23T14:41:52.341Z');
+    const persisted = {
+      id: 'assignment-1', shipmentId: 'shipment-1', driverId: 'driver-1', vehicleId: 'vehicle-1',
+      status: 'OFFERED', offeredAt,
+      driver: { id: 'driver-1', email: 'driver@tracko.ng', phone: '+2341', profile: { fullName: 'Trako Driver' } },
+      vehicle: { id: 'vehicle-1', plateNumber: 'TRK-DRV-01', type: 'Box truck', capacityKg: 30000, capacityM3: 45 },
+      shipment: { id: 'shipment-1', customerId: 'customer-1', reference: 'TRK-1', timeline: [] },
+    };
+    const prisma = {
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue(persisted) },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    service.expireStaleAssignmentOffers = jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) as never;
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
+
+    await expect(service.offerBestEligibleDriver('shipment-1', 'DISPATCHER')).resolves.toMatchObject({
+      id: 'assignment-1',
+      status: 'OFFERED',
+      driver: { email: 'driver@tracko.ng' },
+      vehicle: { plateNumber: 'TRK-DRV-01' },
+    });
   });
 
   it('does not let customers start automatic matching', async () => {

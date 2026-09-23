@@ -648,6 +648,18 @@ export class ShipmentsService {
     await this.expireStaleAssignmentOffers(shipmentId);
     const assignment = await this.offerNextEligibleDriver(shipmentId);
     if (!assignment) {
+      const persistedOffer = await this.prisma.driverAssignment.findFirst({
+        where: { shipmentId, status: 'OFFERED' },
+        include: {
+          driver: { include: { profile: true } },
+          vehicle: true,
+          shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
+        },
+        orderBy: { offeredAt: 'desc' },
+      }).catch(() => null);
+      if (persistedOffer) return this.toAssignmentRecord(persistedOffer);
+    }
+    if (!assignment) {
       throw new BadRequestException(
         'No eligible driver and verified truck are currently available. Check KYC, vehicle documents, capacity, availability, and active offers.',
       );
