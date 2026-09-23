@@ -1,4 +1,116 @@
-rmalized.destinationLongitude ?? undefined,
+import { BadRequestException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
+import { randomUUID } from 'crypto';
+import { MapsProviderService } from '../integrations/maps-provider.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateShipmentDto } from './dto/create-shipment.dto';
+import { UpdateShipmentStatusDto } from './dto/update-shipment-status.dto';
+
+type ShipmentRecordInput = {
+  id: string;
+  customerId: string;
+  status?: string;
+  pickupLabel?: string | null;
+  pickupAddress?: string | null;
+  pickupLatitude?: number | null;
+  pickupLongitude?: number | null;
+  destinationLabel?: string | null;
+  destinationAddress?: string | null;
+  destinationLatitude?: number | null;
+  destinationLongitude?: number | null;
+  cargoDescription?: string | null;
+  quantity?: string | null;
+  truckType?: string | null;
+  cargoWeightKg?: number | null;
+  cargoVolumeM3?: number | null;
+  quotedPriceKobo?: number | null;
+  distanceKm?: number | null;
+  durationMinutes?: number | null;
+  pickupContactPhone?: string | null;
+  adminApproved?: boolean;
+  timeline?: TimelineRecordInput[];
+};
+
+type TimelineRecordInput = {
+  id: string;
+  status: string;
+  note?: string | null;
+  createdAt: Date | string;
+};
+
+type MediaRecord = {
+  id: string;
+  kind: string;
+  url: string;
+  label?: string | null;
+};
+
+type EscrowRow = {
+  id: string;
+  shipmentId: string;
+  amount: number;
+  currency: string;
+  status: string;
+  arrivalConfirmed: boolean;
+  proofOfDeliveryUploaded: boolean;
+  customerDeliveryConfirmed: boolean;
+  disputeWindowClear: boolean;
+  platformApproved: boolean;
+};
+
+type AssignmentRecordInput = {
+  id: string;
+  shipmentId: string;
+  driverId: string;
+  vehicleId?: string | null;
+  status: AssignmentStatus | string;
+  offeredAt: Date | string;
+  acceptedAt?: Date | string | null;
+  rejectedAt?: Date | string | null;
+  proposedPriceKobo?: number | null;
+  proposedNote?: string | null;
+  proposedAt?: Date | string | null;
+  shipment?: ShipmentRecordInput;
+  driver?: {
+    id: string;
+    email: string;
+    phone: string;
+    profile?: { fullName: string | null } | null;
+  };
+  vehicle?: {
+    id: string;
+    plateNumber: string;
+    type: string;
+    capacityKg?: number | null;
+    capacityM3?: number | null;
+  } | null;
+};
+
+@Injectable()
+export class ShipmentsService {
+  private readonly logger = new Logger(ShipmentsService.name);
+  private readonly defaultAssignmentOfferMinutes = 15;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationsService,
+    private readonly mapsProvider: MapsProviderService,
+  ) {}
+
+  async create(customerId: string, dto: CreateShipmentDto) {
+    await this.assertNotInMaintenanceMode();
+    await this.assertCustomerCanCreateShipment(customerId);
+
+    const normalized = this.normalizeShipmentDto(dto);
+    // Price, distance, and duration are always recomputed server-side from the
+    // same formula the client previewed with — a client can never dictate what
+    // it gets charged by sending a different quotedPriceKobo in the request body.
+    const quoteInput = {
+      originLatitude: normalized.pickupLatitude ?? undefined,
+      originLongitude: normalized.pickupLongitude ?? undefined,
+      destinationLatitude: normalized.destinationLatitude ?? undefined,
+      destinationLongitude: normalized.destinationLongitude ?? undefined,
       truckType: normalized.truckType,
       weightTons: normalized.weightTons,
       volumeM3: normalized.cargoVolumeM3,
@@ -212,12 +324,6 @@ rmalized.destinationLongitude ?? undefined,
         },
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
-      if (['COMPLETED', 'CANCELLED'].includes(dto.status)) {
-        await this.activateQueuedOffers(
-          shipment.assignments.filter((assignment) => assignment.status === 'ACCEPTED').map((assignment) => assignment.driverId),
-          shipment.id,
-        );
-      }
       return this.toShipmentRecord(updated);
     } catch (error) {
       // Used to fall back to a fake "updated" shipment reflecting the REQUESTED status
@@ -417,7 +523,7 @@ rmalized.destinationLongitude ?? undefined,
         this.prisma.driverAssignment.findFirst({
           where: {
             driverId,
-            status: 'OFFERED',
+            status: { in: ['OFFERED', 'ACCEPTED'] },
             shipmentId: { not: shipmentId },
             shipment: { status: { notIn: ['COMPLETED', 'CANCELLED'] } },
           },
@@ -461,7 +567,7 @@ rmalized.destinationLongitude ?? undefined,
       );
     }
     if (activeDriverAssignment) {
-      throw new BadRequestException('This driver already has another shipment offer awaiting response.');
+      throw new BadRequestException('This driver already has an active shipment or pending offer. Select another driver.');
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
@@ -555,23 +661,6 @@ rmalized.destinationLongitude ?? undefined,
       if (!assignment) throw new NotFoundException('Assignment not found.');
       if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
       if (assignment.status !== 'OFFERED') throw new BadRequestException('This assignment has already been handled.');
-
-      if (action === 'ACCEPT') {
-        const activeTrip = await this.prisma.driverAssignment.findFirst({
-          where: {
-            driverId,
-            status: 'ACCEPTED',
-            shipmentId: { not: assignment.shipmentId },
-            shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
-          },
-          select: { shipment: { select: { reference: true } } },
-        });
-        if (activeTrip) {
-          throw new BadRequestException(
-            `Complete ${activeTrip.shipment.reference} before accepting this queued load. You can still message the customer or negotiate the price.`,
-          );
-        }
-      }
 
       const validityMinutes = await this.assignmentOfferValidityMinutes();
       const expiresAt = this.assignmentExpiresAt(assignment.offeredAt, validityMinutes);
@@ -861,24 +950,11 @@ rmalized.destinationLongitude ?? undefined,
         take: 100,
       });
 
-      let expiredCount = 0;
       for (const assignment of stale) {
-        const activeTrip = await this.prisma.driverAssignment.findFirst({
-          where: {
-            driverId: assignment.driverId,
-            status: 'ACCEPTED',
-            shipmentId: { not: assignment.shipmentId },
-            shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
-          },
-          select: { id: true },
-        });
-        if (activeTrip) continue;
-        if (await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId)) {
-          expiredCount += 1;
-        }
+        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId);
       }
 
-      return { expiredCount, validityMinutes };
+      return { expiredCount: stale.length, validityMinutes };
     } catch (error) {
       this.logger.error(`expireStaleAssignmentOffers() failed: ${error instanceof Error ? error.message : String(error)}`);
       return { expiredCount: 0, validityMinutes };
@@ -987,13 +1063,9 @@ rmalized.destinationLongitude ?? undefined,
             shipment.pickupLatitude,
             shipment.pickupLongitude,
           );
-          const pendingOffers = driver.driverAssignments.filter((assignment) =>
-            assignment.status === 'OFFERED'
+          const activeAssignments = driver.driverAssignments.filter((assignment) =>
+            ['OFFERED', 'ACCEPTED'].includes(assignment.status)
             && !['COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
-          ).length;
-          const acceptedTrips = driver.driverAssignments.filter((assignment) =>
-            assignment.status === 'ACCEPTED'
-            && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
           ).length;
           const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
           const reviews = driver.driverReviews ?? [];
@@ -1019,12 +1091,11 @@ rmalized.destinationLongitude ?? undefined,
                   : pickupDistanceKm <= 100
                     ? 5
                     : 1;
-          const score = capacityScore + Math.max(5, 20 - acceptedTrips * 15) + ratingScore + experienceScore + 5 + proximityScore;
-          return { driver, vehicle, pendingOffers, acceptedTrips, pickupDistanceKm, score };
+          const score = capacityScore + 20 + ratingScore + experienceScore + 5 + proximityScore;
+          return { driver, vehicle, activeAssignments, pickupDistanceKm, score };
         })
-        .filter((candidate) => Boolean(candidate.vehicle) && candidate.pendingOffers === 0)
+        .filter((candidate) => Boolean(candidate.vehicle) && candidate.activeAssignments === 0)
         .sort((left, right) => {
-          if (left.acceptedTrips !== right.acceptedTrips) return left.acceptedTrips - right.acceptedTrips;
           if (left.score !== right.score) return right.score - left.score;
           const leftDistance = left.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
           const rightDistance = right.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
@@ -1087,19 +1158,6 @@ rmalized.destinationLongitude ?? undefined,
     return new Date(new Date(offeredAt).getTime() + validityMinutes * 60_000);
   }
 
-  private async activateQueuedOffers(driverIds: string[], completedShipmentId: string) {
-    const uniqueDriverIds = [...new Set(driverIds)];
-    if (!uniqueDriverIds.length) return;
-    await this.prisma.driverAssignment.updateMany({
-      where: {
-        driverId: { in: uniqueDriverIds },
-        shipmentId: { not: completedShipmentId },
-        status: 'OFFERED',
-      },
-      data: { offeredAt: new Date() },
-    });
-  }
-
   async addTimelineEvent(shipmentId: string, userId: string, role: UserRole, event: Record<string, unknown>) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id: shipmentId },
@@ -1145,12 +1203,6 @@ rmalized.destinationLongitude ?? undefined,
         shipmentId,
         nextStatus,
       );
-      if (['COMPLETED', 'CANCELLED'].includes(nextStatus)) {
-        await this.activateQueuedOffers(
-          shipment.assignments.filter((assignment) => assignment.status === 'ACCEPTED').map((assignment) => assignment.driverId),
-          shipment.id,
-        );
-      }
     } catch (error) {
       throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
     }

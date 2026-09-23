@@ -151,16 +151,6 @@ export class DataService {
             ? await this.shipments?.expireStaleAssignmentOffers()
             : undefined;
           const hiddenShipmentStatuses = ['DELIVERED', 'COMPLETED', 'CANCELLED'] as const;
-          const activeDriverTrip = collection === 'driver-jobs'
-            ? await this.prisma.driverAssignment.findFirst({
-                where: {
-                  driverId: userId,
-                  status: 'ACCEPTED',
-                  shipment: { status: { notIn: [...hiddenShipmentStatuses] } },
-                },
-                select: { shipmentId: true, shipment: { select: { reference: true } } },
-              })
-            : null;
           return await this.prisma.driverAssignment.findMany({
             where: {
               driverId: userId,
@@ -169,9 +159,7 @@ export class DataService {
             },
             include: { shipment: true, vehicle: true },
             orderBy: { offeredAt: 'desc' },
-          }).then((assignments) => assignments.map((assignment) => {
-            const queued = Boolean(activeDriverTrip && activeDriverTrip.shipmentId !== assignment.shipmentId);
-            return {
+          }).then((assignments) => assignments.map((assignment) => ({
             id: assignment.id,
             shipmentDbId: assignment.shipment.id,
             shipmentId: assignment.shipment.reference,
@@ -182,9 +170,7 @@ export class DataService {
             quotedPriceKobo: assignment.shipment.quotedPriceKobo,
             status: assignment.status,
             offeredAt: assignment.offeredAt.toISOString(),
-            expiresAt: queued ? undefined : new Date(assignment.offeredAt.getTime() + (offerWindow?.validityMinutes ?? 15) * 60_000).toISOString(),
-            queued,
-            queuedBehindShipment: queued ? activeDriverTrip?.shipment.reference : undefined,
+            expiresAt: new Date(assignment.offeredAt.getTime() + (offerWindow?.validityMinutes ?? 15) * 60_000).toISOString(),
             proposedPriceKobo: assignment.proposedPriceKobo ?? null,
             proposedNote: assignment.proposedNote ?? null,
             proposedAt: assignment.proposedAt ? assignment.proposedAt.toISOString() : null,
@@ -196,8 +182,7 @@ export class DataService {
             eta: assignment.shipment.durationMinutes ? `${assignment.shipment.durationMinutes} mins` : 'ETA pending',
             stageIndex: this.stageIndex(assignment.shipment.status),
             completed: ['DELIVERED', 'COMPLETED'].includes(assignment.shipment.status),
-          };
-          }));
+          })));
         case 'chat-threads':
           return await this.prisma.conversation.findMany({ orderBy: { updatedAt: 'desc' }, take: 50 });
         case 'wallet-transactions':

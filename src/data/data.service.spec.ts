@@ -1,7 +1,6 @@
 import { BadRequestException, ForbiddenException, InternalServerErrorException } from '@nestjs/common';
 import { DataService, type DataCollection } from './data.service';
 import type { PrismaService } from '../prisma/prisma.service';
-import type { ShipmentsService } from '../shipments/shipments.service';
 
 // platform-users, operation-drivers, operation-shipments, dispatcher-shipments,
 // dispatcher-disputes, and chat-threads previously had no role check at any layer -
@@ -192,41 +191,6 @@ describe('DataService never fakes success on a real failure', () => {
 });
 
 describe('DataService driver workflow collections', () => {
-  it('marks a new offer as queued while the driver has another accepted trip', async () => {
-    const now = new Date('2026-09-23T10:00:00.000Z');
-    const prisma = {
-      driverAssignment: {
-        findFirst: jest.fn().mockResolvedValue({
-          shipmentId: 'active-shipment',
-          shipment: { reference: 'TRK-ACTIVE-1' },
-        }),
-        findMany: jest.fn().mockResolvedValue([{
-          id: 'offer-1', shipmentId: 'next-shipment', status: 'OFFERED', offeredAt: now,
-          proposedPriceKobo: null, proposedNote: null, proposedAt: null,
-          shipment: {
-            id: 'next-shipment', reference: 'TRK-NEXT-1', pickupLabel: 'Lagos', destinationLabel: 'Abuja',
-            cargoDescription: 'Rice', quotedPriceKobo: 100_000, distanceKm: 500, durationMinutes: 600,
-            status: 'DRIVER_ASSIGNED',
-          },
-          vehicle: { plateNumber: 'TRK-DRV-01' },
-        }]),
-      },
-    } as unknown as PrismaService;
-    const shipments = {
-      expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }),
-    } as unknown as ShipmentsService;
-    const service = new DataService(prisma, shipments);
-
-    const result = await service.list('driver-jobs', 'driver-1', 'DRIVER') as Array<Record<string, unknown>>;
-
-    expect(result[0]).toMatchObject({
-      id: 'offer-1',
-      queued: true,
-      queuedBehindShipment: 'TRK-ACTIVE-1',
-    });
-    expect(result[0].expiresAt).toBeUndefined();
-  });
-
   it('excludes final shipments from accepted active trips', async () => {
     const findMany = jest.fn().mockResolvedValue([]);
     const prisma = { driverAssignment: { findMany } } as unknown as PrismaService;

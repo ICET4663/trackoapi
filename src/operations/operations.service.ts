@@ -251,9 +251,6 @@ export class OperationsService {
         })),
         drivers: availableDrivers.map((driver) => {
           const activeAssignment = driver.driverAssignments.find((assignment) =>
-            assignment.status === 'ACCEPTED'
-            && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
-          ) ?? driver.driverAssignments.find((assignment) =>
             ['OFFERED', 'ACCEPTED'].includes(assignment.status)
             && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
           );
@@ -319,36 +316,24 @@ export class OperationsService {
       return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck fits both the cargo weight and physical volume.' };
     }
 
-    if ((shipment.rejectedDriverIds ?? []).includes(driver.id)) {
-      return { score: 0, eligible: false, vehicleId: vehicle.id, reason: 'Driver declined this shipment offer. Select another driver.' };
-    }
-
     const activeAssignmentRows = driver.driverAssignments.filter((assignment) =>
       ['OFFERED', 'ACCEPTED'].includes(assignment.status)
       && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
     );
     const activeAssignments = activeAssignmentRows.length;
     if (activeAssignments > 0) {
-      const pendingOffer = activeAssignmentRows.find((assignment) => assignment.status === 'OFFERED');
-      const acceptedTrip = activeAssignmentRows.find((assignment) => assignment.status === 'ACCEPTED');
-      if (pendingOffer) {
-        return {
-          score: 0,
-          eligible: false,
-          vehicleId: vehicle.id,
-          reason: `Driver already has an offer awaiting response for ${pendingOffer.shipment.reference}.`,
-        };
-      }
-      const activeReference = acceptedTrip?.shipment.reference;
+      const activeReference = activeAssignmentRows[0]?.shipment.reference;
       return {
-        score: 20,
-        eligible: true,
-        queued: true,
+        score: 0,
+        eligible: false,
         vehicleId: vehicle.id,
         reason: activeReference
-          ? `Queue this load after ${activeReference}. The driver can message or negotiate now, then accept after completing the active trip.`
-          : 'Queue this load for the driver to accept after the active trip is completed.',
+          ? `Driver is currently assigned to ${activeReference}. Complete or resolve that trip before assigning another load.`
+          : `Driver already has ${activeAssignments} active shipment${activeAssignments === 1 ? '' : 's'} or pending offer${activeAssignments === 1 ? '' : 's'}.`,
       };
+    }
+    if ((shipment.rejectedDriverIds ?? []).includes(driver.id)) {
+      return { score: 0, eligible: false, vehicleId: vehicle.id, reason: 'Driver declined this shipment offer. Select another driver.' };
     }
     const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
     const averageRating = driver.driverReviews.length
