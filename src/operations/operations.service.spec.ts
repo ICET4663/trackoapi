@@ -197,7 +197,6 @@ describe('OperationsService.assignmentQueue driver matching', () => {
             driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, capacityM3: 40, documents: verifiedDocuments }],
             driverAssignments: [
               { status: 'ACCEPTED', shipment: { id: 'active-1', reference: 'TRK-ACTIVE-1', status: 'IN_TRANSIT' } },
-              { status: 'OFFERED', shipment: { id: 'active-2', reference: 'TRK-ACTIVE-2', status: 'DRIVER_ASSIGNED' } },
             ],
             driverReviews: [],
           },
@@ -219,7 +218,7 @@ describe('OperationsService.assignmentQueue driver matching', () => {
 
     const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
     const bestMatches = queue.drivers[0].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
-    const busyMatches = queue.drivers[1].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null; reason: string }>;
+    const busyMatches = queue.drivers[1].matches as Record<string, { score: number; eligible: boolean; queued?: boolean; vehicleId: string | null; reason: string }>;
     const smallMatches = queue.drivers[2].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
 
     expect(queue.drivers[0]).toMatchObject({ activeAssignments: 0, completedTrips: 5, averageRating: 5 });
@@ -227,8 +226,8 @@ describe('OperationsService.assignmentQueue driver matching', () => {
     expect(queue.drivers[1]).toMatchObject({
       activeShipment: { id: 'active-1', reference: 'TRK-ACTIVE-1', status: 'IN_TRANSIT', assignmentStatus: 'ACCEPTED' },
     });
-    expect(busyMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: 'truck-large' });
-    expect(busyMatches['shipment-1'].reason).toContain('TRK-ACTIVE-1');
+    expect(busyMatches['shipment-1']).toMatchObject({ score: 20, eligible: true, queued: true, vehicleId: 'truck-large' });
+    expect(busyMatches['shipment-1'].reason).toContain('Queue this load after TRK-ACTIVE-1');
     expect(bestMatches['shipment-1'].score).toBeGreaterThan(busyMatches['shipment-1'].score);
     expect(smallMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
     const shipmentSql = prisma.$queryRawUnsafe.mock.calls[0][0] as string;
