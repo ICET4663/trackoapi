@@ -324,6 +324,12 @@ export class ShipmentsService {
         },
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
+      if (['COMPLETED', 'CANCELLED'].includes(dto.status)) {
+        await this.activateQueuedOffers(
+          shipment.assignments.filter((assignment) => assignment.status === 'ACCEPTED').map((assignment) => assignment.driverId),
+          shipment.id,
+        );
+      }
       return this.toShipmentRecord(updated);
     } catch (error) {
       // Used to fall back to a fake "updated" shipment reflecting the REQUESTED status
@@ -523,7 +529,7 @@ export class ShipmentsService {
         this.prisma.driverAssignment.findFirst({
           where: {
             driverId,
-            status: { in: ['OFFERED', 'ACCEPTED'] },
+            status: 'OFFERED',
             shipmentId: { not: shipmentId },
             shipment: { status: { notIn: ['COMPLETED', 'CANCELLED'] } },
           },
@@ -567,7 +573,7 @@ export class ShipmentsService {
       );
     }
     if (activeDriverAssignment) {
-      throw new BadRequestException('This driver already has an active shipment or pending offer. Select another driver.');
+      throw new BadRequestException('This driver already has another shipment offer awaiting response.');
     }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
@@ -661,6 +667,23 @@ export class ShipmentsService {
       if (!assignment) throw new NotFoundException('Assignment not found.');
       if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
       if (assignment.status !== 'OFFERED') throw new BadRequestException('This assignment has already been handled.');
+
+      if (action === 'ACCEPT') {
+        const activeTrip = await this.prisma.driverAssignment.findFirst({
+          where: {
+            driverId,
+            status: 'ACCEPTED',
+            shipmentId: { not: assignment.shipmentId },
+            shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+          },
+          select: { shipment: { select: { reference: true } } },
+        });
+        if (activeTrip) {
+          throw new BadRequestException(
+            `Complete ${activeTrip.shipment.reference} before accepting this queued load. You can still message the customer or negotiate the price.`,
+          );
+        }
+      }
 
       const validityMinutes = await this.assignmentOfferValidityMinutes();
       const expiresAt = this.assignmentExpiresAt(assignment.offeredAt, validityMinutes);
@@ -950,11 +973,24 @@ export class ShipmentsService {
         take: 100,
       });
 
+      let expiredCount = 0;
       for (const assignment of stale) {
-        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId);
+        const activeTrip = await this.prisma.driverAssignment.findFirst({
+          where: {
+            driverId: assignment.driverId,
+            status: 'ACCEPTED',
+            shipmentId: { not: assignment.shipmentId },
+            shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+          },
+          select: { id: true },
+        });
+        if (activeTrip) continue;
+        if (await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId)) {
+          expiredCount += 1;
+        }
       }
 
-      return { expiredCount: stale.length, validityMinutes };
+      return { expiredCount, validityMinutes };
     } catch (error) {
       this.logger.error(`expireStaleAssignmentOffers() failed: ${error instanceof Error ? error.message : String(error)}`);
       return { expiredCount: 0, validityMinutes };
@@ -1063,9 +1099,13 @@ export class ShipmentsService {
             shipment.pickupLatitude,
             shipment.pickupLongitude,
           );
-          const activeAssignments = driver.driverAssignments.filter((assignment) =>
-            ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+          const pendingOffers = driver.driverAssignments.filter((assignment) =>
+            assignment.status === 'OFFERED'
             && !['COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
+          ).length;
+          const acceptedTrips = driver.driverAssignments.filter((assignment) =>
+            assignment.status === 'ACCEPTED'
+            && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
           ).length;
           const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
           const reviews = driver.driverReviews ?? [];
@@ -1091,11 +1131,12 @@ export class ShipmentsService {
                   : pickupDistanceKm <= 100
                     ? 5
                     : 1;
-          const score = capacityScore + 20 + ratingScore + experienceScore + 5 + proximityScore;
-          return { driver, vehicle, activeAssignments, pickupDistanceKm, score };
+          const score = capacityScore + Math.max(5, 20 - acceptedTrips * 15) + ratingScore + experienceScore + 5 + proximityScore;
+          return { driver, vehicle, pendingOffers, acceptedTrips, pickupDistanceKm, score };
         })
-        .filter((candidate) => Boolean(candidate.vehicle) && candidate.activeAssignments === 0)
+        .filter((candidate) => Boolean(candidate.vehicle) && candidate.pendingOffers === 0)
         .sort((left, right) => {
+          if (left.acceptedTrips !== right.acceptedTrips) return left.acceptedTrips - right.acceptedTrips;
           if (left.score !== right.score) return right.score - left.score;
           const leftDistance = left.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
           const rightDistance = right.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
@@ -1158,6 +1199,19 @@ export class ShipmentsService {
     return new Date(new Date(offeredAt).getTime() + validityMinutes * 60_000);
   }
 
+  private async activateQueuedOffers(driverIds: string[], completedShipmentId: string) {
+    const uniqueDriverIds = [...new Set(driverIds)];
+    if (!uniqueDriverIds.length) return;
+    await this.prisma.driverAssignment.updateMany({
+      where: {
+        driverId: { in: uniqueDriverIds },
+        shipmentId: { not: completedShipmentId },
+        status: 'OFFERED',
+      },
+      data: { offeredAt: new Date() },
+    });
+  }
+
   async addTimelineEvent(shipmentId: string, userId: string, role: UserRole, event: Record<string, unknown>) {
     const shipment = await this.prisma.shipment.findUnique({
       where: { id: shipmentId },
@@ -1203,6 +1257,12 @@ export class ShipmentsService {
         shipmentId,
         nextStatus,
       );
+      if (['COMPLETED', 'CANCELLED'].includes(nextStatus)) {
+        await this.activateQueuedOffers(
+          shipment.assignments.filter((assignment) => assignment.status === 'ACCEPTED').map((assignment) => assignment.driverId),
+          shipment.id,
+        );
+      }
     } catch (error) {
       throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
     }
@@ -1870,5 +1930,4 @@ export class ShipmentsService {
   }
 
 }
-
 

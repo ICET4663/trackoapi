@@ -278,6 +278,17 @@ describe('ShipmentsService driver assignment offer expiry', () => {
       'DISPATCHER',
     );
   });
+
+  it('keeps a queued offer open while the driver is completing another trip', async () => {
+    const { service, prisma } = buildService();
+    (prisma.driverAssignment.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'active-assignment' });
+
+    const result = await service.expireStaleAssignmentOffers('shipment-1');
+
+    expect(result).toEqual({ expiredCount: 0, validityMinutes: 15 });
+    expect(prisma.driverAssignment.updateMany).not.toHaveBeenCalled();
+    expect(service.offerAssignment).not.toHaveBeenCalled();
+  });
 });
 
 describe('ShipmentsService.listAssignments access control', () => {
@@ -342,14 +353,14 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
     expect(driverAssignment.create).not.toHaveBeenCalled();
   });
 
-  it('refuses to offer another shipment to a busy driver', async () => {
+  it('refuses to create a second pending offer for the same driver', async () => {
     const { service, driverAssignment } = buildService(
       null,
-      { id: 'assignment-busy', shipmentId: 'shipment-2', status: 'ACCEPTED' },
+      { id: 'assignment-pending', shipmentId: 'shipment-2', status: 'OFFERED' },
     );
 
     await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
-      'already has an active shipment',
+      'another shipment offer awaiting response',
     );
     expect(driverAssignment.create).not.toHaveBeenCalled();
   });
@@ -420,6 +431,29 @@ describe('ShipmentsService.cancelAssignment', () => {
       'already handled by another action',
     );
     expect(shipmentUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShipmentsService queued assignment acceptance', () => {
+  it('keeps the queued load visible but blocks acceptance until the active trip is complete', async () => {
+    const prisma = {
+      driverAssignment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'queued-1',
+          driverId: 'driver-1',
+          shipmentId: 'shipment-next',
+          status: 'OFFERED',
+          offeredAt: new Date(),
+          shipment: { customerId: 'customer-2' },
+        }),
+        findFirst: jest.fn().mockResolvedValue({ shipment: { reference: 'TRK-ACTIVE-1' } }),
+      },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.respondToAssignment('queued-1', 'driver-1', 'ACCEPT')).rejects.toThrow(
+      'Complete TRK-ACTIVE-1 before accepting this queued load.',
+    );
   });
 });
 
@@ -888,5 +922,4 @@ describe('ShipmentsService driver counteroffers', () => {
     });
   });
 });
-
 
