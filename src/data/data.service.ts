@@ -150,10 +150,12 @@ export class DataService {
           const offerWindow = collection === 'driver-jobs'
             ? await this.shipments?.expireStaleAssignmentOffers()
             : undefined;
+          const hiddenShipmentStatuses = ['DELIVERED', 'COMPLETED', 'CANCELLED'] as const;
           return await this.prisma.driverAssignment.findMany({
             where: {
               driverId: userId,
               status: collection === 'driver-jobs' ? 'OFFERED' : 'ACCEPTED',
+              shipment: { status: { notIn: [...hiddenShipmentStatuses] } },
             },
             include: { shipment: true, vehicle: true },
             orderBy: { offeredAt: 'desc' },
@@ -468,7 +470,7 @@ export class DataService {
         id: shipment.reference,
         driverId: assignment?.driverId ?? '',
         customerId: shipment.customerId,
-        status: this.operationStatus(shipment.status),
+        status: this.operationStatus(shipment.status, shipment.adminApproved),
         pickup: shipment.pickupAddress,
         destination: shipment.destinationAddress,
         cargo: shipment.cargoDescription,
@@ -630,11 +632,16 @@ export class DataService {
     return 'Posted';
   }
 
-  private operationStatus(status: string) {
+  private operationStatus(status: string, adminApproved = false) {
     if (['DELIVERED', 'COMPLETED'].includes(status)) return 'Delivered';
     if (status === 'CANCELLED') return 'Cancelled';
     if (status === 'DISPUTED') return 'Delayed';
-    return 'In transit';
+    if (status === 'DRAFT') return 'Draft';
+    if (['QUOTED', 'PENDING_PAYMENT'].includes(status)) return 'Payment required';
+    if (status === 'ESCROW_FUNDED') return adminApproved ? 'Ready for assignment' : 'Awaiting review';
+    if (status === 'DRIVER_ASSIGNED') return 'Driver offered';
+    if (['DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'].includes(status)) return 'In transit';
+    return 'Pending';
   }
 
   private stageIndex(status: string) {
@@ -684,3 +691,4 @@ export class DataService {
     return error instanceof Error ? error.message : String(error);
   }
 }
+

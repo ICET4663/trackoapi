@@ -189,3 +189,59 @@ describe('DataService never fakes success on a real failure', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
+
+describe('DataService driver workflow collections', () => {
+  it('excludes final shipments from accepted active trips', async () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const prisma = { driverAssignment: { findMany } } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await service.list('active-trips', 'driver-1', 'DRIVER');
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        driverId: 'driver-1',
+        status: 'ACCEPTED',
+        shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      }),
+    }));
+  });
+
+  it('reports each operations checkpoint instead of labelling every shipment in transit', async () => {
+    const now = new Date('2026-09-23T10:00:00.000Z');
+    const shipment = (id: string, status: string, adminApproved = false) => ({
+      id,
+      reference: `TRK-${id}`,
+      customerId: 'customer-1',
+      status,
+      adminApproved,
+      pickupAddress: 'Lagos',
+      destinationAddress: 'Abuja',
+      cargoDescription: 'Food',
+      quotedPriceKobo: 100_000,
+      updatedAt: now,
+    });
+    const prisma = {
+      shipment: { findMany: jest.fn().mockResolvedValue([
+        shipment('draft', 'DRAFT'),
+        shipment('payment', 'PENDING_PAYMENT'),
+        shipment('review', 'ESCROW_FUNDED'),
+        shipment('ready', 'ESCROW_FUNDED', true),
+        shipment('trip', 'PICKED_UP', true),
+      ]) },
+      driverAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+    } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    const result = await service.list('operation-shipments', 'admin-1', 'ADMIN');
+
+    expect((result as Array<{ status: string }>).map((item) => item.status)).toEqual([
+      'Draft',
+      'Payment required',
+      'Awaiting review',
+      'Ready for assignment',
+      'In transit',
+    ]);
+  });
+});
+
