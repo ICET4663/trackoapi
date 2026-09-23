@@ -1823,6 +1823,21 @@ export class SettingsService {
       throw new BadRequestException('Only KYC-verified active drivers can be assigned to a truck.');
     }
 
+    const liveAssignment = await this.prisma.driverAssignment.findFirst({
+      where: {
+        driverId,
+        status: { in: ['OFFERED', 'ACCEPTED'] },
+        shipment: { status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED'] } },
+      },
+      select: { vehicleId: true, shipment: { select: { reference: true } } },
+      orderBy: { offeredAt: 'desc' },
+    });
+    if (liveAssignment && liveAssignment.vehicleId !== vehicleId) {
+      throw new BadRequestException(
+        `This driver is committed to ${liveAssignment.shipment.reference}. Complete or withdraw that load before changing trucks.`,
+      );
+    }
+
     // A driver drives one truck at a time - clear any other vehicle they were on before
     // linking the new one, so matching logic never has to reason about a driver "having"
     // more than one active assignment source.
@@ -1869,6 +1884,13 @@ export class SettingsService {
     });
 
     return { id: updated.id, plateNumber: updated.plateNumber, assignedDriverId: null };
+  }
+
+  async unassignDriverFromOwnedVehicle(vehicleId: string, ownerId: string) {
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { ownerId: true } });
+    if (!vehicle) throw new NotFoundException('Truck not found.');
+    if (vehicle.ownerId !== ownerId) throw new ForbiddenException('You can only unassign drivers from trucks that belong to your fleet.');
+    return this.unassignDriverFromVehicle(vehicleId);
   }
 
   // A real read failure used to be indistinguishable from "no row yet" (the normal state

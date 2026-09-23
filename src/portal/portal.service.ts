@@ -96,17 +96,43 @@ export class PortalService {
   }
 
   async owner(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      include: {
-        profile: true,
-        vehicles: {
-          include: { documents: true, assignedDriver: { include: { profile: true } } },
-          orderBy: { createdAt: 'desc' },
-          take: 50,
+    const [user, drivers] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        include: {
+          profile: true,
+          vehicles: {
+            include: {
+              documents: true,
+              assignedDriver: { include: { profile: true } },
+              assignments: {
+                where: { status: { in: ['OFFERED', 'ACCEPTED'] } },
+                include: { shipment: true, driver: { include: { profile: true } } },
+                orderBy: { offeredAt: 'desc' },
+                take: 20,
+              },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+          },
         },
-      },
-    });
+      }),
+      this.prisma.user.findMany({
+        where: { role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED' },
+        include: {
+          profile: true,
+          driverVehicles: { where: { isActive: true }, take: 1 },
+          driverAssignments: {
+            include: { shipment: true, vehicle: true },
+            orderBy: { offeredAt: 'desc' },
+            take: 100,
+          },
+          driverReviews: { select: { rating: true }, take: 100 },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      }),
+    ]);
 
     const trucks = user?.vehicles ?? [];
     const mappedTrucks = trucks.map((truck) => ({
@@ -119,7 +145,7 @@ export class PortalService {
       status: truck.assignedDriverId ? 'Assigned' : 'Available',
       base: truck.registrationState ?? 'Not set',
       assignedDriver: truck.assignedDriver?.profile?.fullName ?? truck.assignedDriver?.email,
-      documents: truck.documents.length >= 3 && truck.documents.every((document) => document.state === 'VERIFIED')
+      documents: this.vehicleDocumentsReady(truck.documents)
         ? 'Verified'
         : truck.documents.some((document) => document.state === 'PENDING_REVIEW')
           ? 'Pending review'
@@ -127,6 +153,66 @@ export class PortalService {
             ? 'Action required'
             : 'Incomplete',
     }));
+
+    const activeLoads = trucks.flatMap((truck) => truck.assignments
+      .filter((assignment) => !['COMPLETED', 'CANCELLED'].includes(assignment.shipment.status))
+      .map((assignment) => ({
+        assignmentId: assignment.id,
+        shipmentId: assignment.shipment.id,
+        reference: assignment.shipment.reference,
+        truckId: truck.id,
+        truck: truck.plateNumber,
+        driverId: assignment.driverId,
+        driver: assignment.driver.profile?.fullName ?? assignment.driver.email,
+        assignmentStatus: assignment.status,
+        shipmentStatus: assignment.shipment.status,
+        origin: assignment.shipment.pickupLabel,
+        destination: assignment.shipment.destinationLabel,
+        amount: money(assignment.shipment.quotedPriceKobo),
+      })));
+    const seekingDrivers = drivers.map((driver) => {
+      const vehicle = driver.driverVehicles[0];
+      const activeAssignment = driver.driverAssignments.find((assignment) =>
+        ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+        && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
+      );
+      const completedAssignments = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED');
+      const averageRating = driver.driverReviews.length
+        ? driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length
+        : 0;
+      const state = driver.profile?.state ?? 'State pending';
+      const location = [driver.profile?.city, driver.profile?.state].filter(Boolean).join(', ') || 'Location pending';
+      const previousShipment = completedAssignments[0]?.shipment;
+      const neededTruck = ['Flatbed', 'Box truck', 'Tanker', 'Tipper'].includes(vehicle?.type ?? '')
+        ? vehicle!.type
+        : 'Flatbed';
+      return {
+        id: driver.id,
+        name: driver.profile?.fullName ?? driver.email,
+        location,
+        state,
+        experienceYears: Math.max(0, Math.floor(completedAssignments.length / 20)),
+        rating: averageRating,
+        completedTrips: completedAssignments.length,
+        safetyScore: 95,
+        neededTruck,
+        availability: activeAssignment
+          ? `${activeAssignment.status === 'ACCEPTED' ? 'On trip' : 'Offer pending'} · ${activeAssignment.shipment.reference}`
+          : 'Ready today',
+        listedMinutes: Math.max(0, Math.floor((Date.now() - driver.updatedAt.getTime()) / 60_000)),
+        previousRoute: previousShipment
+          ? `${previousShipment.pickupLabel} to ${previousShipment.destinationLabel}`
+          : 'No completed route yet',
+        preferredRoutes: state === 'State pending' ? [] : [state],
+        phone: driver.phone ?? 'Phone pending',
+        verified: true,
+        notes: vehicle ? `${vehicle.type} ${vehicle.plateNumber}` : 'Waiting for a verified truck assignment.',
+        assignedTruckId: vehicle?.id ?? null,
+        assignedTruck: vehicle?.plateNumber ?? null,
+        activeShipmentReference: activeAssignment?.shipment.reference ?? null,
+        canReceiveTruck: !activeAssignment,
+      };
+    });
 
     return {
       owner: {
@@ -138,13 +224,24 @@ export class PortalService {
         registeredTrucks: trucks.length,
         assignedTrucks: trucks.filter((truck) => truck.assignedDriverId).length,
         availableTrucks: trucks.filter((truck) => !truck.assignedDriverId).length,
-        driverPool: 0,
-        documentsDue: 0,
+        driverPool: seekingDrivers.length,
+        documentsDue: trucks.filter((truck) => !this.vehicleDocumentsReady(truck.documents)).length,
       },
       trucks: mappedTrucks,
       availableTrucks: mappedTrucks.filter((truck) => truck.status === 'Available'),
-      seekingDrivers: [],
+      seekingDrivers,
+      activeLoads,
     };
+  }
+
+  private vehicleDocumentsReady(documents: Array<{ type: string; state: string; expires: Date | null }>) {
+    const required = ['REGISTRATION', 'INSURANCE', 'ROADWORTHINESS'];
+    const now = Date.now();
+    return required.every((type) => documents.some((document) =>
+      document.type === type
+      && document.state === 'VERIFIED'
+      && (!document.expires || document.expires.getTime() > now),
+    ));
   }
 
   private toCustomerShipment(shipment: {

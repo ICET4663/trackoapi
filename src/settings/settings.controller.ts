@@ -146,6 +146,15 @@ export class SettingsController {
     return this.settingsService.unassignDriverFromVehicle(vehicleId);
   }
 
+  @Delete('owner/fleet-assignments/:vehicleId')
+  async unassignDriverFromOwnedVehicle(
+    @Param('vehicleId') vehicleId: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.unassignDriverFromOwnedVehicle(vehicleId, owner.sub);
+  }
+
   @Get('settings/notification-preferences')
   async notificationPreferences(@Query('role') role = 'CUSTOMER', @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, role as UserRole);

@@ -497,7 +497,10 @@ describe('SettingsService fleet assignments', () => {
 
   function buildService(prismaOverrides: Record<string, unknown> = {}) {
     const notificationsCreate = jest.fn().mockResolvedValue({ id: 'notice-1' });
-    const prisma = { ...prismaOverrides } as unknown as PrismaService;
+    const prisma = {
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+      ...prismaOverrides,
+    } as unknown as PrismaService;
     const service = new SettingsService(
       prisma,
       { create: notificationsCreate } as unknown as NotificationsService,
@@ -563,6 +566,23 @@ describe('SettingsService fleet assignments', () => {
     expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-1' }));
   });
 
+  it('does not move a driver away from the truck attached to a live shipment', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ id: 'vehicle-2', plateNumber: 'ABJ-2', ownerId: 'owner-1', documents: readyDocuments });
+    const userFindUnique = jest.fn().mockResolvedValue(verifiedDriver);
+    const transaction = jest.fn();
+    const { service } = buildService({
+      vehicle: { findUnique: vehicleFindUnique },
+      user: { findUnique: userFindUnique },
+      driverAssignment: { findFirst: jest.fn().mockResolvedValue({ vehicleId: 'vehicle-1', shipment: { reference: 'TRK-ACTIVE-1' } }) },
+      $transaction: transaction,
+    });
+
+    await expect(service.assignDriverToVehicle('vehicle-2', 'driver-1')).rejects.toThrow(
+      'committed to TRK-ACTIVE-1',
+    );
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it('lets an owner assign a verified driver to a ready truck in their own fleet', async () => {
     const vehicleFindUnique = jest.fn()
       .mockResolvedValueOnce({ ownerId: 'owner-1' })
@@ -608,6 +628,14 @@ describe('SettingsService fleet assignments', () => {
 
     expect(result).toMatchObject({ id: 'vehicle-1', assignedDriverId: null });
     expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', tone: 'WARNING' }));
+  });
+
+  it('prevents an owner from unassigning a truck outside their fleet', async () => {
+    const vehicleFindUnique = jest.fn().mockResolvedValue({ ownerId: 'different-owner' });
+    const { service } = buildService({ vehicle: { findUnique: vehicleFindUnique } });
+
+    await expect(service.unassignDriverFromOwnedVehicle('vehicle-1', 'owner-1'))
+      .rejects.toThrow('belong to your fleet');
   });
 });
 
