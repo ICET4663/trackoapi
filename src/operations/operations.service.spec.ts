@@ -185,7 +185,10 @@ describe('OperationsService.assignmentQueue driver matching', () => {
             id: 'driver-best', email: 'best@tracko.ng', phone: '+2341', verificationStatus: 'VERIFIED',
             profile: { fullName: 'Best Driver' },
             driverVehicles: [{ id: 'truck-fit', plateNumber: 'FIT-1', type: 'Flatbed', capacityKg: 10000, capacityM3: 30, documents: verifiedDocuments }],
-            driverAssignments: Array.from({ length: 5 }, () => ({ status: 'ACCEPTED', shipment: { status: 'COMPLETED' } })),
+            driverAssignments: Array.from({ length: 5 }, (_, index) => ({
+              status: 'ACCEPTED',
+              shipment: { id: `completed-${index}`, reference: `TRK-DONE-${index}`, status: 'COMPLETED' },
+            })),
             driverReviews: [{ rating: 5 }, { rating: 5 }],
           },
           {
@@ -193,8 +196,8 @@ describe('OperationsService.assignmentQueue driver matching', () => {
             profile: { fullName: 'Busy Driver' },
             driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, capacityM3: 40, documents: verifiedDocuments }],
             driverAssignments: [
-              { status: 'ACCEPTED', shipment: { status: 'IN_TRANSIT' } },
-              { status: 'OFFERED', shipment: { status: 'DRIVER_ASSIGNED' } },
+              { status: 'ACCEPTED', shipment: { id: 'active-1', reference: 'TRK-ACTIVE-1', status: 'IN_TRANSIT' } },
+              { status: 'OFFERED', shipment: { id: 'active-2', reference: 'TRK-ACTIVE-2', status: 'DRIVER_ASSIGNED' } },
             ],
             driverReviews: [],
           },
@@ -216,14 +219,21 @@ describe('OperationsService.assignmentQueue driver matching', () => {
 
     const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
     const bestMatches = queue.drivers[0].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
-    const busyMatches = queue.drivers[1].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
+    const busyMatches = queue.drivers[1].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null; reason: string }>;
     const smallMatches = queue.drivers[2].matches as Record<string, { score: number; eligible: boolean; vehicleId: string | null }>;
 
     expect(queue.drivers[0]).toMatchObject({ activeAssignments: 0, completedTrips: 5, averageRating: 5 });
     expect(bestMatches['shipment-1']).toMatchObject({ eligible: true, vehicleId: 'truck-fit' });
-    expect(busyMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
+    expect(queue.drivers[1]).toMatchObject({
+      activeShipment: { id: 'active-1', reference: 'TRK-ACTIVE-1', status: 'IN_TRANSIT', assignmentStatus: 'ACCEPTED' },
+    });
+    expect(busyMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: 'truck-large' });
+    expect(busyMatches['shipment-1'].reason).toContain('TRK-ACTIVE-1');
     expect(bestMatches['shipment-1'].score).toBeGreaterThan(busyMatches['shipment-1'].score);
     expect(smallMatches['shipment-1']).toMatchObject({ score: 0, eligible: false, vehicleId: null });
+    const shipmentSql = prisma.$queryRawUnsafe.mock.calls[0][0] as string;
+    expect(shipmentSql).toContain(`history."status" = 'REJECTED'`);
+    expect(shipmentSql).not.toContain(`history."status" in ('REJECTED'`);
   });
 
   it('removes offline drivers from the dispatcher matching queue', async () => {
@@ -501,4 +511,5 @@ describe('OperationsService.fraudSignals', () => {
     await expect(build({}).fraudSignals({ sub: 'x', role: 'DRIVER' } as OperationActor)).rejects.toThrow('Only operations users');
   });
 });
+
 

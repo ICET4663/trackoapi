@@ -225,6 +225,10 @@ describe('ShipmentsService driver assignment offer expiry', () => {
       { driverId: 'driver-2', vehicleId: 'vehicle-2' },
       'DISPATCHER',
     );
+    expect(prisma.driverAssignment.findMany).toHaveBeenNthCalledWith(2, {
+      where: { shipmentId: 'shipment-1', status: 'REJECTED' },
+      select: { driverId: true },
+    });
   });
 
   it('automatically reassigns to the nearest recently located eligible driver', async () => {
@@ -884,4 +888,5 @@ describe('ShipmentsService driver counteroffers', () => {
     });
   });
 });
+
 

@@ -47,7 +47,10 @@ type DriverMatchInput = {
     id: string; plateNumber: string; type: string; capacityKg: number | null; capacityM3: number | null;
     documents: Array<{ type: string; state: string; expires: Date | string | null }>;
   }>;
-  driverAssignments: Array<{ status: string; shipment: { status: string } }>;
+  driverAssignments: Array<{
+    status: string;
+    shipment: { id: string; reference: string; status: string };
+  }>;
   driverReviews: Array<{ rating: number }>;
   lastKnownLatitude?: number | null;
   lastKnownLongitude?: number | null;
@@ -160,7 +163,7 @@ export class OperationsService {
               select json_agg(distinct history."driverId")
               from "DriverAssignment" history
               where history."shipmentId" = s."id"
-                and history."status" in ('REJECTED'::"AssignmentStatus", 'EXPIRED'::"AssignmentStatus", 'CANCELLED'::"AssignmentStatus")
+                and history."status" = 'REJECTED'::"AssignmentStatus"
             ), '[]'::json) as "rejectedDriverIds"
           from "Shipment" s
           join "Escrow" e on e."shipmentId" = s."id"
@@ -190,7 +193,7 @@ export class OperationsService {
               include: { documents: { select: { type: true, state: true, expires: true } } },
             },
             driverAssignments: {
-              select: { status: true, shipment: { select: { status: true } } },
+              select: { status: true, shipment: { select: { id: true, reference: true, status: true } } },
               orderBy: { offeredAt: 'desc' },
               take: 100,
             },
@@ -246,30 +249,44 @@ export class OperationsService {
             : null,
           createdAt: this.isoDate(shipment.createdAt),
         })),
-        drivers: availableDrivers.map((driver) => ({
-          id: driver.id,
-          fullName: driver.profile?.fullName ?? driver.email,
-          email: driver.email,
-          phone: driver.phone,
-          verificationStatus: driver.verificationStatus,
-          activeAssignments: driver.driverAssignments.filter((assignment) =>
+        drivers: availableDrivers.map((driver) => {
+          const activeAssignment = driver.driverAssignments.find((assignment) =>
             ['OFFERED', 'ACCEPTED'].includes(assignment.status)
             && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
-          ).length,
-          completedTrips: driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length,
-          averageRating: driver.driverReviews.length
-            ? Number((driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length).toFixed(1))
-            : null,
-          vehicles: driver.driverVehicles.map((vehicle) => ({
-            id: vehicle.id,
-            plateNumber: vehicle.plateNumber,
-            type: vehicle.type,
-            capacityKg: vehicle.capacityKg,
-            capacityM3: vehicle.capacityM3,
-            readiness: this.vehicleReadiness(vehicle),
-          })),
-          matches: Object.fromEntries(shipments.map((shipment) => [shipment.id, this.matchDriver(driver, shipment)])),
-        })),
+          );
+          return {
+            id: driver.id,
+            fullName: driver.profile?.fullName ?? driver.email,
+            email: driver.email,
+            phone: driver.phone,
+            verificationStatus: driver.verificationStatus,
+            activeAssignments: driver.driverAssignments.filter((assignment) =>
+              ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+              && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
+            ).length,
+            activeShipment: activeAssignment
+              ? {
+                  id: activeAssignment.shipment.id,
+                  reference: activeAssignment.shipment.reference,
+                  status: activeAssignment.shipment.status,
+                  assignmentStatus: activeAssignment.status,
+                }
+              : null,
+            completedTrips: driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length,
+            averageRating: driver.driverReviews.length
+              ? Number((driver.driverReviews.reduce((total, review) => total + review.rating, 0) / driver.driverReviews.length).toFixed(1))
+              : null,
+            vehicles: driver.driverVehicles.map((vehicle) => ({
+              id: vehicle.id,
+              plateNumber: vehicle.plateNumber,
+              type: vehicle.type,
+              capacityKg: vehicle.capacityKg,
+              capacityM3: vehicle.capacityM3,
+              readiness: this.vehicleReadiness(vehicle),
+            })),
+            matches: Object.fromEntries(shipments.map((shipment) => [shipment.id, this.matchDriver(driver, shipment)])),
+          };
+        }),
       };
     } catch (error) {
       // Used to fall back to a single fabricated funded shipment and a fake "92% match"
@@ -281,9 +298,6 @@ export class OperationsService {
   }
 
   private matchDriver(driver: DriverMatchInput, shipment: AssignmentQueueShipmentRow) {
-    if ((shipment.rejectedDriverIds ?? []).includes(driver.id)) {
-      return { score: 0, eligible: false, vehicleId: null, reason: 'Driver already declined or missed this shipment offer.' };
-    }
     const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
     const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
     const fitsLoad = (candidate: DriverMatchInput['driverVehicles'][number]) =>
@@ -302,17 +316,24 @@ export class OperationsService {
       return { score: 0, eligible: false, vehicleId: null, reason: 'No active truck fits both the cargo weight and physical volume.' };
     }
 
-    const activeAssignments = driver.driverAssignments.filter((assignment) =>
+    const activeAssignmentRows = driver.driverAssignments.filter((assignment) =>
       ['OFFERED', 'ACCEPTED'].includes(assignment.status)
       && !FINAL_SHIPMENT_STATUSES.includes(assignment.shipment.status as never),
-    ).length;
+    );
+    const activeAssignments = activeAssignmentRows.length;
     if (activeAssignments > 0) {
+      const activeReference = activeAssignmentRows[0]?.shipment.reference;
       return {
         score: 0,
         eligible: false,
-        vehicleId: null,
-        reason: `Driver already has ${activeAssignments} active shipment${activeAssignments === 1 ? '' : 's'} or pending offer${activeAssignments === 1 ? '' : 's'}.`,
+        vehicleId: vehicle.id,
+        reason: activeReference
+          ? `Driver is currently assigned to ${activeReference}. Complete or resolve that trip before assigning another load.`
+          : `Driver already has ${activeAssignments} active shipment${activeAssignments === 1 ? '' : 's'} or pending offer${activeAssignments === 1 ? '' : 's'}.`,
       };
+    }
+    if ((shipment.rejectedDriverIds ?? []).includes(driver.id)) {
+      return { score: 0, eligible: false, vehicleId: vehicle.id, reason: 'Driver declined this shipment offer. Select another driver.' };
     }
     const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
     const averageRating = driver.driverReviews.length
@@ -1285,4 +1306,5 @@ export class OperationsService {
   }
 
 }
+
 

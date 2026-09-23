@@ -665,7 +665,7 @@ export class ShipmentsService {
       const validityMinutes = await this.assignmentOfferValidityMinutes();
       const expiresAt = this.assignmentExpiresAt(assignment.offeredAt, validityMinutes);
       if (expiresAt.getTime() <= Date.now()) {
-        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId);
+        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId);
         throw new BadRequestException('This load offer has expired. Dispatch will send the shipment to another eligible driver.');
       }
 
@@ -716,7 +716,9 @@ export class ShipmentsService {
         actionUrl: `/shipments/${updated.shipmentId}`,
       });
 
-      const nextAssignment = action === 'REJECT' ? await this.offerNextEligibleDriver(updated.shipmentId) : null;
+      const nextAssignment = action === 'REJECT'
+        ? await this.offerNextEligibleDriver(updated.shipmentId, [updated.driverId])
+        : null;
       return {
         ...this.toAssignmentRecord(updated, validityMinutes),
         nextAssignment,
@@ -925,7 +927,7 @@ export class ShipmentsService {
       }).catch(() => null),
     ]);
 
-    const nextAssignment = await this.offerNextEligibleDriver(updated.shipmentId);
+    const nextAssignment = await this.offerNextEligibleDriver(updated.shipmentId, [updated.driverId]);
     return {
       ...this.toAssignmentRecord(updated, await this.assignmentOfferValidityMinutes()),
       nextAssignment,
@@ -949,7 +951,7 @@ export class ShipmentsService {
       });
 
       for (const assignment of stale) {
-        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId);
+        await this.expireAssignment(assignment.id, assignment.shipmentId, assignment.shipment.customerId, assignment.driverId);
       }
 
       return { expiredCount: stale.length, validityMinutes };
@@ -959,7 +961,7 @@ export class ShipmentsService {
     }
   }
 
-  private async expireAssignment(assignmentId: string, shipmentId: string, customerId: string) {
+  private async expireAssignment(assignmentId: string, shipmentId: string, customerId: string, driverId: string) {
     const updated = await this.prisma.driverAssignment.updateMany({
       where: { id: assignmentId, status: 'OFFERED' },
       data: { status: 'EXPIRED', rejectedAt: new Date() },
@@ -994,11 +996,11 @@ export class ShipmentsService {
       entityId: shipmentId,
       actionUrl: `/shipments/${shipmentId}`,
     }).catch(() => null);
-    await this.offerNextEligibleDriver(shipmentId);
+    await this.offerNextEligibleDriver(shipmentId, [driverId]);
     return true;
   }
 
-  private async offerNextEligibleDriver(shipmentId: string) {
+  private async offerNextEligibleDriver(shipmentId: string, excludedDriverIds: string[] = []) {
     try {
       const [shipment, previousAssignments, candidates, unavailableDrivers] = await Promise.all([
         this.prisma.shipment.findUnique({
@@ -1006,7 +1008,7 @@ export class ShipmentsService {
           select: { cargoWeightKg: true, cargoVolumeM3: true, pickupLatitude: true, pickupLongitude: true },
         }),
         this.prisma.driverAssignment.findMany({
-          where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED', 'CANCELLED'] } },
+          where: { shipmentId, status: 'REJECTED' },
           select: { driverId: true },
         }),
         this.prisma.user.findMany({
@@ -1038,7 +1040,10 @@ export class ShipmentsService {
       ]);
       if (!shipment) return null;
 
-      const excluded = new Set(previousAssignments.map((assignment) => assignment.driverId));
+      const excluded = new Set([
+        ...previousAssignments.map((assignment) => assignment.driverId),
+        ...excludedDriverIds,
+      ]);
       const availabilityByDriver = new Map(unavailableDrivers.map((driver) => [driver.userId, driver]));
       const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
       const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
@@ -1865,4 +1870,5 @@ export class ShipmentsService {
   }
 
 }
+
 
