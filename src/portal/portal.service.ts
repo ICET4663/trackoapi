@@ -173,7 +173,10 @@ export class PortalService {
     const seekingDrivers = drivers.map((driver) => {
       const vehicle = driver.driverVehicles[0];
       const activeAssignment = driver.driverAssignments.find((assignment) =>
-        ['OFFERED', 'ACCEPTED'].includes(assignment.status)
+        assignment.status === 'ACCEPTED'
+        && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
+      ) ?? driver.driverAssignments.find((assignment) =>
+        assignment.status === 'OFFERED'
         && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
       );
       const completedAssignments = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED');
@@ -277,3 +280,4 @@ export class PortalService {
     };
   }
 }
+
