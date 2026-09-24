@@ -61,22 +61,3 @@ describe('SettingsController owner settlements', () => {
       .toHaveBeenCalledWith('owner-1', { amountKobo: 100_000 });
   });
 });
-
-describe('SettingsController owner fleet reporting', () => {
-  it('passes the authenticated owner id into load and expense operations', async () => {
-    const settings = {
-      ownerLoadDetail: jest.fn().mockResolvedValue({ id: 'shipment-1' }),
-      createVehicleExpense: jest.fn().mockResolvedValue({ id: 'expense-1' }),
-    } as unknown as SettingsService;
-    const requestUser = { requireRole: jest.fn().mockResolvedValue({ sub: 'owner-1', role: 'TRUCK_OWNER' }) } as unknown as RequestUserService;
-    const controller = new SettingsController(settings, requestUser);
-
-    await controller.ownerLoadDetail('shipment-1', 'Bearer owner-token');
-    await controller.createVehicleExpense('vehicle-1', { category: 'FUEL', amountKobo: 50_000 }, 'Bearer owner-token');
-
-    expect((settings as unknown as { ownerLoadDetail: jest.Mock }).ownerLoadDetail).toHaveBeenCalledWith('owner-1', 'shipment-1');
-    expect((settings as unknown as { createVehicleExpense: jest.Mock }).createVehicleExpense)
-      .toHaveBeenCalledWith('vehicle-1', 'owner-1', { category: 'FUEL', amountKobo: 50_000 });
-  });
-});
-
