@@ -341,6 +341,39 @@ export class SettingsController {
     return this.settingsService.setPayoutAccount(user.sub, body);
   }
 
+  @Get('owner/payout-account')
+  async ownerBankAccount(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.bankAccount(user.sub);
+  }
+
+  @Get('owner/earnings')
+  async ownerEarnings(@Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.ownerEarnings(user.sub);
+  }
+
+  @Post('owner/withdrawals')
+  async requestOwnerWithdrawal(@Body() body: { amountKobo?: number; amount?: number; note?: string }, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.requestOwnerWithdrawal(user.sub, body);
+  }
+
+  @Get('owner/payout-account/banks')
+  async ownerPayoutBanks(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.payoutBanks();
+  }
+
+  @Post('owner/payout-account/change-request')
+  async createOwnerBankAccountChange(
+    @Body() body: { bankCode?: string; bankName?: string; accountNumber?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.setPayoutAccount(user.sub, body);
+  }
+
   @Get('driver/documents')
   async driverDocuments(@Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');

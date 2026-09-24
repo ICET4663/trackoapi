@@ -50,6 +50,8 @@ type DriverEscrowEarningRow = {
   updatedAt: Date;
 };
 
+type SettlementBeneficiary = 'DRIVER' | 'TRUCK_OWNER';
+
 type SupportTicketRow = {
   id: string;
   shipmentId: string | null;
@@ -1065,36 +1067,59 @@ export class SettingsService {
     };
   }
 
-  async driverEarnings(userId: string, options: { strict?: boolean } = {}) {
+  private async driverSettlementSharePercent() {
+    const store = this.prisma.platformSetting;
+    const setting = store?.findUnique
+      ? await store.findUnique({ where: { key: 'driverOwnerSharePercent' } }).catch(() => null)
+      : null;
+    const configured = Number(setting?.value ?? 70);
+    return Number.isFinite(configured) ? Math.min(100, Math.max(0, configured)) : 70;
+  }
+
+  private async settlementEarnings(userId: string, beneficiary: SettlementBeneficiary, options: { strict?: boolean } = {}) {
     try {
+      const driverSharePercent = await this.driverSettlementSharePercent();
+      const amountExpression = beneficiary === 'DRIVER'
+        ? `case when v."ownerId" is not null and v."ownerId" <> da."driverId"
+             then round(e."amount"::numeric * $2::numeric / 100)::int
+             else e."amount" end`
+        : `round(e."amount"::numeric * (100 - $2::numeric) / 100)::int`;
+      const beneficiaryFilter = beneficiary === 'DRIVER'
+        ? `da."driverId" = $1`
+        : `v."ownerId" = $1 and v."ownerId" <> da."driverId"`;
+
       const [releasedRows, pendingRows, bankAccount, withdrawalLogs] = await Promise.all([
         this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
           `select s."id" as "shipmentId", s."reference",
              concat(s."pickupLabel", ' to ', s."destinationLabel") as "route",
-             e."amount", e."currency", e."status"::text as "status", e."updatedAt"
+             ${amountExpression} as "amount", e."currency", e."status"::text as "status", e."updatedAt"
            from "DriverAssignment" da
            join "Shipment" s on s."id" = da."shipmentId"
            join "Escrow" e on e."shipmentId" = s."id"
-           where da."driverId" = $1
+           left join "Vehicle" v on v."id" = da."vehicleId"
+           where ${beneficiaryFilter}
              and da."status" = 'ACCEPTED'
              and e."status" = 'RELEASED'
            order by e."updatedAt" desc
            limit 100`,
           userId,
+          driverSharePercent,
         ),
         this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
           `select s."id" as "shipmentId", s."reference",
              concat(s."pickupLabel", ' to ', s."destinationLabel") as "route",
-             e."amount", e."currency", e."status"::text as "status", e."updatedAt"
+             ${amountExpression} as "amount", e."currency", e."status"::text as "status", e."updatedAt"
            from "DriverAssignment" da
            join "Shipment" s on s."id" = da."shipmentId"
            join "Escrow" e on e."shipmentId" = s."id"
-           where da."driverId" = $1
+           left join "Vehicle" v on v."id" = da."vehicleId"
+           where ${beneficiaryFilter}
              and da."status" = 'ACCEPTED'
              and e."status" in ('FUNDED', 'HELD', 'RELEASE_READY')
            order by e."updatedAt" desc
            limit 100`,
           userId,
+          driverSharePercent,
         ),
         this.bankAccount(userId),
         this.prisma.payout.findMany({
@@ -1124,6 +1149,11 @@ export class SettingsService {
       const availableBalance = Math.max(0, releasedTotal - withdrawalTotal);
 
       return {
+        beneficiary,
+        sharePercent: beneficiary === 'DRIVER' ? driverSharePercent : 100 - driverSharePercent,
+        shareLabel: beneficiary === 'DRIVER'
+          ? `${driverSharePercent}% driver share (100% when using a self-owned truck)`
+          : `${100 - driverSharePercent}% truck-owner share`,
         availableBalance,
         availableBalanceLabel: this.formatMoney(availableBalance),
         pendingEscrow: pendingTotal,
@@ -1160,7 +1190,25 @@ export class SettingsService {
       // that has nothing to do with the driver's real released escrow. Reserve the
       // friendly fallback for the read-only earnings screen.
       if (options.strict) throw error;
+      if (beneficiary === 'TRUCK_OWNER') {
+        return {
+          beneficiary,
+          sharePercent: 30,
+          shareLabel: '30% truck-owner share',
+          availableBalance: 0,
+          availableBalanceLabel: 'N0',
+          pendingEscrow: 0,
+          pendingEscrowLabel: 'N0',
+          releasedTotal: 0,
+          releasedTotalLabel: 'N0',
+          bankAccount: await this.bankAccount(userId),
+          transactions: [],
+        };
+      }
       return {
+        beneficiary,
+        sharePercent: 70,
+        shareLabel: '70% driver share (100% when using a self-owned truck)',
         availableBalance: 51240000,
         availableBalanceLabel: 'N512,400',
         pendingEscrow: 33000000,
@@ -1177,15 +1225,31 @@ export class SettingsService {
     }
   }
 
+  async driverEarnings(userId: string, options: { strict?: boolean } = {}) {
+    return this.settlementEarnings(userId, 'DRIVER', options);
+  }
+
+  async ownerEarnings(userId: string, options: { strict?: boolean } = {}) {
+    return this.settlementEarnings(userId, 'TRUCK_OWNER', options);
+  }
+
   async requestDriverWithdrawal(userId: string, input: { amountKobo?: number; amount?: number; note?: string }) {
+    return this.requestSettlementWithdrawal(userId, 'DRIVER', input);
+  }
+
+  async requestOwnerWithdrawal(userId: string, input: { amountKobo?: number; amount?: number; note?: string }) {
+    return this.requestSettlementWithdrawal(userId, 'TRUCK_OWNER', input);
+  }
+
+  private async requestSettlementWithdrawal(userId: string, beneficiary: SettlementBeneficiary, input: { amountKobo?: number; amount?: number; note?: string }) {
     const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
     if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
       throw new BadRequestException('Enter a valid withdrawal amount.');
     }
 
-    let earnings: Awaited<ReturnType<typeof this.driverEarnings>>;
+    let earnings: Awaited<ReturnType<typeof this.settlementEarnings>>;
     try {
-      earnings = await this.driverEarnings(userId, { strict: true });
+      earnings = await this.settlementEarnings(userId, beneficiary, { strict: true });
     } catch (error) {
       throw new InternalServerErrorException(`Could not verify your available balance. Please try again: ${this.errorMessage(error)}`);
     }
@@ -1198,7 +1262,7 @@ export class SettingsService {
       throw new BadRequestException('Verify your payout account before requesting withdrawal.');
     }
 
-    const [driver] = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string }>>(
+    const [recipient] = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string }>>(
       'select "verificationStatus"::text as "verificationStatus" from "User" where "id" = $1 limit 1',
       userId,
     );
@@ -1206,8 +1270,8 @@ export class SettingsService {
     // same as "not verified", not silently skipped. The original `driver && ...` check let
     // an unverified/unresolvable driver bypass the KYC gate entirely if this query ever
     // returned zero rows for a valid session.
-    if (!driver || driver.verificationStatus !== 'VERIFIED') {
-      throw new BadRequestException('Complete KYC approval before requesting driver payout.');
+    if (!recipient || recipient.verificationStatus !== 'VERIFIED') {
+      throw new BadRequestException(`Complete KYC approval before requesting ${beneficiary === 'DRIVER' ? 'driver' : 'truck-owner'} payout.`);
     }
 
     const payout = await this.prisma.payout.create({
@@ -1222,10 +1286,10 @@ export class SettingsService {
     await this.prisma.auditLog.create({
       data: {
         actorId: userId,
-        action: 'PAYOUT_WITHDRAWAL_REQUESTED',
+        action: beneficiary === 'DRIVER' ? 'PAYOUT_WITHDRAWAL_REQUESTED' : 'OWNER_PAYOUT_WITHDRAWAL_REQUESTED',
         entity: 'Payout',
         entityId: payout.id,
-        metadata: this.toJson({ amountKobo }),
+        metadata: this.toJson({ amountKobo, beneficiary }),
       },
     }).catch(() => null);
 
@@ -1236,7 +1300,7 @@ export class SettingsService {
       tone: 'INFO',
       entity: 'Payout',
       entityId: payout.id,
-      actionUrl: '/driver/earnings',
+      actionUrl: beneficiary === 'DRIVER' ? '/driver/earnings' : '/owner/earnings',
     });
 
     return {
@@ -1266,6 +1330,9 @@ export class SettingsService {
       return payouts.map((payout) => ({
         id: payout.id,
         driverId: payout.driverId,
+        recipientId: payout.driverId,
+        recipientRole: payout.driver.role,
+        recipientName: payout.driver.profile?.fullName ?? payout.driver.email,
         driverName: payout.driver.profile?.fullName ?? payout.driver.email,
         driverEmail: payout.driver.email,
         amount: payout.amountKobo,
@@ -1288,7 +1355,10 @@ export class SettingsService {
       throw new BadRequestException('Use APPROVED, REJECTED, or PAID as the payout decision.');
     }
 
-    const existing = await this.prisma.payout.findUnique({ where: { id } });
+    const existing = await this.prisma.payout.findUnique({
+      where: { id },
+      include: { driver: { select: { role: true } } },
+    });
     if (!existing) {
       throw new NotFoundException('Payout request not found.');
     }
@@ -1348,7 +1418,7 @@ export class SettingsService {
       tone: decision === 'REJECTED' ? 'DANGER' : 'SUCCESS',
       entity: 'Payout',
       entityId: updated.id,
-      actionUrl: '/driver/earnings',
+      actionUrl: existing.driver?.role === 'TRUCK_OWNER' ? '/owner/earnings' : '/driver/earnings',
     });
 
     return {
@@ -2045,6 +2115,7 @@ export class SettingsService {
     { key: 'pricingStandardPerKmRateNgn', title: 'Standard truck kilometre rate', description: 'Distance rate for standard truck shipments.', label: 'Rate per km (NGN)', defaultValue: '700', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
     { key: 'pricingStandardMinimumFareNgn', title: 'Standard truck minimum fare', description: 'Lowest permitted quote for a standard truck shipment.', label: 'Minimum fare (NGN)', defaultValue: '90000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
     { key: 'payout', title: 'Payout schedule', description: 'How often driver payout requests are reviewed for release.', label: 'Schedule', defaultValue: 'weekly', helper: 'Accepted values: daily, weekly, biweekly, monthly.', type: 'text' },
+    { key: 'driverOwnerSharePercent', title: 'Driver settlement share', description: 'Percentage of released transport income paid to the driver when a separate truck owner supplies the vehicle.', label: 'Driver share (%)', defaultValue: '70', helper: 'Allowed range: 0-100%. The truck owner receives the remainder. Drivers using their own truck receive 100%.', type: 'number', min: 0, max: 100 },
     { key: 'escrow', title: 'Escrow release window', description: 'Intended days after delivery confirmation before escrow auto-releases if undisputed.', label: 'Days', defaultValue: '3', helper: 'Recorded for reference - there is no scheduled job yet to auto-release after this many days. Customers can confirm delivery manually to release funds now, and operations can release/refund from the dispute queue at any time.', type: 'number' },
     { key: 'manualDriverVerification', title: 'Manual driver verification', description: 'Require an admin to manually review every driver KYC submission.', label: 'Manual driver verification', defaultValue: 'true', helper: 'Recorded for reference - KYC review is currently always manual regardless of this flag.', type: 'boolean' },
     { key: 'staff2fa', title: 'Require staff 2FA', description: 'Require two-factor authentication for admin and dispatcher accounts.', label: 'Require staff 2FA', defaultValue: 'false', helper: 'Recorded for reference - login does not yet enforce 2FA regardless of this flag.', type: 'boolean' },

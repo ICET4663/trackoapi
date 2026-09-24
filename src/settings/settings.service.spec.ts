@@ -199,6 +199,55 @@ describe('SettingsService.requestDriverWithdrawal never validates against the fa
   });
 });
 
+describe('SettingsService driver and truck-owner settlement split', () => {
+  function buildSettlementService(share = '70') {
+    const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('"BankAccount"')) return Promise.resolve([]);
+      if (sql.includes(`e."status" = 'RELEASED'`)) {
+        return Promise.resolve([{ shipmentId: 'shp-1', reference: 'TRK-1', route: 'Lagos to Abuja', amount: 3_000_000, currency: 'NGN', status: 'RELEASED', updatedAt: new Date('2026-09-24') }]);
+      }
+      return Promise.resolve([]);
+    });
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ key: 'driverOwnerSharePercent', value: share }) },
+      payout: { findMany: jest.fn().mockResolvedValue([]) },
+    } as unknown as PrismaService;
+    return {
+      queryRawUnsafe,
+      service: new SettingsService(
+        prisma,
+        { create: jest.fn() } as unknown as NotificationsService,
+        { get: jest.fn() } as unknown as ConfigService,
+        noopAuthService,
+      ),
+    };
+  }
+
+  it('calculates owner earnings only from accepted assignments using a separately owned truck', async () => {
+    const { service, queryRawUnsafe } = buildSettlementService();
+
+    const result = await service.ownerEarnings('owner-1', { strict: true });
+
+    expect(result).toMatchObject({ beneficiary: 'TRUCK_OWNER', sharePercent: 30, releasedTotal: 3_000_000 });
+    const releasedSql = queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0];
+    expect(releasedSql).toContain('v."ownerId" = $1');
+    expect(releasedSql).toContain('v."ownerId" <> da."driverId"');
+    expect(queryRawUnsafe.mock.calls.some((call) => call[1] === 'owner-1' && call[2] === 70)).toBe(true);
+  });
+
+  it('keeps self-owned truck income at 100% for the driver', async () => {
+    const { service, queryRawUnsafe } = buildSettlementService('65');
+
+    const result = await service.driverEarnings('driver-1', { strict: true });
+
+    expect(result).toMatchObject({ beneficiary: 'DRIVER', sharePercent: 65 });
+    const releasedSql = queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0];
+    expect(releasedSql).toContain('else e."amount" end');
+    expect(releasedSql).toContain('v."ownerId" <> da."driverId"');
+  });
+});
+
 // updatePlatformSetting() used to just echo `{ ...defaults, value: body.value }` straight
 // back to the caller with no database write at all - toggling e.g. maintenance mode in the
 // admin UI looked like it saved, but reverted to the hardcoded default on the next load.
