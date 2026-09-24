@@ -95,6 +95,56 @@ export class SettingsController {
     return this.settingsService.uploadVehicleDocument(vehicleId, owner.sub, type, body);
   }
 
+  @Get('owner/loads/:shipmentId')
+  async ownerLoadDetail(@Param('shipmentId') shipmentId: string, @Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.ownerLoadDetail(owner.sub, shipmentId);
+  }
+
+  @Get('owner/settlements/:shipmentId/receipt')
+  async ownerSettlementReceipt(@Param('shipmentId') shipmentId: string, @Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.ownerSettlementReceipt(owner.sub, shipmentId);
+  }
+
+  @Get('owner/vehicle-income')
+  async ownerVehicleIncome(@Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.ownerVehicleIncome(owner.sub);
+  }
+
+  @Get('owner/fleet-analytics')
+  async ownerFleetAnalytics(@Query('month') month?: string, @Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.ownerFleetAnalytics(owner.sub, month);
+  }
+
+  @Get('owner/vehicles/:vehicleId/expenses')
+  async vehicleExpenses(@Param('vehicleId') vehicleId: string, @Headers('authorization') authorization?: string) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.vehicleExpenses(vehicleId, owner.sub);
+  }
+
+  @Post('owner/vehicles/:vehicleId/expenses')
+  async createVehicleExpense(
+    @Param('vehicleId') vehicleId: string,
+    @Body() body: { category?: string; amountKobo?: number; amount?: number; description?: string; serviceDate?: string; odometerKm?: number; receiptUrl?: string; nextServiceDate?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.createVehicleExpense(vehicleId, owner.sub, body);
+  }
+
+  @Delete('owner/vehicles/:vehicleId/expenses/:expenseId')
+  async deleteVehicleExpense(
+    @Param('vehicleId') vehicleId: string,
+    @Param('expenseId') expenseId: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const owner = await this.requestUser.requireRole(authorization, ['TRUCK_OWNER']);
+    return this.settingsService.deleteVehicleExpense(vehicleId, expenseId, owner.sub);
+  }
+
   @Get('admin/vehicle-documents')
   async pendingVehicleDocuments(@Headers('authorization') authorization?: string) {
     await this.requestUser.requireRole(authorization, ['ADMIN', 'DISPATCHER']);

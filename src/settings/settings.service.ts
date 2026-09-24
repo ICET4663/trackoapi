@@ -52,6 +52,17 @@ type DriverEscrowEarningRow = {
 
 type SettlementBeneficiary = 'DRIVER' | 'TRUCK_OWNER';
 
+type VehicleExpenseInput = {
+  category?: string;
+  amountKobo?: number;
+  amount?: number;
+  description?: string;
+  serviceDate?: string;
+  odometerKm?: number;
+  receiptUrl?: string;
+  nextServiceDate?: string;
+};
+
 type SupportTicketRow = {
   id: string;
   shipmentId: string | null;
@@ -1169,7 +1180,8 @@ export class SettingsService {
             amountLabel: `+${this.formatMoney(row.amount)}`,
             status: 'RELEASED',
             date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            shipmentId: row.reference,
+            shipmentId: row.shipmentId,
+            reference: row.reference,
           })),
           ...pendingRows.map((row) => ({
             id: `pending-${row.reference}`,
@@ -1178,7 +1190,8 @@ export class SettingsService {
             amountLabel: `+${this.formatMoney(row.amount)}`,
             status: 'PENDING_ESCROW',
             date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            shipmentId: row.reference,
+            shipmentId: row.shipmentId,
+            reference: row.reference,
           })),
           ...withdrawals,
         ],
@@ -1231,6 +1244,84 @@ export class SettingsService {
 
   async ownerEarnings(userId: string, options: { strict?: boolean } = {}) {
     return this.settlementEarnings(userId, 'TRUCK_OWNER', options);
+  }
+
+  async ownerSettlementReceipt(ownerId: string, shipmentId: string) {
+    const driverSharePercent = await this.driverSettlementSharePercent();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      shipmentId: string; reference: string; pickupLabel: string; destinationLabel: string;
+      cargoDescription: string; amount: number; currency: string; status: string; releasedAt: Date;
+      plateNumber: string; vehicleType: string; driverName: string; ownerName: string;
+      ownerAmount: number; driverAmount: number;
+    }>>(
+      `select s."id" as "shipmentId", s."reference", s."pickupLabel", s."destinationLabel",
+              s."cargoDescription", e."amount", e."currency", e."status"::text as "status",
+              e."updatedAt" as "releasedAt", v."plateNumber", v."type" as "vehicleType",
+              coalesce(dp."fullName", du."email") as "driverName",
+              coalesce(op."fullName", ou."email") as "ownerName",
+              round(e."amount"::numeric * (100 - $3::numeric) / 100)::int as "ownerAmount",
+              round(e."amount"::numeric * $3::numeric / 100)::int as "driverAmount"
+       from "DriverAssignment" da
+       join "Shipment" s on s."id" = da."shipmentId"
+       join "Escrow" e on e."shipmentId" = s."id"
+       join "Vehicle" v on v."id" = da."vehicleId"
+       join "User" du on du."id" = da."driverId"
+       join "User" ou on ou."id" = v."ownerId"
+       left join "Profile" dp on dp."userId" = du."id"
+       left join "Profile" op on op."userId" = ou."id"
+       where s."id" = $1 and v."ownerId" = $2 and v."ownerId" <> da."driverId"
+         and da."status" = 'ACCEPTED'::"AssignmentStatus"
+         and e."status" = 'RELEASED'::"EscrowStatus"
+       limit 1`,
+      shipmentId, ownerId, driverSharePercent,
+    );
+    const receipt = rows[0];
+    if (!receipt) throw new NotFoundException('No released owner settlement was found for this shipment.');
+    return {
+      ...receipt,
+      receiptNumber: `TRK-SET-${receipt.reference.replace(/^TRK-/, '')}`,
+      releasedAt: receipt.releasedAt.toISOString(),
+      amountLabel: this.formatMoney(receipt.amount),
+      ownerAmountLabel: this.formatMoney(receipt.ownerAmount),
+      driverAmountLabel: this.formatMoney(receipt.driverAmount),
+      ownerSharePercent: 100 - driverSharePercent,
+      driverSharePercent,
+    };
+  }
+
+  async ownerLoadDetail(ownerId: string, shipmentId: string) {
+    const shipment = await this.prisma.shipment.findFirst({
+      where: { id: shipmentId, assignments: { some: { vehicle: { ownerId } } } },
+      include: {
+        customer: { include: { profile: true } },
+        escrow: true,
+        timeline: { orderBy: { createdAt: 'asc' } },
+        mediaAssets: { where: { kind: 'CARGO_PHOTO' }, orderBy: { createdAt: 'asc' } },
+        deliveryProofs: { orderBy: { submittedAt: 'desc' } },
+        assignments: {
+          where: { vehicle: { ownerId } },
+          include: { vehicle: true, driver: { include: { profile: true } } },
+          orderBy: { offeredAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    if (!shipment) throw new NotFoundException('Load not found for this owner account.');
+    const assignment = shipment.assignments[0];
+    return {
+      id: shipment.id,
+      reference: shipment.reference,
+      status: shipment.status,
+      route: { pickup: shipment.pickupLabel, destination: shipment.destinationLabel, distanceKm: shipment.distanceKm },
+      cargo: { description: shipment.cargoDescription, quantity: shipment.quantity, weightKg: shipment.cargoWeightKg, volumeM3: shipment.cargoVolumeM3 },
+      customer: shipment.customer.profile?.fullName ?? shipment.customer.email,
+      driver: assignment ? { id: assignment.driverId, name: assignment.driver.profile?.fullName ?? assignment.driver.email } : null,
+      vehicle: assignment?.vehicle ? { id: assignment.vehicle.id, plateNumber: assignment.vehicle.plateNumber, type: assignment.vehicle.type } : null,
+      escrow: shipment.escrow ? { status: shipment.escrow.status, amount: shipment.escrow.amount, amountLabel: this.formatMoney(shipment.escrow.amount) } : null,
+      pickupEvidence: shipment.mediaAssets.filter((asset) => asset.label.startsWith('Pickup cargo condition')).map((asset) => ({ id: asset.id, url: asset.url, label: asset.label, createdAt: asset.createdAt.toISOString() })),
+      deliveryProofs: shipment.deliveryProofs.map((proof) => ({ ...proof, submittedAt: proof.submittedAt.toISOString(), reviewedAt: proof.reviewedAt?.toISOString() ?? null })),
+      timeline: shipment.timeline.map((event) => ({ id: event.id, status: event.status, note: event.note, createdAt: event.createdAt.toISOString() })),
+    };
   }
 
   async requestDriverWithdrawal(userId: string, input: { amountKobo?: number; amount?: number; note?: string }) {
@@ -1800,6 +1891,255 @@ export class SettingsService {
     const vehicle = await this.prisma.vehicle.findFirst({ where: { id: vehicleId, ownerId }, select: { id: true, plateNumber: true } });
     if (!vehicle) throw new NotFoundException('Truck not found for this owner account.');
     return vehicle;
+  }
+
+  private async ensureVehicleExpenseLedger() {
+    await this.prisma.$executeRawUnsafe(
+      `create table if not exists "VehicleExpense" (
+         "id" text primary key,
+         "vehicleId" text not null references "Vehicle"("id") on delete cascade,
+         "ownerId" text not null references "User"("id") on delete cascade,
+         "category" text not null,
+         "amountKobo" integer not null,
+         "description" text,
+         "serviceDate" timestamp(3) not null,
+         "odometerKm" integer,
+         "receiptUrl" text,
+         "nextServiceDate" timestamp(3),
+         "createdAt" timestamp(3) not null default current_timestamp,
+         "updatedAt" timestamp(3) not null default current_timestamp
+       )`,
+    );
+    await this.prisma.$executeRawUnsafe('create index if not exists "VehicleExpense_vehicleId_serviceDate_idx" on "VehicleExpense"("vehicleId", "serviceDate")');
+    await this.prisma.$executeRawUnsafe('create index if not exists "VehicleExpense_ownerId_idx" on "VehicleExpense"("ownerId")');
+  }
+
+  async ownerVehicleIncome(ownerId: string) {
+    await this.ensureVehicleExpenseLedger();
+    const driverSharePercent = await this.driverSettlementSharePercent();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      vehicleId: string; plateNumber: string; type: string; releasedIncome: bigint | number;
+      pendingIncome: bigint | number; completedLoads: bigint | number; totalExpenses: bigint | number;
+      nextServiceDate: Date | null;
+    }>>(
+      `select v."id" as "vehicleId", v."plateNumber", v."type",
+         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+           from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+             and da."driverId" <> v."ownerId" and e."status" = 'RELEASED'::"EscrowStatus"), 0) as "releasedIncome",
+         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+           from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+             and da."driverId" <> v."ownerId" and e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "pendingIncome",
+         (select count(*) from "DriverAssignment" da join "Shipment" s on s."id" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus" and s."status" = 'COMPLETED'::"ShipmentStatus") as "completedLoads",
+         coalesce((select sum(x."amountKobo") from "VehicleExpense" x where x."vehicleId" = v."id"), 0) as "totalExpenses",
+         (select min(x."nextServiceDate") from "VehicleExpense" x where x."vehicleId" = v."id" and x."nextServiceDate" >= current_timestamp) as "nextServiceDate"
+       from "Vehicle" v where v."ownerId" = $1 order by v."createdAt" desc`,
+      ownerId, driverSharePercent,
+    );
+    return rows.map((row) => {
+      const releasedIncome = Number(row.releasedIncome ?? 0);
+      const totalExpenses = Number(row.totalExpenses ?? 0);
+      return {
+        vehicleId: row.vehicleId,
+        plateNumber: row.plateNumber,
+        type: row.type,
+        releasedIncome,
+        releasedIncomeLabel: this.formatMoney(releasedIncome),
+        pendingIncome: Number(row.pendingIncome ?? 0),
+        pendingIncomeLabel: this.formatMoney(Number(row.pendingIncome ?? 0)),
+        totalExpenses,
+        totalExpensesLabel: this.formatMoney(totalExpenses),
+        netIncome: releasedIncome - totalExpenses,
+        netIncomeLabel: this.formatMoney(releasedIncome - totalExpenses),
+        completedLoads: Number(row.completedLoads ?? 0),
+        nextServiceDate: row.nextServiceDate?.toISOString() ?? null,
+      };
+    });
+  }
+
+  private ownerReportingPeriod(month?: string) {
+    const normalized = String(month ?? '').trim();
+    if (normalized && !/^\d{4}-(0[1-9]|1[0-2])$/.test(normalized)) {
+      throw new BadRequestException('Use month format YYYY-MM.');
+    }
+    const now = new Date();
+    const [year, monthNumber] = normalized
+      ? normalized.split('-').map(Number)
+      : [now.getUTCFullYear(), now.getUTCMonth() + 1];
+    const start = new Date(Date.UTC(year, monthNumber - 1, 1));
+    const end = new Date(Date.UTC(year, monthNumber, 1));
+    const effectiveEnd = new Date(Math.min(end.getTime(), now.getTime()));
+    const elapsedDays = Math.max(1, Math.ceil((effectiveEnd.getTime() - start.getTime()) / 86_400_000));
+    return {
+      key: `${year}-${String(monthNumber).padStart(2, '0')}`,
+      label: start.toLocaleDateString('en-NG', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
+      start,
+      end,
+      elapsedDays,
+    };
+  }
+
+  async ownerFleetAnalytics(ownerId: string, month?: string) {
+    await this.ensureVehicleExpenseLedger();
+    const period = this.ownerReportingPeriod(month);
+    const driverSharePercent = await this.driverSettlementSharePercent();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      vehicleId: string; plateNumber: string; type: string; isActive: boolean;
+      releasedIncome: bigint | number; expenses: bigint | number; completedLoads: bigint | number;
+      activeLoads: bigint | number; distanceKm: bigint | number; operationalMinutes: bigint | number;
+      nextServiceDate: Date | null; latestOdometerKm: bigint | number | null;
+    }>>(
+      `select v."id" as "vehicleId", v."plateNumber", v."type", v."isActive",
+         coalesce(sum(case when e."status" = 'RELEASED'::"EscrowStatus"
+           and e."updatedAt" >= $3 and e."updatedAt" < $4 and da."driverId" <> v."ownerId"
+           then round(e."amount"::numeric * (100 - $2::numeric) / 100) else 0 end), 0) as "releasedIncome",
+         coalesce((select sum(x."amountKobo") from "VehicleExpense" x
+           where x."vehicleId" = v."id" and x."serviceDate" >= $3 and x."serviceDate" < $4), 0) as "expenses",
+         count(distinct case when s."status" = 'COMPLETED'::"ShipmentStatus"
+           and s."updatedAt" >= $3 and s."updatedAt" < $4 then s."id" end) as "completedLoads",
+         count(distinct case when s."status" not in ('COMPLETED'::"ShipmentStatus", 'CANCELLED'::"ShipmentStatus", 'DISPUTED'::"ShipmentStatus")
+           then s."id" end) as "activeLoads",
+         coalesce(sum(case when s."status" = 'COMPLETED'::"ShipmentStatus"
+           and s."updatedAt" >= $3 and s."updatedAt" < $4 then coalesce(s."distanceKm", 0) else 0 end), 0) as "distanceKm",
+         coalesce(sum(case when s."updatedAt" >= $3 and s."updatedAt" < $4
+           then coalesce(s."durationMinutes", 480) else 0 end), 0) as "operationalMinutes",
+         (select x."nextServiceDate" from "VehicleExpense" x where x."vehicleId" = v."id" and x."nextServiceDate" is not null
+           order by x."createdAt" desc limit 1) as "nextServiceDate",
+         (select max(x."odometerKm") from "VehicleExpense" x where x."vehicleId" = v."id") as "latestOdometerKm"
+       from "Vehicle" v
+       left join "DriverAssignment" da on da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+       left join "Shipment" s on s."id" = da."shipmentId"
+       left join "Escrow" e on e."shipmentId" = s."id"
+       where v."ownerId" = $1
+       group by v."id", v."plateNumber", v."type", v."isActive", v."createdAt"
+       order by v."createdAt" desc`,
+      ownerId, driverSharePercent, period.start, period.end,
+    );
+    const now = Date.now();
+    const capacityMinutes = period.elapsedDays * 10 * 60;
+    const vehicles = rows.map((row) => {
+      const releasedIncome = Number(row.releasedIncome ?? 0);
+      const expenses = Number(row.expenses ?? 0);
+      const netIncome = releasedIncome - expenses;
+      const operationalMinutes = Number(row.operationalMinutes ?? 0);
+      const nextServiceDate = row.nextServiceDate?.toISOString() ?? null;
+      const daysUntilService = nextServiceDate
+        ? Math.ceil((new Date(nextServiceDate).getTime() - now) / 86_400_000)
+        : null;
+      const maintenanceStatus = daysUntilService === null
+        ? 'UNSCHEDULED'
+        : daysUntilService < 0 ? 'OVERDUE' : daysUntilService <= 14 ? 'DUE_SOON' : 'SCHEDULED';
+      return {
+        vehicleId: row.vehicleId,
+        plateNumber: row.plateNumber,
+        type: row.type,
+        isActive: row.isActive,
+        releasedIncome,
+        releasedIncomeLabel: this.formatMoney(releasedIncome),
+        expenses,
+        expensesLabel: this.formatMoney(expenses),
+        netIncome,
+        netIncomeLabel: this.formatMoney(netIncome),
+        profitMarginPercent: releasedIncome > 0 ? Math.round((netIncome / releasedIncome) * 1000) / 10 : 0,
+        completedLoads: Number(row.completedLoads ?? 0),
+        activeLoads: Number(row.activeLoads ?? 0),
+        distanceKm: Math.round(Number(row.distanceKm ?? 0) * 10) / 10,
+        utilizationPercent: Math.min(100, Math.round((operationalMinutes / capacityMinutes) * 1000) / 10),
+        revenuePerKm: Number(row.distanceKm ?? 0) > 0 ? Math.round(releasedIncome / Number(row.distanceKm)) : 0,
+        revenuePerKmLabel: this.formatMoney(Number(row.distanceKm ?? 0) > 0 ? Math.round(releasedIncome / Number(row.distanceKm)) : 0),
+        nextServiceDate,
+        daysUntilService,
+        maintenanceStatus,
+        latestOdometerKm: row.latestOdometerKm === null ? null : Number(row.latestOdometerKm),
+      };
+    });
+    const ranked = [...vehicles].sort((a, b) => b.netIncome - a.netIncome);
+    const profitabilityRanks = new Map(ranked.map((vehicle, index) => [vehicle.vehicleId, index + 1]));
+    const totalIncome = vehicles.reduce((sum, vehicle) => sum + vehicle.releasedIncome, 0);
+    const totalExpenses = vehicles.reduce((sum, vehicle) => sum + vehicle.expenses, 0);
+    const totalOperationalMinutes = rows.reduce((sum, row) => sum + Number(row.operationalMinutes ?? 0), 0);
+    const maintenanceDue = vehicles.filter((vehicle) => ['OVERDUE', 'DUE_SOON'].includes(vehicle.maintenanceStatus)).length;
+    return {
+      month: period.key,
+      monthLabel: period.label,
+      generatedAt: new Date().toISOString(),
+      summary: {
+        vehicleCount: vehicles.length,
+        totalIncome,
+        totalIncomeLabel: this.formatMoney(totalIncome),
+        totalExpenses,
+        totalExpensesLabel: this.formatMoney(totalExpenses),
+        netIncome: totalIncome - totalExpenses,
+        netIncomeLabel: this.formatMoney(totalIncome - totalExpenses),
+        completedLoads: vehicles.reduce((sum, vehicle) => sum + vehicle.completedLoads, 0),
+        distanceKm: Math.round(vehicles.reduce((sum, vehicle) => sum + vehicle.distanceKm, 0) * 10) / 10,
+        utilizationPercent: vehicles.length
+          ? Math.min(100, Math.round((totalOperationalMinutes / (capacityMinutes * vehicles.length)) * 1000) / 10)
+          : 0,
+        maintenanceDue,
+      },
+      vehicles: vehicles.map((vehicle) => ({ ...vehicle, profitabilityRank: profitabilityRanks.get(vehicle.vehicleId) ?? 0 })),
+    };
+  }
+
+  async vehicleExpenses(vehicleId: string, ownerId: string) {
+    await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      id: string; vehicleId: string; category: string; amountKobo: number; description: string | null;
+      serviceDate: Date; odometerKm: number | null; receiptUrl: string | null; nextServiceDate: Date | null; createdAt: Date;
+    }>>(
+      `select "id", "vehicleId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate", "createdAt"
+       from "VehicleExpense" where "vehicleId" = $1 and "ownerId" = $2 order by "serviceDate" desc, "createdAt" desc`,
+      vehicleId, ownerId,
+    );
+    return rows.map((row) => ({
+      ...row,
+      amountLabel: this.formatMoney(row.amountKobo),
+      serviceDate: row.serviceDate.toISOString(),
+      nextServiceDate: row.nextServiceDate?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+    }));
+  }
+
+  async createVehicleExpense(vehicleId: string, ownerId: string, input: VehicleExpenseInput) {
+    const vehicle = await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const category = String(input.category ?? '').trim().toUpperCase();
+    const allowedCategories = ['FUEL', 'SERVICE', 'REPAIR', 'TYRES', 'INSURANCE', 'TOLL', 'OTHER'];
+    if (!allowedCategories.includes(category)) throw new BadRequestException(`Use one of: ${allowedCategories.join(', ')}.`);
+    const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
+    if (!Number.isFinite(amountKobo) || amountKobo <= 0) throw new BadRequestException('Enter a valid expense amount.');
+    const serviceDate = input.serviceDate ? new Date(input.serviceDate) : new Date();
+    if (Number.isNaN(serviceDate.getTime())) throw new BadRequestException('Enter a valid expense date.');
+    const nextServiceDate = input.nextServiceDate ? new Date(input.nextServiceDate) : null;
+    if (nextServiceDate && Number.isNaN(nextServiceDate.getTime())) throw new BadRequestException('Enter a valid next service date.');
+    const odometerKm = input.odometerKm === undefined ? null : Math.max(0, Math.round(Number(input.odometerKm)));
+    const id = `expense_${randomUUID().replace(/-/g, '')}`;
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; category: string; amountKobo: number; serviceDate: Date }>>(
+      `insert into "VehicleExpense" ("id", "vehicleId", "ownerId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate")
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       returning "id", "category", "amountKobo", "serviceDate"`,
+      id, vehicleId, ownerId, category, Math.round(amountKobo), input.description?.trim() || null, serviceDate,
+      Number.isFinite(odometerKm) ? odometerKm : null, input.receiptUrl?.trim() || null, nextServiceDate,
+    );
+    await this.prisma.auditLog.create({
+      data: { actorId: ownerId, action: 'VEHICLE_EXPENSE_RECORDED', entity: 'Vehicle', entityId: vehicleId, metadata: this.toJson({ expenseId: id, category, amountKobo: Math.round(amountKobo) }) },
+    }).catch(() => null);
+    return { ...rows[0], plateNumber: vehicle.plateNumber, amountLabel: this.formatMoney(amountKobo), serviceDate: rows[0]?.serviceDate.toISOString() };
+  }
+
+  async deleteVehicleExpense(vehicleId: string, expenseId: string, ownerId: string) {
+    await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const deleted = await this.prisma.$executeRawUnsafe(
+      'delete from "VehicleExpense" where "id" = $1 and "vehicleId" = $2 and "ownerId" = $3',
+      expenseId, vehicleId, ownerId,
+    );
+    if (!deleted) throw new NotFoundException('Expense record not found.');
+    return { id: expenseId, deleted: true };
   }
 
   private isVehicleDocumentsReady(documents: Array<{ type: string; state: string; expires: Date | string | null }>) {
