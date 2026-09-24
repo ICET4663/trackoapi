@@ -394,11 +394,17 @@ describe('OperationsService admin/dispatcher screens never fake data on failure'
 describe('OperationsService.financeSummary', () => {
   const admin: OperationActor = { sub: 'admin-1', role: 'ADMIN' };
 
-  function build(escrow: Record<string, number>, payout: Record<string, number>, counts: Record<string, number>) {
+  function build(
+    escrow: Record<string, number>,
+    payout: Record<string, number>,
+    counts: Record<string, number>,
+    settlements: Record<string, number> = { driverEntitlement: escrow.released ?? 0, ownerEntitlement: 0 },
+  ) {
     const $queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
       if (sql.includes('as "fundedShipments"')) return Promise.resolve([counts]);
       if (sql.includes('as "collected"')) return Promise.resolve([escrow]);
-      if (sql.includes('as "paid"')) return Promise.resolve([payout]);
+      if (sql.includes('as "paid"')) return Promise.resolve([{ driverPaid: payout.paid ?? 0, driverApproved: payout.approved ?? 0, ownerPaid: 0, ownerApproved: 0, ...payout }]);
+      if (sql.includes('as "driverEntitlement"')) return Promise.resolve([settlements]);
       return Promise.resolve([{}]);
     });
     const service = new OperationsService({ $queryRawUnsafe } as unknown as PrismaService, {} as NotificationsService, {} as ShipmentsService);
@@ -439,6 +445,21 @@ describe('OperationsService.financeSummary', () => {
     );
     const result = await service.financeSummary(admin);
     expect(result.driverSettlementLiabilityKobo).toBe(0);
+  });
+
+  it('reports driver and truck-owner settlement liabilities separately', async () => {
+    const service = build(
+      { collected: 1_000_000, held: 0, disputed: 0, released: 1_000_000, refunded: 0 },
+      { paid: 100_000, approved: 0, pending: 0, rejected: 0, driverPaid: 100_000, driverApproved: 0, ownerPaid: 50_000, ownerApproved: 0 },
+      { fundedShipments: 0, openDisputes: 0, pendingPayouts: 0 },
+      { driverEntitlement: 700_000, ownerEntitlement: 300_000 },
+    );
+
+    const result = await service.financeSummary(admin);
+
+    expect(result.driverSettlementLiabilityKobo).toBe(600_000);
+    expect(result.ownerSettlementLiabilityKobo).toBe(250_000);
+    expect(result.totalSettlementLiabilityKobo).toBe(850_000);
   });
 
   it('rejects a non-operations caller', async () => {

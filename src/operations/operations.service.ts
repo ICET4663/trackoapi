@@ -711,7 +711,7 @@ export class OperationsService {
     this.assertCanOperate(actor.role);
 
     try {
-      const [escrowRows, payoutRows, countRows] = await Promise.all([
+      const [escrowRows, payoutRows, countRows, settlementRows] = await Promise.all([
         this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           collected: bigint | null;
           held: bigint | null;
@@ -732,13 +732,22 @@ export class OperationsService {
           approved: bigint | null;
           pending: bigint | null;
           rejected: bigint | null;
+          driverPaid: bigint | null;
+          driverApproved: bigint | null;
+          ownerPaid: bigint | null;
+          ownerApproved: bigint | null;
         }>>(
           `select
-             coalesce(sum("amountKobo") filter (where "status" = 'PAID'::"PayoutStatus"), 0) as "paid",
-             coalesce(sum("amountKobo") filter (where "status" = 'APPROVED'::"PayoutStatus"), 0) as "approved",
-             coalesce(sum("amountKobo") filter (where "status" = 'PENDING'::"PayoutStatus"), 0) as "pending",
-             coalesce(sum("amountKobo") filter (where "status" = 'REJECTED'::"PayoutStatus"), 0) as "rejected"
-           from "Payout"`,
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'PAID'::"PayoutStatus"), 0) as "paid",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'APPROVED'::"PayoutStatus"), 0) as "approved",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'PENDING'::"PayoutStatus"), 0) as "pending",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'REJECTED'::"PayoutStatus"), 0) as "rejected",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'PAID'::"PayoutStatus" and u."role" = 'DRIVER'::"UserRole"), 0) as "driverPaid",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'APPROVED'::"PayoutStatus" and u."role" = 'DRIVER'::"UserRole"), 0) as "driverApproved",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'PAID'::"PayoutStatus" and u."role" = 'TRUCK_OWNER'::"UserRole"), 0) as "ownerPaid",
+             coalesce(sum(p."amountKobo") filter (where p."status" = 'APPROVED'::"PayoutStatus" and u."role" = 'TRUCK_OWNER'::"UserRole"), 0) as "ownerApproved"
+           from "Payout" p
+           join "User" u on u."id" = p."driverId"`,
         )),
         this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           fundedShipments: bigint | null;
@@ -750,12 +759,38 @@ export class OperationsService {
              (select count(*) from "Dispute" where "status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")) as "openDisputes",
              (select count(*) from "Payout" where "status" in ('PENDING'::"PayoutStatus", 'APPROVED'::"PayoutStatus")) as "pendingPayouts"`,
         )),
+        this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
+          driverEntitlement: bigint | null;
+          ownerEntitlement: bigint | null;
+        }>>(
+          `with split as (
+             select coalesce((select "value"::numeric from "PlatformSetting" where "key" = 'driverOwnerSharePercent'), 70) as "driverPercent"
+           )
+           select
+             coalesce(sum(case
+               when v."ownerId" is not null and v."ownerId" <> da."driverId"
+                 then round(e."amount"::numeric * split."driverPercent" / 100)
+               else e."amount"
+             end), 0) as "driverEntitlement",
+             coalesce(sum(case
+               when v."ownerId" is not null and v."ownerId" <> da."driverId"
+                 then e."amount" - round(e."amount"::numeric * split."driverPercent" / 100)
+               else 0
+             end), 0) as "ownerEntitlement"
+           from "Escrow" e
+           join "Shipment" s on s."id" = e."shipmentId"
+           join "DriverAssignment" da on da."shipmentId" = s."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+           left join "Vehicle" v on v."id" = da."vehicleId"
+           cross join split
+           where e."status" = 'RELEASED'::"EscrowStatus"`,
+        )),
       ]);
 
       const n = (value: bigint | null | undefined) => Number(value ?? 0);
       const escrow = escrowRows[0] ?? {};
       const payout = payoutRows[0] ?? {};
       const counts = countRows[0] ?? {};
+      const settlements = settlementRows[0] ?? {};
 
       const collected = n(escrow.collected);
       const held = n(escrow.held);
@@ -764,6 +799,8 @@ export class OperationsService {
       const refunded = n(escrow.refunded);
       const paid = n(payout.paid);
       const approved = n(payout.approved);
+      const driverLiability = Math.max(0, n(settlements.driverEntitlement) - n(payout.driverPaid) - n(payout.driverApproved));
+      const ownerLiability = Math.max(0, n(settlements.ownerEntitlement) - n(payout.ownerPaid) - n(payout.ownerApproved));
 
       return {
         currency: 'NGN',
@@ -783,9 +820,9 @@ export class OperationsService {
           pendingReviewKobo: n(payout.pending),
           rejectedKobo: n(payout.rejected),
         },
-        // Money released from escrow that has not yet been paid to or approved for
-        // a driver - the platform's outstanding settlement liability.
-        driverSettlementLiabilityKobo: Math.max(0, released - paid - approved),
+        driverSettlementLiabilityKobo: driverLiability,
+        ownerSettlementLiabilityKobo: ownerLiability,
+        totalSettlementLiabilityKobo: driverLiability + ownerLiability,
         counts: {
           fundedShipments: n(counts.fundedShipments),
           openDisputes: n(counts.openDisputes),
