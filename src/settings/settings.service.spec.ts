@@ -248,6 +248,53 @@ describe('SettingsService driver and truck-owner settlement split', () => {
   });
 });
 
+describe('SettingsService truck-owner fleet reporting', () => {
+  function buildOwnerService(overrides: Record<string, unknown> = {}) {
+    const prisma = {
+      vehicle: { findFirst: jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'TRK-OWN-01' }) },
+      shipment: { findFirst: jest.fn().mockResolvedValue(null) },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '70' }) },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(1),
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+      ...overrides,
+    } as unknown as PrismaService;
+    return {
+      prisma,
+      service: new SettingsService(
+        prisma,
+        { create: jest.fn() } as unknown as NotificationsService,
+        { get: jest.fn() } as unknown as ConfigService,
+        noopAuthService,
+      ),
+    };
+  }
+
+  it('records a maintenance expense only after confirming the truck belongs to the owner', async () => {
+    const query = jest.fn().mockResolvedValue([{ id: 'expense-1', category: 'SERVICE', amountKobo: 250_000, serviceDate: new Date('2026-09-24') }]);
+    const { service, prisma } = buildOwnerService({ $queryRawUnsafe: query });
+
+    const result = await service.createVehicleExpense('vehicle-1', 'owner-1', { category: 'service', amountKobo: 250_000, odometerKm: 12000 });
+
+    expect((prisma.vehicle.findFirst as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'vehicle-1', ownerId: 'owner-1' } }));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('insert into "VehicleExpense"'), expect.any(String), 'vehicle-1', 'owner-1', 'SERVICE', 250_000, null, expect.any(Date), 12000, null, null);
+    expect(result).toMatchObject({ id: 'expense-1', plateNumber: 'TRK-OWN-01', amountLabel: 'N2,500' });
+  });
+
+  it('rejects unsupported expense categories before writing a ledger row', async () => {
+    const { service, prisma } = buildOwnerService();
+
+    await expect(service.createVehicleExpense('vehicle-1', 'owner-1', { category: 'holiday', amountKobo: 10_000 }))
+      .rejects.toThrow('Use one of');
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a load that is outside the owner fleet', async () => {
+    const { service } = buildOwnerService();
+    await expect(service.ownerLoadDetail('owner-1', 'shipment-elsewhere')).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
 // updatePlatformSetting() used to just echo `{ ...defaults, value: body.value }` straight
 // back to the caller with no database write at all - toggling e.g. maintenance mode in the
 // admin UI looked like it saved, but reverted to the hardcoded default on the next load.
@@ -1085,3 +1132,4 @@ describe('SettingsService admin/dashboard/preference reads and writes never fake
     await expect(service.auditLog('audit-1')).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 });
+

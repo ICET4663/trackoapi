@@ -52,6 +52,17 @@ type DriverEscrowEarningRow = {
 
 type SettlementBeneficiary = 'DRIVER' | 'TRUCK_OWNER';
 
+type VehicleExpenseInput = {
+  category?: string;
+  amountKobo?: number;
+  amount?: number;
+  description?: string;
+  serviceDate?: string;
+  odometerKm?: number;
+  receiptUrl?: string;
+  nextServiceDate?: string;
+};
+
 type SupportTicketRow = {
   id: string;
   shipmentId: string | null;
@@ -551,274 +562,7 @@ export class SettingsService {
       );
     } catch (error) {
       throw new InternalServerErrorException(
-        `Could not submit your support request. Please try again: ${this.errorMessage(error)}`,
-      );
-    }
-
-    await this.notifications.create({
-      role: 'ADMIN',
-      title: 'New support request',
-      body: `${topic} request opened through ${channel.toLowerCase()} support.`,
-      tone: 'WARNING',
-      entity: 'SupportTicket',
-      entityId: id,
-      actionUrl: '/admin/support',
-    });
-
-    await this.prisma.auditLog.create({
-      data: {
-        actorId: userId,
-        action: 'SUPPORT_TICKET_CREATED',
-        entity: 'SupportTicket',
-        entityId: id,
-        metadata: { channel, topic, role: input.role ?? null },
-      },
-    }).catch(() => null);
-
-    return {
-      message: 'Support request received. Trako support will follow up.',
-      conversationId: id,
-      ticketId: id,
-      status: 'OPEN',
-    };
-  }
-
-  async sendEmergencyAlert(userId: string, role: Role, input: SafetyAlertInput = {}) {
-    return this.createSafetyTicket(userId, role, {
-      ...input,
-      topic: 'Safety emergency',
-      action: 'SAFETY_EMERGENCY_REPORTED',
-      userMessage: 'Emergency alert received. Trako operations has been notified.',
-    });
-  }
-
-  async reportSafetyIncident(userId: string, input: SafetyAlertInput = {}) {
-    return this.createSafetyTicket(userId, 'DRIVER', {
-      ...input,
-      topic: 'Driver safety incident',
-      action: 'DRIVER_SAFETY_INCIDENT_REPORTED',
-      userMessage: 'Safety incident received. Trako operations has been notified.',
-    });
-  }
-
-  private async createSafetyTicket(
-    userId: string,
-    role: Role,
-    input: SafetyAlertInput & { topic: string; action: string; userMessage: string },
-  ) {
-    const id = `safety-${Date.now()}`;
-    const location =
-      Number.isFinite(input.latitude) && Number.isFinite(input.longitude)
-        ? ` Location: ${input.latitude}, ${input.longitude}.`
-        : '';
-    const message = `${input.message ?? `${input.topic} reported from the ${role.toLowerCase()} app.`}${location}`;
-
-    // This is the single most safety-critical write path in the app - a driver or
-    // customer using this believes operations has been alerted. The catch below used to
-    // swallow ANY failure here (DB unreachable, bad connection, anything) into a fake
-    // { sent: true, reported: true } response, meaning an emergency could silently go
-    // completely unreported while the app told the person help was on the way. A real
-    // failure must surface as a real failure so the caller knows to try another channel
-    // (call emergency services / dispatch directly) instead of trusting a false positive.
-    try {
-      await this.prisma.$executeRawUnsafe(
-        `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
-         values ($1, $2, $3, $4, 'EMERGENCY', $5, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
-        id,
-        input.shipmentId ?? null,
-        userId,
-        input.topic,
-        message,
-      );
-    } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not report this ${input.topic.toLowerCase()}. Please try again immediately, or contact emergency services directly if you cannot wait: ${this.errorMessage(error)}`,
-      );
-    }
-
-    // Notifying staff is the actual point of an emergency alert, not a nice-to-have - but
-    // NotificationsService.create() already never throws (it falls back to an in-memory
-    // preview record on its own DB errors), so this can't silently mask a real failure the
-    // way the removed outer catch did. The ticket itself (the source of truth staff can
-    // find in the support queue) is already safely persisted above regardless.
-    await Promise.all([
-      this.notifications.create({
-        role: 'ADMIN',
-        title: input.topic,
-        body: message,
-        tone: 'DANGER',
-        entity: 'SupportTicket',
-        entityId: id,
-        actionUrl: '/admin/support',
-      }),
-      this.notifications.create({
-        role: 'DISPATCHER',
-        title: input.topic,
-        body: message,
-        tone: 'DANGER',
-        entity: 'SupportTicket',
-        entityId: id,
-        actionUrl: '/dispatcher/support',
-      }),
-      this.notifications.create({
-        userId,
-        title: 'Safety alert received',
-        body: input.userMessage,
-        tone: 'WARNING',
-        entity: 'SupportTicket',
-        entityId: id,
-        actionUrl: role === 'DRIVER' ? '/driver/safety-settings' : '/customer/support',
-      }),
-    ]);
-
-    await this.prisma.auditLog.create({
-      data: {
-        actorId: userId,
-        action: input.action,
-        entity: 'SupportTicket',
-        entityId: id,
-        metadata: {
-          role,
-          shipmentId: input.shipmentId ?? null,
-          latitude: input.latitude ?? null,
-          longitude: input.longitude ?? null,
-          priority: 'HIGH',
-        },
-      },
-    }).catch(() => null);
-
-    return {
-      sent: true,
-      reported: true,
-      ticketId: id,
-      status: 'OPEN',
-      priority: 'HIGH',
-      message: input.userMessage,
-    };
-  }
-
-  private errorMessage(error: unknown) {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  async supportTickets() {
-    try {
-      const rows = await this.prisma.$queryRawUnsafe<SupportTicketRow[]>(
-        `select st."id", st."shipmentId", st."userId", st."topic", st."channel", st."message",
-           st."status"::text as "status", st."createdAt", st."updatedAt", st."resolvedAt",
-           coalesce(p."fullName", u."email") as "userName", u."email" as "userEmail"
-         from "SupportTicket" st
-         left join "User" u on u."id" = st."userId"
-         left join "Profile" p on p."userId" = u."id"
-         order by st."createdAt" desc
-         limit 100`,
-      );
-
-      return rows.map((row) => ({
-        id: row.id,
-        shipmentId: row.shipmentId,
-        userId: row.userId,
-        userName: row.userName ?? 'Trako user',
-        userEmail: row.userEmail ?? undefined,
-        topic: row.topic,
-        channel: row.channel,
-        message: row.message,
-        status: row.status,
-        createdAt: row.createdAt.toISOString(),
-        createdAtLabel: row.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedAt: row.updatedAt.toISOString(),
-        resolvedAt: row.resolvedAt?.toISOString(),
-      }));
-    } catch (error) {
-      // Used to fall back to a single fabricated "Trako Customer" support ticket on any
-      // read failure - an admin/dispatcher's support queue would show a made-up ticket
-      // instead of an error.
-      throw new InternalServerErrorException(`Could not load support tickets. Please try again: ${this.errorMessage(error)}`);
-    }
-  }
-
-  async resolveSupportTicket(id: string, actorId: string, input: { resolution?: string }) {
-    const resolution = String(input.resolution ?? 'Resolved by Trako support.');
-    try {
-      const rows = await this.prisma.$queryRawUnsafe<SupportTicketRow[]>(
-        `update "SupportTicket"
-         set "status" = 'RESOLVED'::"SupportTicketStatus",
-             "resolvedAt" = current_timestamp,
-             "updatedAt" = current_timestamp
-         where "id" = $1
-         returning "id", "shipmentId", "userId", "topic", "channel", "message",
-           "status"::text as "status", "createdAt", "updatedAt", "resolvedAt",
-           null::text as "userName", null::text as "userEmail"`,
-        id,
-      );
-      if (!rows[0]) throw new NotFoundException('Support ticket not found.');
-
-      await this.prisma.auditLog.create({
-        data: {
-          actorId,
-          action: 'SUPPORT_TICKET_RESOLVED',
-          entity: 'SupportTicket',
-          entityId: id,
-          metadata: { resolution },
-        },
-      }).catch(() => null);
-
-      if (rows[0].userId) {
-        await this.notifications.create({
-          userId: rows[0].userId,
-          title: 'Support ticket resolved',
-          body: resolution,
-          tone: 'SUCCESS',
-          entity: 'SupportTicket',
-          entityId: id,
-          actionUrl: '/customer/support',
-        });
-      }
-
-      return {
-        id,
-        status: 'RESOLVED',
-        message: 'Support ticket resolved.',
-      };
-    } catch (error) {
-      // Used to fall back to a fake "resolved" confirmation on any failure other than a
-      // genuinely-missing ticket - an admin resolving a real support ticket during a DB
-      // hiccup would see success while nothing was actually updated.
-      if (error instanceof NotFoundException) throw error;
-      throw new InternalServerErrorException(`Could not resolve this support ticket. Please try again: ${this.errorMessage(error)}`);
-    }
-  }
-
-  legalDocumentSummaries() {
-    return LEGAL_DOCUMENTS.map(({ id, title }) => ({ id, title }));
-  }
-
-  legalDocument(id: string) {
-    const document = findLegalDocument(id);
-    if (!document) throw new NotFoundException('Legal document not found.');
-    return {
-      id: document.id,
-      title: document.title,
-      updated: document.updated,
-      // The in-app viewer renders `clauses` as { heading, body }.
-      clauses: document.sections,
-    };
-  }
-
-  // This used to fall back to 2 fake hardcoded addresses ("Home" - Lekki Phase 1, "Office"
-  // - Victoria Island) whenever the read failed OR the customer genuinely had zero saved
-  // addresses yet - the normal state before ever adding one. A customer could pick one of
-  // these fake addresses for a real shipment pickup/destination.
-  async savedAddresses(userId: string) {
-    try {
-      return await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
-        'select "id", "label", "line", "city", "address", "icon", "isDefaultPickup" from "SavedAddress" where "userId" = $1 order by "isDefaultPickup" desc, "createdAt" desc limit 50',
-        userId,
-      );
-    } catch (error) {
-      throw new InternalServerErrorException(`Could not load saved addresses: ${this.errorMessage(error)}`);
-    }
-  }
+        `Coul
 
   async savedAddress(id: string, userId: string) {
     let rows: SavedAddressRecord[];
@@ -1169,7 +913,8 @@ export class SettingsService {
             amountLabel: `+${this.formatMoney(row.amount)}`,
             status: 'RELEASED',
             date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            shipmentId: row.reference,
+            shipmentId: row.shipmentId,
+            reference: row.reference,
           })),
           ...pendingRows.map((row) => ({
             id: `pending-${row.reference}`,
@@ -1178,7 +923,8 @@ export class SettingsService {
             amountLabel: `+${this.formatMoney(row.amount)}`,
             status: 'PENDING_ESCROW',
             date: row.updatedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            shipmentId: row.reference,
+            shipmentId: row.shipmentId,
+            reference: row.reference,
           })),
           ...withdrawals,
         ],
@@ -1231,6 +977,84 @@ export class SettingsService {
 
   async ownerEarnings(userId: string, options: { strict?: boolean } = {}) {
     return this.settlementEarnings(userId, 'TRUCK_OWNER', options);
+  }
+
+  async ownerSettlementReceipt(ownerId: string, shipmentId: string) {
+    const driverSharePercent = await this.driverSettlementSharePercent();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      shipmentId: string; reference: string; pickupLabel: string; destinationLabel: string;
+      cargoDescription: string; amount: number; currency: string; status: string; releasedAt: Date;
+      plateNumber: string; vehicleType: string; driverName: string; ownerName: string;
+      ownerAmount: number; driverAmount: number;
+    }>>(
+      `select s."id" as "shipmentId", s."reference", s."pickupLabel", s."destinationLabel",
+              s."cargoDescription", e."amount", e."currency", e."status"::text as "status",
+              e."updatedAt" as "releasedAt", v."plateNumber", v."type" as "vehicleType",
+              coalesce(dp."fullName", du."email") as "driverName",
+              coalesce(op."fullName", ou."email") as "ownerName",
+              round(e."amount"::numeric * (100 - $3::numeric) / 100)::int as "ownerAmount",
+              round(e."amount"::numeric * $3::numeric / 100)::int as "driverAmount"
+       from "DriverAssignment" da
+       join "Shipment" s on s."id" = da."shipmentId"
+       join "Escrow" e on e."shipmentId" = s."id"
+       join "Vehicle" v on v."id" = da."vehicleId"
+       join "User" du on du."id" = da."driverId"
+       join "User" ou on ou."id" = v."ownerId"
+       left join "Profile" dp on dp."userId" = du."id"
+       left join "Profile" op on op."userId" = ou."id"
+       where s."id" = $1 and v."ownerId" = $2 and v."ownerId" <> da."driverId"
+         and da."status" = 'ACCEPTED'::"AssignmentStatus"
+         and e."status" = 'RELEASED'::"EscrowStatus"
+       limit 1`,
+      shipmentId, ownerId, driverSharePercent,
+    );
+    const receipt = rows[0];
+    if (!receipt) throw new NotFoundException('No released owner settlement was found for this shipment.');
+    return {
+      ...receipt,
+      receiptNumber: `TRK-SET-${receipt.reference.replace(/^TRK-/, '')}`,
+      releasedAt: receipt.releasedAt.toISOString(),
+      amountLabel: this.formatMoney(receipt.amount),
+      ownerAmountLabel: this.formatMoney(receipt.ownerAmount),
+      driverAmountLabel: this.formatMoney(receipt.driverAmount),
+      ownerSharePercent: 100 - driverSharePercent,
+      driverSharePercent,
+    };
+  }
+
+  async ownerLoadDetail(ownerId: string, shipmentId: string) {
+    const shipment = await this.prisma.shipment.findFirst({
+      where: { id: shipmentId, assignments: { some: { vehicle: { ownerId } } } },
+      include: {
+        customer: { include: { profile: true } },
+        escrow: true,
+        timeline: { orderBy: { createdAt: 'asc' } },
+        mediaAssets: { where: { kind: 'CARGO_PHOTO' }, orderBy: { createdAt: 'asc' } },
+        deliveryProofs: { orderBy: { submittedAt: 'desc' } },
+        assignments: {
+          where: { vehicle: { ownerId } },
+          include: { vehicle: true, driver: { include: { profile: true } } },
+          orderBy: { offeredAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    if (!shipment) throw new NotFoundException('Load not found for this owner account.');
+    const assignment = shipment.assignments[0];
+    return {
+      id: shipment.id,
+      reference: shipment.reference,
+      status: shipment.status,
+      route: { pickup: shipment.pickupLabel, destination: shipment.destinationLabel, distanceKm: shipment.distanceKm },
+      cargo: { description: shipment.cargoDescription, quantity: shipment.quantity, weightKg: shipment.cargoWeightKg, volumeM3: shipment.cargoVolumeM3 },
+      customer: shipment.customer.profile?.fullName ?? shipment.customer.email,
+      driver: assignment ? { id: assignment.driverId, name: assignment.driver.profile?.fullName ?? assignment.driver.email } : null,
+      vehicle: assignment?.vehicle ? { id: assignment.vehicle.id, plateNumber: assignment.vehicle.plateNumber, type: assignment.vehicle.type } : null,
+      escrow: shipment.escrow ? { status: shipment.escrow.status, amount: shipment.escrow.amount, amountLabel: this.formatMoney(shipment.escrow.amount) } : null,
+      pickupEvidence: shipment.mediaAssets.filter((asset) => asset.label.startsWith('Pickup cargo condition')).map((asset) => ({ id: asset.id, url: asset.url, label: asset.label, createdAt: asset.createdAt.toISOString() })),
+      deliveryProofs: shipment.deliveryProofs.map((proof) => ({ ...proof, submittedAt: proof.submittedAt.toISOString(), reviewedAt: proof.reviewedAt?.toISOString() ?? null })),
+      timeline: shipment.timeline.map((event) => ({ id: event.id, status: event.status, note: event.note, createdAt: event.createdAt.toISOString() })),
+    };
   }
 
   async requestDriverWithdrawal(userId: string, input: { amountKobo?: number; amount?: number; note?: string }) {
@@ -1800,6 +1624,130 @@ export class SettingsService {
     const vehicle = await this.prisma.vehicle.findFirst({ where: { id: vehicleId, ownerId }, select: { id: true, plateNumber: true } });
     if (!vehicle) throw new NotFoundException('Truck not found for this owner account.');
     return vehicle;
+  }
+
+  private async ensureVehicleExpenseLedger() {
+    await this.prisma.$executeRawUnsafe(
+      `create table if not exists "VehicleExpense" (
+         "id" text primary key,
+         "vehicleId" text not null references "Vehicle"("id") on delete cascade,
+         "ownerId" text not null references "User"("id") on delete cascade,
+         "category" text not null,
+         "amountKobo" integer not null,
+         "description" text,
+         "serviceDate" timestamp(3) not null,
+         "odometerKm" integer,
+         "receiptUrl" text,
+         "nextServiceDate" timestamp(3),
+         "createdAt" timestamp(3) not null default current_timestamp,
+         "updatedAt" timestamp(3) not null default current_timestamp
+       )`,
+    );
+    await this.prisma.$executeRawUnsafe('create index if not exists "VehicleExpense_vehicleId_serviceDate_idx" on "VehicleExpense"("vehicleId", "serviceDate")');
+    await this.prisma.$executeRawUnsafe('create index if not exists "VehicleExpense_ownerId_idx" on "VehicleExpense"("ownerId")');
+  }
+
+  async ownerVehicleIncome(ownerId: string) {
+    await this.ensureVehicleExpenseLedger();
+    const driverSharePercent = await this.driverSettlementSharePercent();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      vehicleId: string; plateNumber: string; type: string; releasedIncome: bigint | number;
+      pendingIncome: bigint | number; completedLoads: bigint | number; totalExpenses: bigint | number;
+      nextServiceDate: Date | null;
+    }>>(
+      `select v."id" as "vehicleId", v."plateNumber", v."type",
+         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+           from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+             and da."driverId" <> v."ownerId" and e."status" = 'RELEASED'::"EscrowStatus"), 0) as "releasedIncome",
+         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+           from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
+             and da."driverId" <> v."ownerId" and e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "pendingIncome",
+         (select count(*) from "DriverAssignment" da join "Shipment" s on s."id" = da."shipmentId"
+           where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus" and s."status" = 'COMPLETED'::"ShipmentStatus") as "completedLoads",
+         coalesce((select sum(x."amountKobo") from "VehicleExpense" x where x."vehicleId" = v."id"), 0) as "totalExpenses",
+         (select min(x."nextServiceDate") from "VehicleExpense" x where x."vehicleId" = v."id" and x."nextServiceDate" >= current_timestamp) as "nextServiceDate"
+       from "Vehicle" v where v."ownerId" = $1 order by v."createdAt" desc`,
+      ownerId, driverSharePercent,
+    );
+    return rows.map((row) => {
+      const releasedIncome = Number(row.releasedIncome ?? 0);
+      const totalExpenses = Number(row.totalExpenses ?? 0);
+      return {
+        vehicleId: row.vehicleId,
+        plateNumber: row.plateNumber,
+        type: row.type,
+        releasedIncome,
+        releasedIncomeLabel: this.formatMoney(releasedIncome),
+        pendingIncome: Number(row.pendingIncome ?? 0),
+        pendingIncomeLabel: this.formatMoney(Number(row.pendingIncome ?? 0)),
+        totalExpenses,
+        totalExpensesLabel: this.formatMoney(totalExpenses),
+        netIncome: releasedIncome - totalExpenses,
+        netIncomeLabel: this.formatMoney(releasedIncome - totalExpenses),
+        completedLoads: Number(row.completedLoads ?? 0),
+        nextServiceDate: row.nextServiceDate?.toISOString() ?? null,
+      };
+    });
+  }
+
+  async vehicleExpenses(vehicleId: string, ownerId: string) {
+    await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const rows = await this.prisma.$queryRawUnsafe<Array<{
+      id: string; vehicleId: string; category: string; amountKobo: number; description: string | null;
+      serviceDate: Date; odometerKm: number | null; receiptUrl: string | null; nextServiceDate: Date | null; createdAt: Date;
+    }>>(
+      `select "id", "vehicleId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate", "createdAt"
+       from "VehicleExpense" where "vehicleId" = $1 and "ownerId" = $2 order by "serviceDate" desc, "createdAt" desc`,
+      vehicleId, ownerId,
+    );
+    return rows.map((row) => ({
+      ...row,
+      amountLabel: this.formatMoney(row.amountKobo),
+      serviceDate: row.serviceDate.toISOString(),
+      nextServiceDate: row.nextServiceDate?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+    }));
+  }
+
+  async createVehicleExpense(vehicleId: string, ownerId: string, input: VehicleExpenseInput) {
+    const vehicle = await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const category = String(input.category ?? '').trim().toUpperCase();
+    const allowedCategories = ['FUEL', 'SERVICE', 'REPAIR', 'TYRES', 'INSURANCE', 'TOLL', 'OTHER'];
+    if (!allowedCategories.includes(category)) throw new BadRequestException(`Use one of: ${allowedCategories.join(', ')}.`);
+    const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
+    if (!Number.isFinite(amountKobo) || amountKobo <= 0) throw new BadRequestException('Enter a valid expense amount.');
+    const serviceDate = input.serviceDate ? new Date(input.serviceDate) : new Date();
+    if (Number.isNaN(serviceDate.getTime())) throw new BadRequestException('Enter a valid expense date.');
+    const nextServiceDate = input.nextServiceDate ? new Date(input.nextServiceDate) : null;
+    if (nextServiceDate && Number.isNaN(nextServiceDate.getTime())) throw new BadRequestException('Enter a valid next service date.');
+    const odometerKm = input.odometerKm === undefined ? null : Math.max(0, Math.round(Number(input.odometerKm)));
+    const id = `expense_${randomUUID().replace(/-/g, '')}`;
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; category: string; amountKobo: number; serviceDate: Date }>>(
+      `insert into "VehicleExpense" ("id", "vehicleId", "ownerId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate")
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       returning "id", "category", "amountKobo", "serviceDate"`,
+      id, vehicleId, ownerId, category, Math.round(amountKobo), input.description?.trim() || null, serviceDate,
+      Number.isFinite(odometerKm) ? odometerKm : null, input.receiptUrl?.trim() || null, nextServiceDate,
+    );
+    await this.prisma.auditLog.create({
+      data: { actorId: ownerId, action: 'VEHICLE_EXPENSE_RECORDED', entity: 'Vehicle', entityId: vehicleId, metadata: this.toJson({ expenseId: id, category, amountKobo: Math.round(amountKobo) }) },
+    }).catch(() => null);
+    return { ...rows[0], plateNumber: vehicle.plateNumber, amountLabel: this.formatMoney(amountKobo), serviceDate: rows[0]?.serviceDate.toISOString() };
+  }
+
+  async deleteVehicleExpense(vehicleId: string, expenseId: string, ownerId: string) {
+    await this.assertVehicleOwner(vehicleId, ownerId);
+    await this.ensureVehicleExpenseLedger();
+    const deleted = await this.prisma.$executeRawUnsafe(
+      'delete from "VehicleExpense" where "id" = $1 and "vehicleId" = $2 and "ownerId" = $3',
+      expenseId, vehicleId, ownerId,
+    );
+    if (!deleted) throw new NotFoundException('Expense record not found.');
+    return { id: expenseId, deleted: true };
   }
 
   private isVehicleDocumentsReady(documents: Array<{ type: string; state: string; expires: Date | string | null }>) {
@@ -2387,3 +2335,4 @@ export class SettingsService {
     return Number.isFinite(number) && number > 0 ? number : 0;
   }
 }
+
