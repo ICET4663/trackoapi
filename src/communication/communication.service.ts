@@ -368,7 +368,7 @@ export class CommunicationService {
         dto.mimeType ?? "audio/webm",
         dto.languageHint,
       );
-      if (result) {
+      if (result?.transcript) {
         const english =
           result.detectedLanguage && result.detectedLanguage !== "en"
             ? await this.translationProvider
@@ -381,6 +381,13 @@ export class CommunicationService {
           detectedLanguage: result.detectedLanguage,
           translatedToEnglish: Boolean(english),
           durationSeconds: dto.durationSeconds,
+        };
+      }
+      if (result?.reason) {
+        return {
+          transcript: "",
+          durationSeconds: dto.durationSeconds,
+          unavailableReason: `Server transcription could not process this recording: ${result.reason}`,
         };
       }
     }

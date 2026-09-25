@@ -439,6 +439,23 @@ describe("CommunicationService.transcribeVoiceNote", () => {
     expect(result.transcript).toBe("");
     expect(result.unavailableReason).toContain("not configured");
   });
+
+  it("surfaces Google's real failure reason instead of a generic message when transcription is configured but fails", async () => {
+    const transcribe = jest
+      .fn()
+      .mockResolvedValue({ transcript: "", reason: "chirp: chirp_2 does not support yo-NG" });
+    const service = buildService(transcribe, { transcriptionEnabled: true });
+
+    const result = await service.transcribeVoiceNote({
+      durationSeconds: 4,
+      base64: "AAAA",
+      mimeType: "audio/webm",
+      languageHint: "yo",
+    } as never);
+
+    expect(result.transcript).toBe("");
+    expect(result.unavailableReason).toContain("chirp: chirp_2 does not support yo-NG");
+  });
 });
 
 // uploadMedia() is the backing endpoint for KYC document capture, driver/vehicle

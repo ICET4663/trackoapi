@@ -235,11 +235,11 @@ describe('TranslationProviderService never fabricates a result on failure', () =
 
     const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo');
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ transcript: '', reason: expect.stringContaining('unsupported') });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('transcribe() returns null when the access token cannot be obtained, without throwing', async () => {
+  it('transcribe() reports the real reason when the access token cannot be obtained, without throwing', async () => {
     jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue(undefined as never);
     const service = buildServiceWith({
       GOOGLE_CLOUD_PROJECT_ID: 'project-1',
@@ -249,7 +249,9 @@ describe('TranslationProviderService never fabricates a result on failure', () =
     const fetchMock = jest.fn();
     global.fetch = fetchMock as never;
 
-    expect(await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo')).toBeNull();
+    const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo');
+
+    expect(result).toEqual({ transcript: '', reason: expect.stringContaining('access token') });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

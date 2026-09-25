@@ -201,11 +201,14 @@ export class TranslationProviderService {
   // Same best-effort contract as translate(): null means "not available", never a fake
   // transcript. languageHint narrows Google's guess among Tracko's 4 supported languages
   // (passed as alternativeLanguageCodes) rather than forcing a single language.
+  // On failure, `reason` carries Google's own error text (when available) so the caller
+  // can surface something more actionable than a generic message - this is the only way
+  // to see why a live transcription failed without direct access to Vercel's logs.
   async transcribe(
     base64Audio: string,
     mimeType: string,
     languageHint?: string,
-  ): Promise<{ transcript: string; detectedLanguage?: string } | null> {
+  ): Promise<{ transcript: string; detectedLanguage?: string; reason?: string } | null> {
     const apiKey = this.config.get<string>("GOOGLE_CLOUD_API_KEY");
     const primary = isSupportedLanguage(languageHint) ? languageHint : "en";
     if (!base64Audio.trim()) return null;
@@ -286,7 +289,7 @@ export class TranslationProviderService {
     base64Audio: string,
     language: SupportedLanguage,
     credentials: { projectId: string; clientEmail: string; privateKey: string },
-  ): Promise<{ transcript: string; detectedLanguage?: string } | null> {
+  ): Promise<{ transcript: string; detectedLanguage?: string; reason?: string } | null> {
     const location =
       this.config.get<string>("GOOGLE_SPEECH_LOCATION")?.trim() ||
       "us-central1";
@@ -308,16 +311,14 @@ export class TranslationProviderService {
       });
       accessToken = await auth.getAccessToken();
     } catch (error) {
-      this.logger.warn(
-        `transcribeV2() could not authenticate with the service account: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
+      const reason = `Could not authenticate with the Google service account: ${error instanceof Error ? error.message : String(error)}`;
+      this.logger.warn(`transcribeV2() ${reason}`);
+      return { transcript: "", reason };
     }
     if (!accessToken) {
-      this.logger.warn(
-        "transcribeV2() got an empty access token from the service account - check GOOGLE_CLOUD_CLIENT_EMAIL/GOOGLE_CLOUD_PRIVATE_KEY.",
-      );
-      return null;
+      const reason = "Got an empty access token from the Google service account - check GOOGLE_CLOUD_CLIENT_EMAIL/GOOGLE_CLOUD_PRIVATE_KEY.";
+      this.logger.warn(`transcribeV2() ${reason}`);
+      return { transcript: "", reason };
     }
 
     const attempt = (recognitionModel: string) =>
@@ -335,9 +336,9 @@ export class TranslationProviderService {
     // a Hausa/Yoruba/Igbo recording can fail on chirp_2 specifically while working on
     // "chirp". Retry once with the older model before giving up, unless the deployment
     // explicitly pinned a model via env (respect that override, no silent retry).
-    if (!result && !configuredModel && model !== "chirp") {
+    if (!result.transcript && !configuredModel && model !== "chirp") {
       this.logger.warn(
-        `transcribeV2() retrying ${language} with model "chirp" after "${model}" failed`,
+        `transcribeV2() retrying ${language} with model "chirp" after "${model}" failed: ${result.reason}`,
       );
       result = await attempt("chirp");
     }
@@ -351,7 +352,7 @@ export class TranslationProviderService {
     location: string,
     model: string,
     accessToken: string,
-  ): Promise<{ transcript: string; detectedLanguage?: string } | null> {
+  ): Promise<{ transcript: string; detectedLanguage?: string; reason?: string }> {
     this.logger.log(
       `Transcribing ${language} voice audio (${Math.round((base64Audio.length * 3) / 4 / 1024)} KB) with ${model} in ${location}`,
     );
@@ -391,10 +392,15 @@ export class TranslationProviderService {
         .join(" ")
         .trim();
       if (!response.ok || !transcript) {
+        const reason = payload?.error?.message
+          ? `${model}: ${payload.error.message}`
+          : !response.ok
+            ? `${model}: HTTP ${response.status} ${response.statusText}`
+            : `${model}: no speech detected in the recording`;
         this.logger.warn(
           `recognizeV2(model=${model}) failed: HTTP ${response.status} ${response.statusText} - ${payload?.error ? JSON.stringify(payload.error) : "(no transcript in response)"}`,
         );
-        return null;
+        return { transcript: "", reason };
       }
       const detected = payload?.results
         ?.find((result) => result.languageCode)
@@ -404,10 +410,9 @@ export class TranslationProviderService {
         detectedLanguage: isSupportedLanguage(detected) ? detected : language,
       };
     } catch (error) {
-      this.logger.warn(
-        `recognizeV2(model=${model}) threw: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
+      const reason = `${model}: ${error instanceof Error ? error.message : String(error)}`;
+      this.logger.warn(`recognizeV2(model=${model}) threw: ${reason}`);
+      return { transcript: "", reason };
     }
   }
 
