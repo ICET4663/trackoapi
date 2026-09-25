@@ -290,9 +290,14 @@ export class TranslationProviderService {
     language: SupportedLanguage,
     credentials: { projectId: string; clientEmail: string; privateKey: string },
   ): Promise<{ transcript: string; detectedLanguage?: string; reason?: string } | null> {
+    // Google's v2 Speech API only accepts a regional location (e.g. "us-central1") when
+    // the request also targets that region's own API host (`{region}-speech.googleapis.com`).
+    // The implicit/default recognizer ("_") used below only works against the "global"
+    // host+location pair - calling the global host with a regional location in the path
+    // fails with "Expected resource location to be global, but found <region>...". Default
+    // to "global" so this works out of the box; recognizeV2() derives the matching host.
     const location =
-      this.config.get<string>("GOOGLE_SPEECH_LOCATION")?.trim() ||
-      "us-central1";
+      this.config.get<string>("GOOGLE_SPEECH_LOCATION")?.trim() || "global";
     const configuredModel = this.config
       .get<string>("GOOGLE_SPEECH_MODEL")
       ?.trim();
@@ -356,9 +361,12 @@ export class TranslationProviderService {
     this.logger.log(
       `Transcribing ${language} voice audio (${Math.round((base64Audio.length * 3) / 4 / 1024)} KB) with ${model} in ${location}`,
     );
+    // A regional location must be paired with that region's own API host - the shared
+    // "speech.googleapis.com" host only accepts "global" as the location.
+    const host = location === "global" ? "speech.googleapis.com" : `${location}-speech.googleapis.com`;
     try {
       const response = await fetch(
-        `https://speech.googleapis.com/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/recognizers/_:recognize`,
+        `https://${host}/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/recognizers/_:recognize`,
         {
           method: "POST",
           signal: AbortSignal.timeout(30_000),

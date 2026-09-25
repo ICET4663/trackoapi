@@ -193,12 +193,33 @@ describe('TranslationProviderService never fabricates a result on failure', () =
 
     expect(result).toEqual({ transcript, detectedLanguage: language });
     expect(global.fetch).toHaveBeenCalledWith(
-      'https://speech.googleapis.com/v2/projects/project-1/locations/us-central1/recognizers/_:recognize',
+      'https://us-central1-speech.googleapis.com/v2/projects/project-1/locations/us-central1/recognizers/_:recognize',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer access-token' }),
         body: expect.stringContaining(`"languageCodes":["${languageCode}"]`),
       }),
+    );
+  });
+
+  it('uses the global host+location by default, since the implicit recognizer rejects a regional location on the global host', async () => {
+    jest.spyOn(GoogleAuth.prototype, 'getAccessToken').mockResolvedValue('access-token');
+    const service = buildServiceWith({
+      GOOGLE_CLOUD_PROJECT_ID: 'project-1',
+      GOOGLE_CLOUD_CLIENT_EMAIL: 'speech@project-1.iam.gserviceaccount.com',
+      GOOGLE_CLOUD_PRIVATE_KEY: 'private-key',
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [{ alternatives: [{ transcript: 'E kaaro' }], languageCode: 'yo-NG' }] }),
+    }) as never;
+
+    const result = await service.transcribe('base64audio', 'audio/webm;codecs=opus', 'yo');
+
+    expect(result).toEqual({ transcript: 'E kaaro', detectedLanguage: 'yo' });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://speech.googleapis.com/v2/projects/project-1/locations/global/recognizers/_:recognize',
+      expect.anything(),
     );
   });
 
