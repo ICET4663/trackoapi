@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { RateLimitService } from '../auth/rate-limit.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type PlaceSuggestion = {
@@ -188,6 +189,7 @@ export class MapsProviderService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
   status() {
@@ -205,7 +207,12 @@ export class MapsProviderService {
     };
   }
 
-  async places(query = '') {
+  // These three methods proxy paid Google Maps calls behind session auth only - with no
+  // per-caller ceiling, a single compromised or scripted account could run up real,
+  // unbounded Google Cloud billing. Rate-limited per actor (falls back to a shared
+  // anonymous bucket only if no id is supplied, which callers should avoid).
+  async places(query = '', actorId = 'anonymous') {
+    await this.rateLimit.assertAllowed(`maps-places:${actorId}`, { limit: 60, windowMs: 5 * 60 * 1000, label: 'Location search' });
     const key = this.config.get<string>('GOOGLE_MAPS_API_KEY');
     if (key && query.trim().length >= 2) {
       const google = await this.googlePlaces(query, key).catch(() => null);
@@ -222,7 +229,8 @@ export class MapsProviderService {
     return { provider: 'mock', results: results.slice(0, 8) };
   }
 
-  async geocode(address = '') {
+  async geocode(address = '', actorId = 'anonymous') {
+    await this.rateLimit.assertAllowed(`maps-geocode:${actorId}`, { limit: 30, windowMs: 5 * 60 * 1000, label: 'Address lookup' });
     const coordinates = this.parseCoordinates(address);
     const key = this.config.get<string>('GOOGLE_MAPS_API_KEY');
     if (key && address.trim().length >= 2) {
@@ -257,7 +265,8 @@ export class MapsProviderService {
     return { provider: 'mock', result };
   }
 
-  async routeEstimate(input: RouteEstimateInput): Promise<RouteQuote> {
+  async routeEstimate(input: RouteEstimateInput, actorId = 'anonymous'): Promise<RouteQuote> {
+    await this.rateLimit.assertAllowed(`maps-route-estimate:${actorId}`, { limit: 20, windowMs: 5 * 60 * 1000, label: 'Route pricing' });
     const adjustments = await this.pricingAdjustments();
     const normalizedInput = this.normalizeQuoteInput(input);
     const { originLatitude, originLongitude, destinationLatitude, destinationLongitude } = normalizedInput;

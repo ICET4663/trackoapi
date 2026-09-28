@@ -23,6 +23,6 @@ import { RateLimitService } from './rate-limit.service';
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, RateLimitService],
-  exports: [AuthService],
+  exports: [AuthService, RateLimitService],
 })
 export class AuthModule {}

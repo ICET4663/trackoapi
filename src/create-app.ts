@@ -16,6 +16,8 @@ export async function createTrackoApp() {
   });
   app.useBodyParser("json", { limit: "4mb" });
   app.useBodyParser("urlencoded", { limit: "4mb", extended: true });
+  // Trivial fingerprinting aid otherwise sent on every response - no functional purpose.
+  app.getHttpAdapter().getInstance().disable("x-powered-by");
   const config = app.get(ConfigService);
   const readiness = app.get(DeploymentConfigService).summary();
   if (!readiness.deployable) {

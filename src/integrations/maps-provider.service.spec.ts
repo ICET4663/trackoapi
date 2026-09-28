@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import type { RateLimitService } from '../auth/rate-limit.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import { MapsProviderService } from './maps-provider.service';
 
@@ -11,7 +12,7 @@ describe('MapsProviderService route pricing', () => {
     jest.restoreAllMocks();
   });
 
-  function createService(options: { googleKey?: string; settings?: Array<{ key: string; value: string }> } = {}) {
+  function createService(options: { googleKey?: string; settings?: Array<{ key: string; value: string }>; rateLimit?: RateLimitService } = {}) {
     const config = {
       get: jest.fn((key: string) => key === 'GOOGLE_MAPS_API_KEY' ? options.googleKey : undefined),
     } as unknown as ConfigService;
@@ -20,7 +21,8 @@ describe('MapsProviderService route pricing', () => {
         findMany: jest.fn().mockResolvedValue(options.settings ?? []),
       },
     } as unknown as PrismaService;
-    return new MapsProviderService(config, prisma);
+    const rateLimit = options.rateLimit ?? ({ assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService);
+    return new MapsProviderService(config, prisma, rateLimit);
   }
 
   const routeInput = {
@@ -200,5 +202,64 @@ describe('MapsProviderService route pricing', () => {
     await expect(createService().routeEstimate({ ...routeInput, weightTons: 3, volumeM3: 56 })).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+});
+
+// These proxy paid Google Maps calls behind session auth only - with no per-caller
+// ceiling, a single compromised or scripted account could run up unbounded real
+// Google Cloud billing. Confirms each entry point is actually rate-limited per actor,
+// keyed distinctly per endpoint, and that a limit hit is a real rejection rather than
+// silently falling through to the mock/coordinate fallback.
+describe('MapsProviderService paid-endpoint rate limiting', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+
+  const routeInput = {
+    originLatitude: 6.5244,
+    originLongitude: 3.3792,
+    destinationLatitude: 9.0765,
+    destinationLongitude: 7.3986,
+    truckType: 'Flatbed',
+    weightTons: 15,
+  };
+
+  function createService(rateLimit: RateLimitService) {
+    const config = { get: jest.fn().mockReturnValue(undefined) } as unknown as ConfigService;
+    const prisma = { platformSetting: { findMany: jest.fn().mockResolvedValue([]) } } as unknown as PrismaService;
+    return new MapsProviderService(config, prisma, rateLimit);
+  }
+
+  it('rate-limits places() per actor, distinctly from the other endpoints', async () => {
+    const assertAllowed = jest.fn().mockResolvedValue(undefined);
+    const service = createService({ assertAllowed } as unknown as RateLimitService);
+
+    await service.places('lekki', 'driver-1');
+
+    expect(assertAllowed).toHaveBeenCalledWith('maps-places:driver-1', expect.objectContaining({ limit: 60, label: 'Location search' }));
+  });
+
+  it('rate-limits geocode() per actor', async () => {
+    const assertAllowed = jest.fn().mockResolvedValue(undefined);
+    const service = createService({ assertAllowed } as unknown as RateLimitService);
+
+    await service.geocode('Lekki Phase 1', 'driver-1');
+
+    expect(assertAllowed).toHaveBeenCalledWith('maps-geocode:driver-1', expect.objectContaining({ limit: 30, label: 'Address lookup' }));
+  });
+
+  it('rate-limits routeEstimate() per actor', async () => {
+    const assertAllowed = jest.fn().mockResolvedValue(undefined);
+    const service = createService({ assertAllowed } as unknown as RateLimitService);
+
+    await service.routeEstimate(routeInput, 'driver-1');
+
+    expect(assertAllowed).toHaveBeenCalledWith('maps-route-estimate:driver-1', expect.objectContaining({ limit: 20, label: 'Route pricing' }));
+  });
+
+  it('propagates a real rejection when the limit is hit, rather than falling through to a fallback result', async () => {
+    const assertAllowed = jest.fn().mockRejectedValue(new Error('Location search rate limit reached. Try again later.'));
+    const service = createService({ assertAllowed } as unknown as RateLimitService);
+
+    await expect(service.places('lekki', 'driver-1')).rejects.toThrow('rate limit reached');
   });
 });

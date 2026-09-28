@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
 import { AuthService } from '../src/auth/auth.service';
+import { RateLimitService } from '../src/auth/rate-limit.service';
 import { MapsProviderService } from '../src/integrations/maps-provider.service';
 import { PaymentProviderService } from '../src/integrations/payment-provider.service';
 import { NotificationsService } from '../src/notifications/notifications.service';
@@ -84,7 +85,8 @@ async function main() {
       PAYSTACK_SECRET_KEY: 'sk_test_lifecycle_only',
       QUOTE_SIGNING_SECRET: 'lifecycle-quote-secret',
     });
-    const maps = new MapsProviderService(config, prisma);
+    const rateLimit = new RateLimitService(config, prisma);
+    const maps = new MapsProviderService(config, prisma, rateLimit);
     const shipments = new ShipmentsService(prisma, notifications, maps);
     const tracking = new TrackingService(prisma, notifications);
     const payments = new PaymentProviderService(config, prisma, notifications);

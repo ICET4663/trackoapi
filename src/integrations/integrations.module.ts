@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AuthModule } from '../auth/auth.module';
 import { RequestUserModule } from '../common/request-user.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -10,7 +11,7 @@ import { PaymentProviderService } from './payment-provider.service';
 import { TranslationProviderService } from './translation-provider.service';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, NotificationsModule, RequestUserModule],
+  imports: [ConfigModule, PrismaModule, NotificationsModule, RequestUserModule, AuthModule],
   controllers: [IntegrationsController],
   providers: [KycProviderService, MapsProviderService, PaymentProviderService, TranslationProviderService],
   exports: [KycProviderService, MapsProviderService, PaymentProviderService, TranslationProviderService],
