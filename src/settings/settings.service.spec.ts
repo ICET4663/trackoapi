@@ -1020,7 +1020,7 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
       const update = jest.fn().mockResolvedValue({
         id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'PAID',
       });
-      const queryRawUnsafe = jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123' }]);
+      const queryRawUnsafe = jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123', verified: true }]);
       const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
       const fetchMock = jest.fn().mockResolvedValue({
         ok: true,
@@ -1062,7 +1062,28 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
             findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
             update,
           },
-          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: null }]),
+          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: null, verified: false }]),
+        },
+        { PAYSTACK_SECRET_KEY: 'sk_test_123' },
+      );
+
+      await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' }))
+        .rejects.toThrow("hasn't set up a verified payout bank account");
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    // setPayoutAccount() still tokenizes a recipient_code even when the resolved account
+    // name doesn't match the recipient's own profile (the fraud-prevention "verified"
+    // flag) - a recipientCode existing is not the same as it being safe to pay.
+    it('refuses to mark PAID when the bank account resolved to a name that did not match the recipient', async () => {
+      const update = jest.fn();
+      const service = buildPayoutService(
+        {
+          payout: {
+            findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
+            update,
+          },
+          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123', verified: false }]),
         },
         { PAYSTACK_SECRET_KEY: 'sk_test_123' },
       );
@@ -1086,7 +1107,7 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
             findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
             update,
           },
-          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123' }]),
+          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123', verified: true }]),
         },
         { PAYSTACK_SECRET_KEY: 'sk_test_123' },
       );

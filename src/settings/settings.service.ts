@@ -1075,12 +1075,19 @@ export class SettingsService {
     }
   }
 
+  // Only returns a recipient code for an account that passed the name-match fraud check
+  // in setPayoutAccount() - a recipientCode existing at all does not mean it's safe to
+  // pay. Without this, a resolved account name that didn't match the recipient's own
+  // profile (exactly the "payout to someone else's account" pattern the verified flag
+  // exists to catch) would still receive a real transfer.
   private async payoutRecipientCode(userId: string): Promise<string | null> {
-    const rows = await this.prisma.$queryRawUnsafe<Array<{ recipientCode: string | null }>>(
-      'select "recipientCode" from "BankAccount" where "userId" = $1 limit 1',
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ recipientCode: string | null; verified: boolean }>>(
+      'select "recipientCode", "verified" from "BankAccount" where "userId" = $1 limit 1',
       userId,
     );
-    return rows[0]?.recipientCode ?? null;
+    const account = rows[0];
+    if (!account?.verified) return null;
+    return account.recipientCode ?? null;
   }
 
   // Actually sends money via Paystack's Transfer API - "PAID" only ever gets persisted
