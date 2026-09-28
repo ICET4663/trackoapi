@@ -973,15 +973,16 @@ describe('SettingsService saved addresses never fake success', () => {
 // "approve"/"mark paid" that fake id without ever touching the real Payout table - an
 // admin could believe they'd paid a driver N120,000 when nothing happened on either side.
 describe('SettingsService payout review never fakes a withdrawal request', () => {
-  function buildPayoutService(prismaOverrides: Record<string, unknown>) {
+  function buildPayoutService(prismaOverrides: Record<string, unknown>, configOverrides: Record<string, string | undefined> = {}) {
     const prisma = {
       notification: { create: jest.fn() },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(undefined),
       ...prismaOverrides,
     } as unknown as PrismaService;
     return new SettingsService(
       prisma,
       { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService,
-      { get: jest.fn() } as unknown as ConfigService,
+      { get: jest.fn((key: string) => configOverrides[key]) } as unknown as ConfigService,
       noopAuthService,
     );
   }
@@ -1011,22 +1012,103 @@ describe('SettingsService payout review never fakes a withdrawal request', () =>
       .rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('reviewPayoutRequest() records a real decision against a real payout row', async () => {
-    const update = jest.fn().mockResolvedValue({
-      id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'PAID',
-    });
-    const service = buildPayoutService({
-      payout: {
-        findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
-        update,
-      },
-      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+  describe('PAID decisions send a real Paystack transfer', () => {
+    const originalFetch = global.fetch;
+    afterEach(() => { global.fetch = originalFetch; });
+
+    it('sends a real transfer, and only then persists PAID, when a payout account is on file', async () => {
+      const update = jest.fn().mockResolvedValue({
+        id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'PAID',
+      });
+      const queryRawUnsafe = jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123' }]);
+      const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ status: true, message: 'Transfer has been queued', data: { status: 'success', transfer_code: 'TRF_xyz789' } }),
+      });
+      (global as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+
+      const service = buildPayoutService(
+        {
+          payout: {
+            findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
+            update,
+          },
+          auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+          $queryRawUnsafe: queryRawUnsafe,
+          $executeRawUnsafe: executeRawUnsafe,
+        },
+        { PAYSTACK_SECRET_KEY: 'sk_test_123' },
+      );
+
+      const result = await service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' });
+
+      expect(fetchMock).toHaveBeenCalledWith('https://api.paystack.co/transfer', expect.objectContaining({
+        body: expect.stringContaining('"recipient":"RCP_abc123"'),
+      }));
+      expect(executeRawUnsafe).toHaveBeenCalledWith(
+        expect.stringContaining('set "transferCode" = $1'),
+        'TRF_xyz789', expect.any(String), 'success', 'payout-1',
+      );
+      expect(result.id).toBe('payout-1');
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'payout-1' } }));
     });
 
-    const result = await service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' });
+    it('refuses to mark PAID when the recipient has no verified payout account', async () => {
+      const update = jest.fn();
+      const service = buildPayoutService(
+        {
+          payout: {
+            findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
+            update,
+          },
+          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: null }]),
+        },
+        { PAYSTACK_SECRET_KEY: 'sk_test_123' },
+      );
 
-    expect(result.id).toBe('payout-1');
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'payout-1' } }));
+      await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' }))
+        .rejects.toThrow("hasn't set up a verified payout bank account");
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mark PAID when Paystack requires an OTP - never silently drops to a fake success', async () => {
+      const update = jest.fn();
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ status: true, message: 'Transfer requires OTP to continue', data: { status: 'otp' } }),
+      });
+      (global as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+
+      const service = buildPayoutService(
+        {
+          payout: {
+            findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
+            update,
+          },
+          $queryRawUnsafe: jest.fn().mockResolvedValue([{ recipientCode: 'RCP_abc123' }]),
+        },
+        { PAYSTACK_SECRET_KEY: 'sk_test_123' },
+      );
+
+      await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' }))
+        .rejects.toThrow('requires an OTP');
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mark PAID when Paystack itself is not configured', async () => {
+      const update = jest.fn();
+      const service = buildPayoutService({
+        payout: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'payout-1', driverId: 'driver-1', amountKobo: 5_000_00, status: 'APPROVED' }),
+          update,
+        },
+      });
+
+      await expect(service.reviewPayoutRequest('payout-1', 'admin-1', { decision: 'PAID' }))
+        .rejects.toThrow('Paystack is not configured');
+      expect(update).not.toHaveBeenCalled();
+    });
   });
 
   it('requires approval before a pending payout can be marked paid', async () => {

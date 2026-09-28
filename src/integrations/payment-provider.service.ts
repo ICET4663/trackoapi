@@ -61,6 +61,15 @@ export class PaymentProviderService {
       realChargeEnabled: hasPaystackKey || hasStripeKey,
       webhookSignatureVerification: provider === 'paystack' ? 'raw-body-hmac-sha512' : 'provider-dependent',
       webhookPath: provider === 'paystack' ? '/v1/payments/webhooks/paystack/charge.success' : '/v1/payments/webhooks/:provider/:event',
+      // A driver/owner "PAID" payout now sends a real Paystack transfer (see
+      // SettingsService.reviewPayoutRequest()) - this reuses the same PAYSTACK_SECRET_KEY,
+      // no separate config. otpRisk flags that Paystack's "Approve transfers with OTP"
+      // dashboard setting, if left on, blocks every automated payout until an admin
+      // manually enters an OTP in the Paystack dashboard - disable it there for
+      // uninterrupted automated payouts.
+      payoutAutomation: provider === 'paystack' && hasPaystackKey
+        ? { enabled: true, transferWebhookEvents: ['transfer.success', 'transfer.failed', 'transfer.reversed'], otpRisk: 'Disable "Approve transfers with OTP" in Paystack Dashboard > Settings > Preferences, or transfers will stall waiting on manual OTP entry.' }
+        : { enabled: false },
       requiredEnv: provider === 'stripe' ? ['STRIPE_SECRET_KEY'] : ['PAYSTACK_SECRET_KEY'],
     };
   }
@@ -173,6 +182,16 @@ export class PaymentProviderService {
       provider === 'paystack'
         ? this.verifyPaystackSignature(body, signature, rawBody)
         : this.status().mode === 'mock';
+
+    // Paystack posts every subscribed event to the one webhook URL configured on the
+    // dashboard - the real event type is always `body.event`, not the `:event` path
+    // segment (that's just this app's own organizational choice for the URL). Payout
+    // transfers land here too, so branch on the wire event before assuming charge.success.
+    const wireEvent = this.wireEventName(body) ?? event;
+    if (provider === 'paystack' && wireEvent.startsWith('transfer.')) {
+      return this.recordTransferWebhook(wireEvent, body, verified);
+    }
+
     const payment = this.extractPaymentEvent(body);
     let escrowUpdated = false;
     // A charge.success event can arrive more than once (Paystack retries on
@@ -219,6 +238,64 @@ export class PaymentProviderService {
       alreadyProcessed,
       processedAt: new Date().toISOString(),
     };
+  }
+
+  private wireEventName(body: unknown): string | null {
+    const payload = body as { event?: string } | null;
+    return typeof payload?.event === 'string' ? payload.event : null;
+  }
+
+  // transfer.success confirms a payout that reviewPayoutRequest() already marked PAID -
+  // just records the confirmation. transfer.failed/transfer.reversed mean the opposite:
+  // Trako told the recipient (and its own records) that money moved, but it didn't. That
+  // must never fail silently - it's flagged to admin as urgently as a failed escrow charge.
+  private async recordTransferWebhook(event: string, body: unknown, verified: boolean) {
+    const payload = (body ?? {}) as {
+      data?: { reference?: string; transfer_code?: string; amount?: number; recipient?: { name?: string } };
+    };
+    const reference = payload.data?.reference;
+    let updated = false;
+
+    if (verified && reference) {
+      try {
+        const transferStatus = event === 'transfer.success' ? 'success' : event === 'transfer.reversed' ? 'reversed' : 'failed';
+        const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; driverId: string; amountKobo: number }>>(
+          `update "Payout" set "transferStatus" = $1, "updatedAt" = current_timestamp
+           where "transferReference" = $2
+           returning "id", "driverId", "amountKobo"`,
+          transferStatus,
+          reference,
+        );
+        const payout = rows[0];
+        if (payout) {
+          updated = true;
+          if (transferStatus !== 'success') {
+            await this.notifications.create({
+              role: 'ADMIN',
+              title: 'Payout transfer did not complete',
+              body: `A ${this.formatMoney(payout.amountKobo)} payout was marked PAID but Paystack reports it ${transferStatus}. It needs manual follow-up - the recipient has not actually been paid.`,
+              tone: 'DANGER',
+              entity: 'Payout',
+              entityId: payout.id,
+              actionUrl: '/admin/finance',
+            }).catch(() => null);
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Failed to apply transfer webhook for reference ${reference}: ${this.errorMessage(error)}`);
+      }
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'PAYOUT_TRANSFER_WEBHOOK_RECEIVED',
+        entity: 'Payout',
+        entityId: reference,
+        metadata: this.toJson({ event, body, verified, updated }),
+      },
+    }).catch(() => null);
+
+    return { received: true, provider: 'paystack', event, verified, escrowUpdated: false, alreadyProcessed: false, processedAt: new Date().toISOString() };
   }
 
   private async escrowStatus(shipmentId: string): Promise<string | null> {

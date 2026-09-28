@@ -1025,15 +1025,25 @@ export class SettingsService {
     // fraud pattern the (pre-existing) UI copy already warns about, now actually enforced.
     const nameMatches = driverName ? this.namesRoughlyMatch(resolvedName, driverName) : false;
 
+    // Tokenize the account into a Paystack transfer recipient now, while we have the raw
+    // account number - only the recipient_code is persisted below, never the account
+    // number itself, the same "never store the raw payment instrument" pattern already
+    // used for saved cards (authorization_code instead of the PAN). Without this,
+    // reviewPayoutRequest() has no way to actually move money for a "PAID" decision - it
+    // used to just flip a status flag with nothing real behind it.
+    const recipientCode = await this.createPaystackTransferRecipient(resolvedName, accountNumber, bankCode, secretKey);
+
     const maskedNumber = `**** ${accountNumber.slice(-4)}`;
+    await this.ensurePayoutTransferColumns();
     await this.prisma.$queryRawUnsafe(
-      `insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "updatedAt")
-       values ($1, $2, $3, $4, $5, $6, 'Weekly', current_timestamp)
+      `insert into "BankAccount" ("id", "userId", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "recipientCode", "updatedAt")
+       values ($1, $2, $3, $4, $5, $6, 'Weekly', $7, current_timestamp)
        on conflict ("userId") do update set
          "bankName" = excluded."bankName",
          "maskedNumber" = excluded."maskedNumber",
          "holderName" = excluded."holderName",
          "verified" = excluded."verified",
+         "recipientCode" = excluded."recipientCode",
          "updatedAt" = current_timestamp`,
       `bank-${userId}`,
       userId,
@@ -1041,9 +1051,73 @@ export class SettingsService {
       maskedNumber,
       resolvedName,
       nameMatches,
+      recipientCode,
     );
 
     return this.bankAccount(userId);
+  }
+
+  private async createPaystackTransferRecipient(name: string, accountNumber: string, bankCode: string, secretKey: string): Promise<string | null> {
+    try {
+      const response = await fetch('https://api.paystack.co/transferrecipient', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'nuban', name, account_number: accountNumber, bank_code: bankCode, currency: 'NGN' }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { status?: boolean; data?: { recipient_code?: string } };
+      if (!response.ok || !payload.status || !payload.data?.recipient_code) return null;
+      return payload.data.recipient_code;
+    } catch {
+      // A bank account can still be saved for display without a recipient - it just
+      // won't be payable automatically until this is retried (reviewPayoutRequest()
+      // refuses to mark a payout PAID without a recipientCode, so nothing is faked).
+      return null;
+    }
+  }
+
+  private async payoutRecipientCode(userId: string): Promise<string | null> {
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ recipientCode: string | null }>>(
+      'select "recipientCode" from "BankAccount" where "userId" = $1 limit 1',
+      userId,
+    );
+    return rows[0]?.recipientCode ?? null;
+  }
+
+  // Actually sends money via Paystack's Transfer API - "PAID" only ever gets persisted
+  // once this returns successfully. Never silently marks a transfer PAID: an OTP
+  // requirement, a rejected request, or a missing transfer_code all throw instead.
+  private async initiatePaystackTransfer(
+    recipientCode: string,
+    amountKobo: number,
+    reference: string,
+    reason: string,
+    secretKey: string,
+  ): Promise<{ transferCode: string; transferReference: string; transferStatus: string }> {
+    const response = await fetch('https://api.paystack.co/transfer', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'balance', amount: amountKobo, recipient: recipientCode, reference, reason }),
+    });
+    const payload = (await response.json().catch(() => ({}))) as {
+      status?: boolean;
+      message?: string;
+      data?: { status?: string; transfer_code?: string };
+    };
+
+    if (!response.ok || !payload.status) {
+      throw new BadRequestException(payload.message || 'Paystack could not process this transfer.');
+    }
+    const transferStatus = payload.data?.status ?? 'unknown';
+    if (transferStatus === 'otp') {
+      throw new BadRequestException(
+        "Paystack requires an OTP to approve this transfer. Disable \"Approve transfers with OTP\" in your Paystack dashboard (Settings > Preferences) for automated payouts, or finalize this transfer manually in the Paystack dashboard using the transfer reference " +
+          `${reference}.`,
+      );
+    }
+    if (!payload.data?.transfer_code) {
+      throw new BadRequestException('Paystack accepted the transfer request but did not return a transfer code.');
+    }
+    return { transferCode: payload.data.transfer_code, transferReference: reference, transferStatus };
   }
 
   private namesRoughlyMatch(a: string, b: string) {
@@ -1478,6 +1552,27 @@ export class SettingsService {
       );
     }
 
+    // "PAID" used to just flip this status flag - nothing actually moved. Send a real
+    // Paystack transfer first and only persist PAID if Paystack actually accepted it, so
+    // this can never claim money was sent when it wasn't.
+    let transfer: { transferCode: string; transferReference: string; transferStatus: string } | null = null;
+    if (decision === 'PAID') {
+      const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+      if (!secretKey) throw new BadRequestException('Paystack is not configured yet - cannot send a real payout.');
+      await this.ensurePayoutTransferColumns();
+      const recipientCode = await this.payoutRecipientCode(existing.driverId);
+      if (!recipientCode) {
+        throw new BadRequestException("This recipient hasn't set up a verified payout bank account yet, so no transfer can be sent.");
+      }
+      transfer = await this.initiatePaystackTransfer(
+        recipientCode,
+        existing.amountKobo,
+        `payout-${existing.id}-${Date.now()}`,
+        `Trako payout ${existing.id}`,
+        secretKey,
+      );
+    }
+
     const updated = await this.prisma.payout.update({
       where: { id },
       data: {
@@ -1488,6 +1583,16 @@ export class SettingsService {
       },
     });
 
+    if (transfer) {
+      await this.prisma.$executeRawUnsafe(
+        `update "Payout" set "transferCode" = $1, "transferReference" = $2, "transferStatus" = $3 where "id" = $4`,
+        transfer.transferCode,
+        transfer.transferReference,
+        transfer.transferStatus,
+        updated.id,
+      );
+    }
+
     // The payout row is the mutable business record; this is the immutable trail of who
     // reviewed it and when, kept separate rather than overwriting the audit log itself.
     await this.prisma.auditLog.create({
@@ -1496,7 +1601,7 @@ export class SettingsService {
         action: 'PAYOUT_WITHDRAWAL_REVIEWED',
         entity: 'Payout',
         entityId: updated.id,
-        metadata: this.toJson({ decision, note: input.note ?? null, amountKobo: updated.amountKobo }),
+        metadata: this.toJson({ decision, note: input.note ?? null, amountKobo: updated.amountKobo, transfer }),
       },
     }).catch(() => null);
 
@@ -1891,6 +1996,14 @@ export class SettingsService {
     const vehicle = await this.prisma.vehicle.findFirst({ where: { id: vehicleId, ownerId }, select: { id: true, plateNumber: true } });
     if (!vehicle) throw new NotFoundException('Truck not found for this owner account.');
     return vehicle;
+  }
+
+  private async ensurePayoutTransferColumns() {
+    await this.prisma.$executeRawUnsafe(`alter table "BankAccount" add column if not exists "recipientCode" text`);
+    await this.prisma.$executeRawUnsafe(`alter table "Payout" add column if not exists "transferCode" text`);
+    await this.prisma.$executeRawUnsafe(`alter table "Payout" add column if not exists "transferReference" text`);
+    await this.prisma.$executeRawUnsafe(`alter table "Payout" add column if not exists "transferStatus" text`);
+    await this.prisma.$executeRawUnsafe(`create unique index if not exists "Payout_transferReference_key" on "Payout"("transferReference")`);
   }
 
   private async ensureVehicleExpenseLedger() {

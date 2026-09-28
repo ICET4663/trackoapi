@@ -175,6 +175,69 @@ describe('PaymentProviderService webhook signature verification is constant-time
   });
 });
 
+// Paystack posts every subscribed event (including payout transfer results) to the same
+// webhook URL - recordWebhook() must route on the real body.event, not the URL's :event
+// segment, and must never let a failed/reversed transfer go unnoticed after
+// reviewPayoutRequest() already told the recipient (and the DB) that they'd been paid.
+describe('PaymentProviderService routes transfer.* webhooks to Payout, not Escrow', () => {
+  const secretKey = 'sk_test_fake_webhook_secret';
+
+  function buildService(queryRawUnsafe: jest.Mock, notificationCreate = jest.fn().mockResolvedValue(undefined)) {
+    const config = {
+      get: jest.fn((key: string) => (key === 'PAYSTACK_SECRET_KEY' ? secretKey : undefined)),
+    } as unknown as ConfigService;
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+    } as unknown as PrismaService;
+    return new PaymentProviderService(config, prisma, { create: notificationCreate } as unknown as NotificationsService);
+  }
+
+  function sign(rawBody: string) {
+    return createHmac('sha512', secretKey).update(rawBody).digest('hex');
+  }
+
+  it('records a successful transfer against the matching Payout row without touching escrow logic', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'payout-1', driverId: 'driver-1', amountKobo: 500_000 }]);
+    const notificationCreate = jest.fn().mockResolvedValue(undefined);
+    const service = buildService(queryRawUnsafe, notificationCreate);
+    const rawBody = JSON.stringify({ event: 'transfer.success', data: { reference: 'payout-1-123', transfer_code: 'TRF_xyz', amount: 500_000 } });
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), sign(rawBody), rawBody);
+
+    expect(result.verified).toBe(true);
+    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('set "transferStatus" = $1'), 'success', 'payout-1-123');
+    expect(notificationCreate).not.toHaveBeenCalled();
+  });
+
+  it('flags admin urgently when a "PAID" transfer actually fails - the recipient was never really paid', async () => {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'payout-1', driverId: 'driver-1', amountKobo: 500_000 }]);
+    const notificationCreate = jest.fn().mockResolvedValue(undefined);
+    const service = buildService(queryRawUnsafe, notificationCreate);
+    const rawBody = JSON.stringify({ event: 'transfer.failed', data: { reference: 'payout-1-123', transfer_code: 'TRF_xyz', amount: 500_000 } });
+
+    await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), sign(rawBody), rawBody);
+
+    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('set "transferStatus" = $1'), 'failed', 'payout-1-123');
+    expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'ADMIN',
+      tone: 'DANGER',
+      body: expect.stringContaining('has not actually been paid'),
+    }));
+  });
+
+  it('ignores an unsigned transfer webhook rather than trusting an unverified payout update', async () => {
+    const queryRawUnsafe = jest.fn();
+    const service = buildService(queryRawUnsafe);
+    const rawBody = JSON.stringify({ event: 'transfer.success', data: { reference: 'payout-1-123', transfer_code: 'TRF_xyz' } });
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), 'wrong-signature', rawBody);
+
+    expect(result.verified).toBe(false);
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
+});
+
 // A successful card charge used to save the reusable card as a PaymentMethod, and record the
 // BillingCharge, as two independent steps - so every BillingCharge row had a NULL
 // paymentMethodId, and the frontend's per-card "Billing history" screen (which does send a
