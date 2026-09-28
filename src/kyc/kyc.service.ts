@@ -1,7 +1,8 @@
 import { randomUUID } from 'crypto';
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UserRole, VerificationStatus } from '@prisma/client';
+import { KycProviderService } from '../integrations/kyc-provider.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type KycAction = 'APPROVE' | 'REQUEST_CORRECTION' | 'REJECT';
@@ -38,6 +39,10 @@ type KycRow = {
   fullName?: string | null;
   verificationStatus?: VerificationStatus;
   documentCount?: number | bigint;
+  providerJobId?: string | null;
+  providerStatus?: string | null;
+  providerReason?: string | null;
+  providerCheckedAt?: Date | string | null;
 };
 
 type KycDocumentRow = {
@@ -57,9 +62,12 @@ type KycDocumentInput = {
 
 @Injectable()
 export class KycService {
+  private readonly logger = new Logger(KycService.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly kycProvider: KycProviderService,
   ) {}
 
   async myKyc(userId: string) {
@@ -132,11 +140,39 @@ export class KycService {
         userId,
       );
 
+      await this.triggerAutomatedVerification(submissionId, userId, idType, idNumber, this.optionalText(input.bvn));
+
       const [submission] = await this.submissionsForUser(userId);
       return submission ? this.toSubmission(submission) : this.previewSubmission(userId, role);
     } catch (error) {
       if (!this.previewEnabled()) throw error;
       return this.previewSubmission(userId, this.previewRole(input.role));
+    }
+  }
+
+  // Best-effort real identity check via Smile ID (see KycProviderService.verifyIdentity()).
+  // Never throws and never blocks the submission response - manual admin review
+  // (queue()/decide()) is always the baseline, this only makes it faster when Smile ID
+  // can decide within the poll window used there.
+  private async triggerAutomatedVerification(submissionId: string, userId: string, idType: string, idNumber: string, bvn: string | null) {
+    try {
+      const [user] = await this.prisma.$queryRawUnsafe<Array<{ email: string; phone: string; fullName: string | null }>>(
+        `select u."email", u."phone", p."fullName" from "User" u left join "Profile" p on p."userId" = u."id" where u."id" = $1 limit 1`,
+        userId,
+      );
+      if (!user) return;
+      await this.kycProvider.verifyIdentity({
+        submissionId,
+        userId,
+        fullName: user.fullName ?? user.email ?? 'Trako User',
+        email: user.email,
+        phone: user.phone,
+        idType,
+        idNumber,
+        bvn,
+      });
+    } catch (error) {
+      this.logger.warn(`Automated KYC verification did not run: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -228,12 +264,14 @@ export class KycService {
 
   async queue() {
     try {
+      await this.kycProvider.ensureProviderColumns();
       const submissions = await this.prisma.$queryRawUnsafe<KycRow[]>(
         `select
           ks."id", ks."userId", ks."role", ks."status", ks."idType", ks."idNumber", ks."bvn",
           ks."licenceNumber", ks."licenceExpiry", ks."note", ks."reviewedAt", ks."reviewedBy",
           ks."submittedAt", ks."updatedAt", u."email", u."phone", u."verificationStatus",
-          p."fullName", count(ksd."id") as "documentCount"
+          p."fullName", count(ksd."id") as "documentCount",
+          ks."providerJobId", ks."providerStatus", ks."providerReason", ks."providerCheckedAt"
         from "KycSubmission" ks
         join "User" u on u."id" = ks."userId"
         left join "Profile" p on p."userId" = u."id"
@@ -378,12 +416,14 @@ export class KycService {
     }
   }
 
-  private submissionsForUser(userId: string) {
+  private async submissionsForUser(userId: string) {
+    await this.kycProvider.ensureProviderColumns();
     return this.prisma.$queryRawUnsafe<KycRow[]>(
       `select
         ks."id", ks."userId", ks."role", ks."status", ks."idType", ks."idNumber", ks."bvn",
         ks."licenceNumber", ks."licenceExpiry", ks."note", ks."reviewedAt", ks."reviewedBy",
-        ks."submittedAt", ks."updatedAt", u."email", u."phone", u."verificationStatus", p."fullName"
+        ks."submittedAt", ks."updatedAt", u."email", u."phone", u."verificationStatus", p."fullName",
+        ks."providerJobId", ks."providerStatus", ks."providerReason", ks."providerCheckedAt"
       from "KycSubmission" ks
       join "User" u on u."id" = ks."userId"
       left join "Profile" p on p."userId" = u."id"
@@ -426,6 +466,15 @@ export class KycService {
       phone: submission.phone,
       verificationStatus: submission.verificationStatus ?? 'PENDING',
       documents,
+      provider: submission.providerJobId
+        ? {
+            name: 'smile_id',
+            jobId: submission.providerJobId,
+            status: submission.providerStatus ?? null,
+            reason: submission.providerReason ?? null,
+            checkedAt: this.isoDate(submission.providerCheckedAt ?? null),
+          }
+        : null,
       history: this.historyForSubmission(submission),
     };
   }

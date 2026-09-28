@@ -103,9 +103,11 @@ export class IntegrationsController {
   }
 
   // Same as the payment webhook - an external KYC provider callback, no user session.
-  // Verified inside recordWebhook() via a shared secret (x-kyc-webhook-secret against
-  // KYC_WEBHOOK_SECRET) - this had no verification at all before, so anyone could POST a
-  // body claiming any account was KYC-approved.
+  // Verified inside recordWebhook(): the generic path uses a shared secret
+  // (x-kyc-webhook-secret against KYC_WEBHOOK_SECRET); the smile_id provider instead
+  // verifies Smile ID's own Response-Signature/Response-Timestamp headers. Either way,
+  // this had no verification at all before, so anyone could POST a body claiming any
+  // account was KYC-approved.
   @Post('kyc/provider/webhooks/:provider/:event')
   @Public()
   kycWebhook(
@@ -113,7 +115,9 @@ export class IntegrationsController {
     @Param('event') event: string,
     @Body() body: unknown,
     @Headers('x-kyc-webhook-secret') sharedSecret?: string,
+    @Headers('response-timestamp') smileIdTimestamp?: string,
+    @Headers('response-signature') smileIdSignature?: string,
   ) {
-    return this.kycProvider.recordWebhook(provider, event, body, sharedSecret);
+    return this.kycProvider.recordWebhook(provider, event, body, sharedSecret, smileIdTimestamp, smileIdSignature);
   }
 }

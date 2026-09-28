@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
+import type { KycProviderService } from '../integrations/kyc-provider.service';
 import type { PrismaService } from '../prisma/prisma.service';
 
 // previewEnabled() used to fall back to "NODE_ENV isn't production" - the exact pattern
@@ -17,7 +18,11 @@ describe('KycService preview fallback requires the explicit flag only', () => {
       $executeRawUnsafe: executeRawUnsafe,
       $queryRawUnsafe: jest.fn().mockResolvedValue([]),
     } as unknown as PrismaService;
-    return new KycService(config, prisma);
+    const kycProvider = {
+      verifyIdentity: jest.fn().mockResolvedValue({ ran: false, skippedReason: 'not under test' }),
+      ensureProviderColumns: jest.fn().mockResolvedValue(undefined),
+    } as unknown as KycProviderService;
+    return new KycService(config, prisma, kycProvider);
   }
 
   it('decide() throws a real error when NODE_ENV is merely unset/non-production and ENABLE_PREVIEW_AUTH is not set', async () => {

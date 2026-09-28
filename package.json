@@ -49,8 +49,14 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "moduleFileExtensions": ["js", "json", "ts"],
-    "collectCoverageFrom": ["**/*.(t|j)s"],
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "collectCoverageFrom": [
+      "**/*.(t|j)s"
+    ],
     "coverageDirectory": "../coverage"
   },
   "dependencies": {
@@ -61,6 +67,7 @@
     "@nestjs/passport": "^10.0.3",
     "@nestjs/platform-express": "^10.4.15",
     "@prisma/client": "^6.2.1",
+    "@smileid/usesmileid-nodejs": "^12.0.0",
     "bcryptjs": "^2.4.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",

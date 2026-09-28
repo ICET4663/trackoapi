@@ -13,6 +13,6 @@ import { TranslationProviderService } from './translation-provider.service';
   imports: [ConfigModule, PrismaModule, NotificationsModule, RequestUserModule],
   controllers: [IntegrationsController],
   providers: [KycProviderService, MapsProviderService, PaymentProviderService, TranslationProviderService],
-  exports: [MapsProviderService, PaymentProviderService, TranslationProviderService],
+  exports: [KycProviderService, MapsProviderService, PaymentProviderService, TranslationProviderService],
 })
 export class IntegrationsModule {}
