@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { RateLimitService } from '../auth/rate-limit.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -25,7 +26,48 @@ export class TelemetryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rateLimit: RateLimitService,
+    private readonly config: ConfigService,
   ) {}
+
+  private async sendFatalAlert(message: string, input: ClientErrorInput, actorId?: string) {
+    const configured = this.config.get<string>('TELEMETRY_ALERT_WEBHOOK_URL')?.trim();
+    if (!configured) return;
+    let url: URL;
+    try {
+      url = new URL(configured);
+      if (url.protocol !== 'https:') throw new Error('Webhook must use HTTPS.');
+    } catch (error) {
+      this.logger.warn(`Fatal error alert webhook is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const fingerprint = message.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 120) || 'unknown';
+    try {
+      await this.rateLimit.assertAllowed(`client-error-alert:${fingerprint}`, {
+        limit: 1,
+        windowMs: 15 * 60 * 1000,
+        label: 'Fatal error alert',
+      });
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          text: `Trako fatal client error: ${message}`,
+          event: 'TRAKO_FATAL_CLIENT_ERROR',
+          message,
+          actorId: actorId ?? null,
+          screen: str(input.screen, 200) ?? null,
+          appVersion: str(input.appVersion, 40) ?? null,
+          platform: str(input.platform, 40) ?? null,
+          occurredAt: new Date().toISOString(),
+        }),
+        signal: AbortSignal.timeout(4_000),
+      });
+      if (!response.ok) this.logger.warn(`Fatal error alert webhook returned HTTP ${response.status}.`);
+    } catch (error) {
+      // A duplicate alert, network outage or webhook failure must never affect the app.
+      this.logger.warn(`Fatal error alert was not delivered: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   // Sink for client-side crash/error reports. Rate-limited per identity so a
   // client stuck in an error loop can't flood; the audit write itself is
@@ -59,17 +101,18 @@ export class TelemetryService {
     } catch (error) {
       this.logger.error(`recordClientError() could not persist "${message}": ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (input.fatal === true) await this.sendFatalAlert(message, input, actorId);
     return { received: true };
   }
 
-  async recentClientErrors(limit = 50) {
+  async recentClientErrors(limit = 50, viewerId?: string) {
     try {
       const rows = await this.prisma.auditLog.findMany({
         where: { action: 'CLIENT_ERROR' },
         orderBy: { createdAt: 'desc' },
         take: Math.min(Math.max(1, limit), 200),
       });
-      return rows.map((row) => {
+      const mapped = rows.map((row) => {
         const meta = (row.metadata ?? {}) as Record<string, unknown>;
         return {
           id: row.id,
@@ -84,9 +127,21 @@ export class TelemetryService {
           componentStack: typeof meta.componentStack === 'string' ? meta.componentStack : null,
         };
       });
+      if (viewerId) {
+        await this.prisma.auditLog.create({
+          data: {
+            actorId: viewerId,
+            action: 'CLIENT_ERROR_LOG_VIEWED',
+            entity: 'Telemetry',
+            metadata: { returned: mapped.length, requestedLimit: Math.min(Math.max(1, limit), 200) },
+          },
+        }).catch(() => null);
+      }
+      return mapped;
     } catch (error) {
       this.logger.error(`recentClientErrors() failed: ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
   }
 }
+

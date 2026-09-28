@@ -31,19 +31,19 @@ export class IntegrationsController {
   // anonymous callers from running up the API bill for free.
   @Get('maps/places')
   async places(@Query('query') query: string | undefined, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.mapsProvider.places(query ?? '');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.mapsProvider.places(query ?? '', user.sub);
   }
 
   @Get('maps/geocode')
   async geocode(@Query('address') address: string | undefined, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.mapsProvider.geocode(address ?? '');
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.mapsProvider.geocode(address ?? '', user.sub);
   }
 
   @Post('maps/route-estimate')
   async routeEstimate(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
     return this.mapsProvider.routeEstimate({
       originLatitude: Number(body.originLatitude ?? body.originLat),
       originLongitude: Number(body.originLongitude ?? body.originLng),
@@ -52,7 +52,7 @@ export class IntegrationsController {
       truckType: typeof body.truckType === 'string' ? body.truckType : undefined,
       weightTons: Number(body.weightTons),
       volumeM3: Number(body.volumeM3),
-    });
+    }, user.sub);
   }
 
   @Post('payments/escrow/initialize')
@@ -121,3 +121,4 @@ export class IntegrationsController {
     return this.kycProvider.recordWebhook(provider, event, body, sharedSecret, smileIdTimestamp, smileIdSignature);
   }
 }
+

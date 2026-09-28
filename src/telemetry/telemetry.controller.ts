@@ -27,8 +27,9 @@ export class TelemetryController {
     @Query('limit') limit?: string,
     @Headers('authorization') authorization?: string,
   ) {
-    await this.requestUser.requireRole(authorization, ['ADMIN']);
+    const admin = await this.requestUser.requireRole(authorization, ['ADMIN']);
     const parsed = Number(limit);
-    return this.telemetry.recentClientErrors(Number.isFinite(parsed) ? parsed : 50);
+    return this.telemetry.recentClientErrors(Number.isFinite(parsed) ? parsed : 50, admin.sub);
   }
 }
+

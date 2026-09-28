@@ -13,6 +13,13 @@ describe('LegalController', () => {
     expect(html.toLowerCase()).toContain('does not collect background location');
   });
 
+  it('names Smile ID and the identity fields used for automated KYC checks', () => {
+    const html = controller.privacy();
+    expect(html).toContain('Smile ID');
+    expect(html).toContain('Nigerian ID type and number');
+    expect(html).toContain('BVN when supplied');
+  });
+
   it('serves terms and account-deletion pages', () => {
     expect(controller.terms()).toContain('<h1>Terms of Service</h1>');
     expect(controller.accountDeletion()).toContain('<h1>Account Deletion</h1>');
@@ -41,3 +48,4 @@ describe('LegalController', () => {
     expect(() => controller.document('nope')).toThrow(NotFoundException);
   });
 });
+

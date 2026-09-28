@@ -41,11 +41,12 @@ describe('TelemetryController', () => {
   it('requires an admin to list recent client errors', async () => {
     await controller.listClientErrors('20', 'Bearer admin');
     expect(requestUser.requireRole).toHaveBeenCalledWith('Bearer admin', ['ADMIN']);
-    expect(telemetry.recentClientErrors).toHaveBeenCalledWith(20);
+    expect(telemetry.recentClientErrors).toHaveBeenCalledWith(20, 'admin-1');
   });
 
   it('defaults the list limit when the query param is not a number', async () => {
     await controller.listClientErrors('abc', 'Bearer admin');
-    expect(telemetry.recentClientErrors).toHaveBeenCalledWith(50);
+    expect(telemetry.recentClientErrors).toHaveBeenCalledWith(50, 'admin-1');
   });
 });
+

@@ -1,18 +1,22 @@
 import type { RateLimitService } from '../auth/rate-limit.service';
+import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '../prisma/prisma.service';
 import { TelemetryService } from './telemetry.service';
 
 describe('TelemetryService', () => {
   let prisma: { auditLog: { create: jest.Mock; findMany: jest.Mock } };
   let rateLimit: { assertAllowed: jest.Mock };
+  let config: { get: jest.Mock };
   let service: TelemetryService;
 
   beforeEach(() => {
     prisma = { auditLog: { create: jest.fn().mockResolvedValue({}), findMany: jest.fn().mockResolvedValue([]) } };
     rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) };
+    config = { get: jest.fn().mockReturnValue(undefined) };
     service = new TelemetryService(
       prisma as unknown as PrismaService,
       rateLimit as unknown as RateLimitService,
+      config as unknown as ConfigService,
     );
   });
 
@@ -68,6 +72,28 @@ describe('TelemetryService', () => {
       await service.recordClientError({ message: 42 } as never, 'u1');
       expect(prisma.auditLog.create.mock.calls[0][0].data.metadata.message).toBe('Unknown client error');
     });
+
+    it('sends one compact webhook alert for a fatal client error when configured', async () => {
+      config.get.mockReturnValue('https://alerts.example.test/tracko');
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
+
+      await service.recordClientError({ message: 'App crashed', screen: '/driver/trip', platform: 'ios', fatal: true }, 'driver-1');
+
+      expect(rateLimit.assertAllowed).toHaveBeenCalledWith('client-error-alert:app-crashed', expect.objectContaining({ limit: 1 }));
+      expect(fetchMock).toHaveBeenCalledWith(new URL('https://alerts.example.test/tracko'), expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('TRAKO_FATAL_CLIENT_ERROR'),
+      }));
+      fetchMock.mockRestore();
+    });
+
+    it('never sends telemetry alerts to a non-HTTPS webhook', async () => {
+      config.get.mockReturnValue('http://alerts.example.test/tracko');
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
+      await service.recordClientError({ message: 'App crashed', fatal: true }, 'driver-1');
+      expect(fetchMock).not.toHaveBeenCalled();
+      fetchMock.mockRestore();
+    });
   });
 
   describe('recentClientErrors', () => {
@@ -92,5 +118,13 @@ describe('TelemetryService', () => {
       prisma.auditLog.findMany.mockRejectedValue(new Error('db down'));
       await expect(service.recentClientErrors()).resolves.toEqual([]);
     });
+
+    it('audits admin access to the client-error log', async () => {
+      await service.recentClientErrors(20, 'admin-1');
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ actorId: 'admin-1', action: 'CLIENT_ERROR_LOG_VIEWED', entity: 'Telemetry' }),
+      }));
+    });
   });
 });
+

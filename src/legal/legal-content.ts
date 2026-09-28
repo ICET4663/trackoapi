@@ -10,7 +10,7 @@
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
 export const LEGAL_SUPPORT_EMAIL = 'support@trako.com.ng';
-export const LEGAL_LAST_UPDATED = 'September 10, 2026';
+export const LEGAL_LAST_UPDATED = 'September 28, 2026';
 
 export type LegalSection = { heading: string; body: string };
 
@@ -50,7 +50,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Sharing',
-        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Trako operations for that shipment only. We use third-party processors for payments (Paystack), email delivery, maps and geocoding, push delivery and, where enabled, speech-to-text and translation. Processors receive only what they need for their function. We may disclose data where required by law or to protect safety and prevent fraud.',
+        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Trako operations for that shipment only. We use third-party processors for payments (Paystack), identity verification (Smile ID), email delivery, maps and geocoding, push delivery and, where enabled, speech-to-text and translation. For an automated Smile ID check, we send the name, email or phone number, Nigerian ID type and number, and BVN when supplied; Smile ID returns verification status and reference data. Identity document images remain available to authorised Trako reviewers through our protected storage workflow. Processors receive only what they need for their function and may process data in countries where they or their infrastructure operate, subject to contractual and legal safeguards. We may disclose data where required by law or to protect safety and prevent fraud.',
       },
       {
         heading: 'Retention and deletion',
@@ -133,3 +133,4 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
 export function findLegalDocument(idOrSlug: string): LegalDocument | undefined {
   return LEGAL_DOCUMENTS.find((document) => document.id === idOrSlug || document.slug === idOrSlug);
 }
+
