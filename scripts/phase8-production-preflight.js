@@ -6,6 +6,7 @@ const PREFLIGHT_ACCESS_TOKEN = process.env.PREFLIGHT_ACCESS_TOKEN;
 
 const results = [];
 let canonicalAppUrl = APP_URL;
+let health;
 
 async function request(url, options = {}) {
   const controller = new AbortController();
@@ -85,6 +86,16 @@ async function main() {
     return `${Math.ceil(bundleBytes / 1024)} KB bundle`;
   });
 
+  await check('web security headers', 'required', async () => {
+    const response = await request(`${canonicalAppUrl}/login`);
+    requireValue(response.headers.get('strict-transport-security'), 'Strict-Transport-Security is missing');
+    requireValue(response.headers.get('x-content-type-options') === 'nosniff', 'X-Content-Type-Options must be nosniff');
+    requireValue(response.headers.get('x-frame-options') === 'DENY', 'X-Frame-Options must be DENY');
+    requireValue(response.headers.get('referrer-policy'), 'Referrer-Policy is missing');
+    requireValue(response.headers.get('permissions-policy'), 'Permissions-Policy is missing');
+    return 'HSTS, MIME sniffing, framing, referrer and device permissions protected';
+  });
+
   await check('web deep links', 'required', async () => {
     const routes = ['/login', '/register', '/customer', '/driver', '/owner', '/dispatcher', '/admin'];
     const responses = await Promise.all(routes.map(async (route) => {
@@ -98,10 +109,21 @@ async function main() {
   });
 
   await check('API health', 'required', async () => {
-    const health = await json('/v1/health');
+    health = await json('/v1/health');
     requireValue(health.ok === true, 'health response did not report ok=true');
     requireValue(health.deployable === true, `missing required configuration: ${(health.required?.missing || []).join(', ')}`);
     return `${health.service}; deployable`;
+  });
+
+  await check('API security headers', 'required', async () => {
+    const response = await request(`${API_BASE_URL}/v1/health`);
+    requireValue(response.headers.get('strict-transport-security'), 'Strict-Transport-Security is missing');
+    requireValue(response.headers.get('x-content-type-options') === 'nosniff', 'X-Content-Type-Options must be nosniff');
+    requireValue(response.headers.get('x-frame-options') === 'DENY', 'X-Frame-Options must be DENY');
+    requireValue(response.headers.get('referrer-policy') === 'no-referrer', 'Referrer-Policy must be no-referrer');
+    requireValue(response.headers.get('permissions-policy'), 'Permissions-Policy is missing');
+    requireValue(!response.headers.get('x-powered-by'), 'X-Powered-By must not disclose Express');
+    return 'headers hardened; framework disclosure disabled';
   });
 
   await check('frontend CORS', 'required', async () => {
@@ -166,6 +188,12 @@ async function main() {
     return integrations.translation.provider;
   });
 
+  await check('fatal error alerting', 'advisory', async () => {
+    const alerting = health?.integrations?.find?.((integration) => integration.name === 'fatalErrorAlerts');
+    requireValue(alerting?.mode === 'configured', 'TELEMETRY_ALERT_WEBHOOK_URL is not configured');
+    return 'operations webhook configured';
+  });
+
   await check('database, email, and storage', 'required', async () => {
     requireValue(readiness.database?.connected === true, readiness.database?.error || 'database is not connected');
     requireValue(readiness.email?.status === 'domain_verified', readiness.email?.message || 'email domain is not verified');
@@ -199,3 +227,4 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });
+

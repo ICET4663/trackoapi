@@ -77,6 +77,11 @@ export class DeploymentConfigService {
         mode: this.hasValue('RESEND_API_KEY') ? 'configured' : 'mock',
         missing: this.missing(['RESEND_API_KEY']),
       },
+      {
+        name: 'fatalErrorAlerts',
+        mode: this.hasValue('TELEMETRY_ALERT_WEBHOOK_URL') ? 'configured' : 'mock',
+        missing: this.missing(['TELEMETRY_ALERT_WEBHOOK_URL']),
+      },
     ];
   }
 
@@ -226,3 +231,4 @@ export class DeploymentConfigService {
     return this.config.get<string>('NODE_ENV') === 'production';
   }
 }
+

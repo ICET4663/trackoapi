@@ -6,6 +6,26 @@ function buildService(apiKey: string | undefined) {
   return new DeploymentConfigService(config);
 }
 
+describe('DeploymentConfigService.summary', () => {
+  it('reports fatal error alerts as configured only when the webhook is present', () => {
+    const withoutWebhook = new DeploymentConfigService({ get: jest.fn(() => undefined) } as unknown as ConfigService);
+    const withWebhook = new DeploymentConfigService({
+      get: jest.fn((key: string) => key === 'TELEMETRY_ALERT_WEBHOOK_URL' ? 'https://alerts.example.test/tracko' : undefined),
+    } as unknown as ConfigService);
+
+    expect(withoutWebhook.summary().integrations).toContainEqual({
+      name: 'fatalErrorAlerts',
+      mode: 'mock',
+      missing: ['TELEMETRY_ALERT_WEBHOOK_URL'],
+    });
+    expect(withWebhook.summary().integrations).toContainEqual({
+      name: 'fatalErrorAlerts',
+      mode: 'configured',
+      missing: [],
+    });
+  });
+});
+
 describe('DeploymentConfigService.emailDomainStatus', () => {
   const originalFetch = global.fetch;
   afterEach(() => { global.fetch = originalFetch; });
@@ -165,3 +185,4 @@ describe('DeploymentConfigService.storageStatus', () => {
     expect(result.urlHost).toBe('invalid-url:"not-a-url"');
   });
 });
+
