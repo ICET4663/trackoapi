@@ -3,27 +3,26 @@ const APP_URL = (process.env.APP_URL || 'https://trako.com.ng').replace(/\/$/, '
 const STRICT_PRODUCTION = process.env.STRICT_PRODUCTION === 'true';
 const REQUEST_TIMEOUT_MS = Number(process.env.PREFLIGHT_TIMEOUT_MS || 12000);
 const PREFLIGHT_ACCESS_TOKEN = process.env.PREFLIGHT_ACCESS_TOKEN;
+const fs = require('node:fs');
+const { validateAndroidAssociation, validateAppleAssociation, validateDeviceEvidence } = require('./lib/native-release-gates');
+const RELEASE_PLATFORM = process.env.RELEASE_PLATFORM || 'web';
+if (!['web', 'android', 'ios', 'all'].includes(RELEASE_PLATFORM)) throw new Error('RELEASE_PLATFORM must be web, android, ios or all.');
+if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS < 1000 || REQUEST_TIMEOUT_MS > 120000) throw new Error('PREFLIGHT_TIMEOUT_MS must be between 1000 and 120000.');
 
 const results = [];
 let canonicalAppUrl = APP_URL;
 let health;
 
 async function request(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    return await fetch(url, {
-      redirect: 'follow',
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Tracko-Phase8-Preflight/1.0',
-        ...(options.headers || {}),
-      },
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetch(url, {
+    redirect: 'follow',
+    ...options,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    headers: {
+      'User-Agent': 'Tracko-Phase8-Preflight/1.0',
+      ...(options.headers || {}),
+    },
+  });
 }
 
 async function json(path) {
@@ -63,7 +62,7 @@ async function main() {
   await check('custom domain', 'required', async () => {
     const response = await request(APP_URL);
     requireValue(response.ok, `HTTP ${response.status}`);
-    requireValue(new URL(response.url).hostname.endsWith('trako.com.ng'), `redirected to ${response.url}`);
+    requireValue(['trako.com.ng', 'www.trako.com.ng'].includes(new URL(response.url).hostname), 'custom domain redirected outside the Trako application hosts');
     canonicalAppUrl = new URL(response.url).origin;
     return `HTTP ${response.status}; canonical ${canonicalAppUrl}`;
   });
@@ -198,15 +197,31 @@ async function main() {
     return 'operations alert channel configured; receipt still requires a delivery test';
   });
 
-  await check('Apple domain association', 'advisory', async () => {
+  if (RELEASE_PLATFORM !== 'android') await check('Apple domain association', RELEASE_PLATFORM === 'web' ? 'advisory' : 'required', async () => {
     const response = await request(`${canonicalAppUrl}/.well-known/apple-app-site-association`, { redirect: 'manual' });
     requireValue(response.status === 200, `Apple association returned HTTP ${response.status}; redirects are not allowed`);
     requireValue((response.headers.get('content-type') || '').includes('application/json'), 'Apple association must be JSON, not the web application HTML');
     const association = await response.json();
-    requireValue(association.applinks?.details?.some((entry) =>
-      entry.appIDs?.some((id) => /^[A-Z0-9]{10}\.com\.trako\.logistics$/.test(id)) &&
-      entry.components?.some((component) => component['/'] === '/mobile/*')), 'Missing real Apple Team ID or mobile payment-return path');
+    if (RELEASE_PLATFORM !== 'web') requireValue(process.env.APPLE_TEAM_ID?.trim(), 'Set APPLE_TEAM_ID to verify the exact app identity.');
+    validateAppleAssociation(association, process.env.APPLE_TEAM_ID);
     return 'JSON association served directly; verify the native build uses this host';
+  });
+
+  if (RELEASE_PLATFORM !== 'ios') await check('Android domain association', RELEASE_PLATFORM === 'web' ? 'advisory' : 'required', async () => {
+    const response = await request(`${canonicalAppUrl}/.well-known/assetlinks.json`, { redirect: 'manual' });
+    requireValue(response.status === 200, `Android association returned HTTP ${response.status}; redirects are not allowed`);
+    requireValue((response.headers.get('content-type') || '').includes('application/json'), 'Android association must be JSON');
+    if (RELEASE_PLATFORM !== 'web') requireValue(process.env.ANDROID_SHA256_CERT_FINGERPRINT?.trim(), 'Set the signing SHA-256 fingerprint for the build being tested.');
+    validateAndroidAssociation(await response.json(), process.env.ANDROID_SHA256_CERT_FINGERPRINT);
+    return 'Trako package and signing certificate validated';
+  });
+
+  const nativePlatforms = RELEASE_PLATFORM === 'all' ? ['android', 'ios'] : RELEASE_PLATFORM === 'web' ? [] : [RELEASE_PLATFORM];
+  for (const platform of nativePlatforms) await check(`${platform} installed-device evidence`, 'required', async () => {
+    requireValue(process.env.DEVICE_TEST_EVIDENCE_FILE, 'Set DEVICE_TEST_EVIDENCE_FILE to your completed device QA record.');
+    const evidence = JSON.parse(fs.readFileSync(process.env.DEVICE_TEST_EVIDENCE_FILE, 'utf8'));
+    validateDeviceEvidence(evidence, platform, process.env[`${platform.toUpperCase()}_RELEASE_BUILD_ID`]);
+    return 'Physical-device record passed for this build; human sign-off still required';
   });
 
   await check('database, email, and storage', 'required', async () => {
@@ -237,7 +252,8 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+module.exports = { main };
+if (require.main === module) main().catch((error) => {
   console.error('FAILED Tracko Phase 8 production preflight');
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
