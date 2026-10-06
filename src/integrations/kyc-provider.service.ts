@@ -4,6 +4,7 @@ import { Prisma, VerificationStatus } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { Consent, SmileID } from '@smileid/usesmileid-nodejs';
 import { PrismaService } from '../prisma/prisma.service';
+import { kycConfig } from '../config/kyc-config';
 
 // Nigeria only supports automated ID-authority lookups for these id_type values
 // (confirmed against Smile ID's Nigeria ID-type catalog) - PASSPORT and
@@ -46,21 +47,21 @@ export class KycProviderService {
   ) {}
 
   status() {
-    const provider = this.config.get<string>('KYC_PROVIDER') ?? 'mock';
+    const readiness = kycConfig(this.config);
+    const { provider, configured } = readiness;
     const hasSmileKey = Boolean(this.config.get<string>('SMILE_ID_API_KEY')) && Boolean(this.config.get<string>('SMILE_ID_PARTNER_ID'));
-    const hasDojahKey = Boolean(this.config.get<string>('DOJAH_API_KEY'));
-    const hasMonoKey = Boolean(this.config.get<string>('MONO_SECRET_KEY'));
-    const configured = hasSmileKey || hasDojahKey || hasMonoKey;
 
     return {
       provider,
       mode: configured ? 'configured' : 'mock',
       realVerificationEnabled: configured,
+      productionReady: readiness.productionReady,
+      missing: readiness.missing,
       // Surfaced so this doesn't stay an invisible gap the way the missing verification
       // itself did - false here means the webhook accepts nothing (fails closed), not
       // that it's open.
       webhookSecured: Boolean(this.config.get<string>('KYC_WEBHOOK_SECRET')) || hasSmileKey,
-      automatedVerification: provider === 'smile_id' && hasSmileKey
+      automatedVerification: configured
         ? {
             enabled: true,
             environment: this.config.get<string>('SMILE_ID_ENVIRONMENT') ?? 'sandbox',
@@ -111,20 +112,16 @@ export class KycProviderService {
       message:
         this.status().mode === 'mock'
           ? 'Mock KYC provider initialized. Add provider keys before real identity checks.'
-          : 'Provider credentials found. Connect the provider SDK/API in this service before live verification.',
+          : 'Smile ID automated verification is configured. Signed provider results complete verification.',
     };
   }
 
   private smileIdConfigured() {
-    return Boolean(this.config.get<string>('SMILE_ID_API_KEY')) && Boolean(this.config.get<string>('SMILE_ID_PARTNER_ID'));
+    return kycConfig(this.config).configured;
   }
 
   private publicBaseUrl(): string | null {
-    const explicit = this.config.get<string>('SMILE_ID_CALLBACK_URL');
-    if (explicit) return explicit.replace(/\/+$/, '');
-    const vercelUrl = this.config.get<string>('VERCEL_URL');
-    if (vercelUrl) return `https://${vercelUrl}`;
-    return null;
+    return kycConfig(this.config).callback;
   }
 
   private smileIdClient(): SmileID {

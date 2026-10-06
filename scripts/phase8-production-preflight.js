@@ -179,6 +179,10 @@ async function main() {
   await check('automated KYC provider', 'advisory', async () => {
     const configured = integrations?.kyc?.realVerificationEnabled === true || readiness?.kyc?.provider === 'configured';
     requireValue(configured, 'manual review is active; paid identity verification is not connected');
+    if (STRICT_PRODUCTION) {
+      const kyc = health?.integrations?.find?.((integration) => integration.name === 'kyc');
+      requireValue(integrations?.kyc?.productionReady === true || kyc?.productionReady === true, 'Smile ID must use production credentials/environment with a valid callback');
+    }
     return integrations?.kyc?.provider || readiness.kyc.provider;
   });
 
@@ -190,8 +194,19 @@ async function main() {
 
   await check('fatal error alerting', 'advisory', async () => {
     const alerting = health?.integrations?.find?.((integration) => integration.name === 'fatalErrorAlerts');
-    requireValue(alerting?.mode === 'configured', 'TELEMETRY_ALERT_WEBHOOK_URL is not configured');
-    return 'operations webhook configured';
+    requireValue(alerting?.mode === 'configured', 'Configure an HTTPS TELEMETRY_ALERT_WEBHOOK_URL or TELEMETRY_ALERT_EMAIL with RESEND_API_KEY and EMAIL_FROM');
+    return 'operations alert channel configured; receipt still requires a delivery test';
+  });
+
+  await check('Apple domain association', 'advisory', async () => {
+    const response = await request(`${canonicalAppUrl}/.well-known/apple-app-site-association`, { redirect: 'manual' });
+    requireValue(response.status === 200, `Apple association returned HTTP ${response.status}; redirects are not allowed`);
+    requireValue((response.headers.get('content-type') || '').includes('application/json'), 'Apple association must be JSON, not the web application HTML');
+    const association = await response.json();
+    requireValue(association.applinks?.details?.some((entry) =>
+      entry.appIDs?.some((id) => /^[A-Z0-9]{10}\.com\.trako\.logistics$/.test(id)) &&
+      entry.components?.some((component) => component['/'] === '/mobile/*')), 'Missing real Apple Team ID or mobile payment-return path');
+    return 'JSON association served directly; verify the native build uses this host';
   });
 
   await check('database, email, and storage', 'required', async () => {
@@ -227,4 +242,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });
-

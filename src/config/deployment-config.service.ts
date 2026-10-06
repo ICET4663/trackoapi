@@ -1,10 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { fatalAlertConfig } from './fatal-alert-config';
+import { kycConfig } from './kyc-config';
 
 type IntegrationReadiness = {
   name: string;
   mode: 'mock' | 'configured';
   missing: string[];
+  productionReady?: boolean;
 };
 
 @Injectable()
@@ -52,8 +55,9 @@ export class DeploymentConfigService {
       },
       {
         name: 'kyc',
-        mode: this.hasAny(['SMILE_ID_API_KEY', 'DOJAH_API_KEY', 'MONO_SECRET_KEY']) ? 'configured' : 'mock',
-        missing: this.missing(['SMILE_ID_API_KEY', 'SMILE_ID_PARTNER_ID']),
+        mode: kycConfig(this.config).configured ? 'configured' : 'mock',
+        missing: kycConfig(this.config).missing,
+        productionReady: kycConfig(this.config).productionReady,
       },
       {
         name: 'maps',
@@ -79,8 +83,8 @@ export class DeploymentConfigService {
       },
       {
         name: 'fatalErrorAlerts',
-        mode: this.hasValue('TELEMETRY_ALERT_WEBHOOK_URL') ? 'configured' : 'mock',
-        missing: this.missing(['TELEMETRY_ALERT_WEBHOOK_URL']),
+        mode: fatalAlertConfig(this.config).configured ? 'configured' : 'mock',
+        missing: fatalAlertConfig(this.config).configured ? [] : ['TELEMETRY_ALERT_WEBHOOK_URL'],
       },
     ];
   }
@@ -231,4 +235,3 @@ export class DeploymentConfigService {
     return this.config.get<string>('NODE_ENV') === 'production';
   }
 }
-

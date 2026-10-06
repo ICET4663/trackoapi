@@ -98,6 +98,7 @@ describe('KycProviderService.recordWebhook is actually secured', () => {
 
 describe('KycProviderService.verifyIdentity (Smile ID Enhanced KYC)', () => {
   const smileEnv = {
+    KYC_PROVIDER: 'smile_id',
     SMILE_ID_API_KEY: 'smile-key',
     SMILE_ID_PARTNER_ID: '1234',
     SMILE_ID_CALLBACK_URL: 'https://api.tracko.ng',

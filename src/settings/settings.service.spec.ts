@@ -295,6 +295,7 @@ describe('SettingsService truck-owner fleet reporting', () => {
   });
 
   it('calculates monthly profitability, utilization and maintenance reminders per truck', async () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-09-25T12:00:00Z').getTime());
     const query = jest.fn().mockResolvedValue([{
       vehicleId: 'vehicle-1', plateNumber: 'TRK-OWN-01', type: 'Flatbed', isActive: true,
       releasedIncome: 3_000_000, expenses: 500_000, completedLoads: 3, activeLoads: 1,
@@ -309,6 +310,7 @@ describe('SettingsService truck-owner fleet reporting', () => {
     expect(result.summary).toMatchObject({ vehicleCount: 1, totalIncome: 3_000_000, totalExpenses: 500_000, netIncome: 2_500_000, completedLoads: 3, maintenanceDue: 1 });
     expect(result.vehicles[0]).toMatchObject({ plateNumber: 'TRK-OWN-01', netIncome: 2_500_000, profitMarginPercent: 83.3, maintenanceStatus: 'DUE_SOON', profitabilityRank: 1 });
     expect(query).toHaveBeenCalledWith(expect.stringContaining('operationalMinutes'), 'owner-1', 70, expect.any(Date), expect.any(Date));
+    clock.mockRestore();
   });
 
   it('rejects an invalid fleet statement month', async () => {
