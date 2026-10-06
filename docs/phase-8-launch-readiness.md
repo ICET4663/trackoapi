@@ -76,6 +76,14 @@ eligible KYC-approved driver with a verified, current, capacity-matched truck.
 
 ## Native release gates
 
+Use `RELEASE_PLATFORM=android`, `ios`, or `all` with `smoke:production` to make
+native domain associations and recorded device QA required. Default `web` mode
+keeps these native checks advisory. Follow [Native release checkpoint](native-release-checkpoint.md)
+for exact signing identities, EAS build IDs and the deliberately pending evidence
+template. Run `npm run test:release-gates` to exercise the validators and preflight
+without contacting providers or changing live data. Passing configuration checks
+does not replace installed-device testing or human launch approval.
+
 - Build the Expo `preview` profile for Android and iOS.
 - Test maps, camera, photo library, microphone, transcription, notifications,
   safe areas, keyboard handling, deep links, and payment return links on devices.

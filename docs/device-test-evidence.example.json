@@ -1,0 +1,42 @@
+{
+  "platforms": {
+    "android": {
+      "buildId": "",
+      "physicalDevice": false,
+      "device": "",
+      "osVersion": "",
+      "testedBy": "",
+      "testedAt": "",
+      "tests": {
+        "authentication": "pending",
+        "roleNavigation": "pending",
+        "paystackReturn": "pending",
+        "voiceMessaging": "pending",
+        "cameraUploads": "pending",
+        "mapsLocation": "pending",
+        "notifications": "pending",
+        "shipmentLifecycle": "pending"
+      },
+      "blockers": ["Installed-device testing not completed"]
+    },
+    "ios": {
+      "buildId": "",
+      "physicalDevice": false,
+      "device": "",
+      "osVersion": "",
+      "testedBy": "",
+      "testedAt": "",
+      "tests": {
+        "authentication": "pending",
+        "roleNavigation": "pending",
+        "paystackReturn": "pending",
+        "voiceMessaging": "pending",
+        "cameraUploads": "pending",
+        "mapsLocation": "pending",
+        "notifications": "pending",
+        "shipmentLifecycle": "pending"
+      },
+      "blockers": ["Installed-device testing not completed"]
+    }
+  }
+}
