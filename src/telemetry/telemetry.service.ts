@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RateLimitService } from '../auth/rate-limit.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { fatalAlertConfig } from '../config/fatal-alert-config';
 
 type ClientErrorInput = {
   message?: unknown;
@@ -30,16 +31,8 @@ export class TelemetryService {
   ) {}
 
   private async sendFatalAlert(message: string, input: ClientErrorInput, actorId?: string) {
-    const configured = this.config.get<string>('TELEMETRY_ALERT_WEBHOOK_URL')?.trim();
-    if (!configured) return;
-    let url: URL;
-    try {
-      url = new URL(configured);
-      if (url.protocol !== 'https:') throw new Error('Webhook must use HTTPS.');
-    } catch (error) {
-      this.logger.warn(`Fatal error alert webhook is invalid: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
+    const channels = fatalAlertConfig(this.config);
+    if (!channels.configured) return;
     const fingerprint = message.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 120) || 'unknown';
     try {
       await this.rateLimit.assertAllowed(`client-error-alert:${fingerprint}`, {
@@ -47,22 +40,39 @@ export class TelemetryService {
         windowMs: 15 * 60 * 1000,
         label: 'Fatal error alert',
       });
-      const response = await fetch(url, {
+      const payload = {
+        text: `Trako fatal client error: ${message}`,
+        event: 'TRAKO_FATAL_CLIENT_ERROR',
+        message,
+        actorId: actorId ?? null,
+        screen: str(input.screen, 200) ?? null,
+        appVersion: str(input.appVersion, 40) ?? null,
+        platform: str(input.platform, 40) ?? null,
+        occurredAt: new Date().toISOString(),
+      };
+      const requests: Promise<Response>[] = [];
+      if (channels.webhook) requests.push(fetch(channels.webhook, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(4_000),
+      }));
+      if (channels.email) requests.push(fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${channels.email.apiKey}` },
         body: JSON.stringify({
-          text: `Trako fatal client error: ${message}`,
-          event: 'TRAKO_FATAL_CLIENT_ERROR',
-          message,
-          actorId: actorId ?? null,
-          screen: str(input.screen, 200) ?? null,
-          appVersion: str(input.appVersion, 40) ?? null,
-          platform: str(input.platform, 40) ?? null,
-          occurredAt: new Date().toISOString(),
+          from: channels.email.from,
+          to: [channels.email.recipient],
+          subject: 'Trako: fatal application error',
+          text: `${payload.text}\nScreen: ${payload.screen ?? 'unknown'}\nPlatform: ${payload.platform ?? 'unknown'}\nVersion: ${payload.appVersion ?? 'unknown'}\nTime: ${payload.occurredAt}\nReview the admin error log for details.`,
         }),
         signal: AbortSignal.timeout(4_000),
-      });
-      if (!response.ok) this.logger.warn(`Fatal error alert webhook returned HTTP ${response.status}.`);
+      }));
+      for (const result of await Promise.allSettled(requests)) {
+        if (result.status === 'rejected' || !result.value.ok) {
+          this.logger.warn(`Fatal error alert channel failed${result.status === 'fulfilled' ? ` (HTTP ${result.value.status})` : ''}.`);
+        }
+      }
     } catch (error) {
       // A duplicate alert, network outage or webhook failure must never affect the app.
       this.logger.warn(`Fatal error alert was not delivered: ${error instanceof Error ? error.message : String(error)}`);
@@ -144,4 +154,3 @@ export class TelemetryService {
     }
   }
 }
-

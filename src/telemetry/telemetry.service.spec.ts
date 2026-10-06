@@ -21,6 +21,35 @@ describe('TelemetryService', () => {
   });
 
   describe('recordClientError', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('sends a compact Resend email without stacks or actor identifiers', async () => {
+      const values: Record<string, string> = { TELEMETRY_ALERT_EMAIL: 'ops@example.test', EMAIL_FROM: 'Trako <alerts@updates.trako.com.ng>', RESEND_API_KEY: 're_test' };
+      config.get.mockImplementation((key: string) => values[key]);
+      const network = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+      await service.recordClientError({ fatal: true, message: 'Crash', stack: 'sensitive-stack' }, 'user-secret');
+      const body = JSON.parse(network.mock.calls[0][1]!.body as string);
+      expect(body.to).toEqual(['ops@example.test']);
+      expect(body.text).not.toContain('sensitive-stack');
+      expect(body.text).not.toContain('user-secret');
+      expect(network).toHaveBeenCalledWith('https://api.resend.com/emails', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('still sends email when the configured webhook fails', async () => {
+      const values: Record<string, string> = { TELEMETRY_ALERT_WEBHOOK_URL: 'https://alerts.example.test', TELEMETRY_ALERT_EMAIL: 'ops@example.test', EMAIL_FROM: 'alerts@updates.trako.com.ng', RESEND_API_KEY: 're_test' };
+      config.get.mockImplementation((key: string) => values[key]);
+      const network = jest.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({ ok: true } as Response);
+      await expect(service.recordClientError({ fatal: true, message: 'Crash' })).resolves.toEqual({ received: true });
+      expect(network).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not send alerts after duplicate-alert rate limiting rejects', async () => {
+      config.get.mockImplementation((key: string) => key === 'TELEMETRY_ALERT_WEBHOOK_URL' ? 'https://alerts.example.test' : undefined);
+      rateLimit.assertAllowed.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('duplicate'));
+      const network = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+      await expect(service.recordClientError({ fatal: true, message: 'Crash' })).resolves.toEqual({ received: true });
+      expect(network).not.toHaveBeenCalled();
+    });
     it('writes a CLIENT_ERROR audit row with truncated, sanitised fields', async () => {
       await service.recordClientError(
         {
@@ -127,4 +156,3 @@ describe('TelemetryService', () => {
     });
   });
 });
-
