@@ -313,7 +313,7 @@ export class MapsProviderService {
     const subtotalNgn = preSurgeSubtotalNgn + demandSurgeNgn;
     const serviceFeeNgn = Math.round(subtotalNgn * (adjustments.pricingServiceFeePercent / 100));
     const quotedPriceKobo = Math.max(profile.minimumFareNgn * 100, Math.round((subtotalNgn + serviceFeeNgn) * 100));
-    const minimumFareAdjustmentKobo = Math.max(0, quotedPriceKobo - Math.round((subtotalNgn + serviceFeeNgn) * 100));
+    const minimumFareAdjustmentKobo = Math.max(0, quotedPriceKobo - (Math.round(linehaulNgn * 100) + Math.round((profile.baseFareNgn + fuelSurchargeNgn + tollAllowanceNgn + demandSurgeNgn + serviceFeeNgn) * 100)));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     const quote: RouteQuoteCore = {
