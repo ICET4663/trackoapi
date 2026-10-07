@@ -34,6 +34,18 @@ describe('MapsProviderService route pricing', () => {
     weightTons: 15,
   };
 
+  it.each([0.01, 800])('itemises the minimum fare without changing the quote for distance %s', async distance => {
+    const service = createService();
+    const quote = await service.routeEstimate({ ...routeInput, destinationLatitude: routeInput.originLatitude + distance / 111, destinationLongitude: routeInput.originLongitude });
+    const b = quote.pricingBreakdown;
+    const sum = ['baseFareKobo', 'linehaulKobo', 'escrowFeeKobo', 'fuelSurchargeKobo', 'tollAllowanceKobo', 'demandSurgeKobo', 'minimumFareAdjustmentKobo']
+      .reduce((total, key) => total + Number(b[key] ?? 0), 0);
+    expect(sum).toBe(quote.quotedPriceKobo);
+    expect(Number(b.minimumFareAdjustmentKobo)).toBeGreaterThanOrEqual(0);
+    if (distance < 1) expect(Number(b.minimumFareAdjustmentKobo)).toBeGreaterThan(0);
+    else expect(b.minimumFareAdjustmentKobo).toBe(0);
+  });
+
   it('returns a usable coordinate quote when live routing is not configured', async () => {
     const quote = await createService().routeEstimate(routeInput);
 
