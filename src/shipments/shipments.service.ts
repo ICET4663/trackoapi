@@ -270,7 +270,10 @@ export class ShipmentsService {
     try {
       shipment = await this.prisma.shipment.findUnique({
         where: { id },
-        include: { assignments: true, timeline: { orderBy: { createdAt: 'asc' } } },
+        include: {
+          assignments: { include: { vehicle: { select: { ownerId: true } } } },
+          timeline: { orderBy: { createdAt: 'asc' } },
+        },
       });
     } catch (error) {
       // Used to fall back to a fabricated shipment (with a fake escrow id and a fake
@@ -288,7 +291,8 @@ export class ShipmentsService {
       role === 'ADMIN' ||
       role === 'DISPATCHER' ||
       shipment.customerId === userId ||
-      shipment.assignments.some((assignment) => assignment.driverId === userId);
+      shipment.assignments.some((assignment) => assignment.driverId === userId) ||
+      (role === 'TRUCK_OWNER' && shipment.assignments.some((assignment) => assignment.vehicle?.ownerId === userId));
 
     if (!canView) throw new ForbiddenException('You do not have access to this shipment.');
     return this.toShipmentRecord(shipment);
