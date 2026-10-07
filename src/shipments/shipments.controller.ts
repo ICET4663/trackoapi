@@ -133,7 +133,8 @@ export class ShipmentsController {
 
   @Get(':id/escrow')
   async getEscrow(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    await this.shipmentsService.get(id, user.sub, user.role);
     return this.shipmentsService.getEscrow(id);
   }
 
@@ -189,7 +190,9 @@ export class ShipmentsController {
 
   @Get(':id/review')
   async getReview(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    await this.requestUser.fromAuthorizationHeader(authorization);
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    await this.shipmentsService.get(id, user.sub, user.role);
     return this.shipmentsService.getReview(id);
   }
 }
+
