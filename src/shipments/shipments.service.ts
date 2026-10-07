@@ -105,7 +105,252 @@ export class ShipmentsService {
     const normalized = this.normalizeShipmentDto(dto);
     // Price, distance, and duration are always recomputed server-side from the
     // same formula the client previewed with — a client can never dictate what
-    // it gets charged by sending a different quotedPriceKobo in the request bodtatus, ShipmentStatus[]>> = {
+    // it gets charged by sending a different quotedPriceKobo in the request body.
+    const quoteInput = {
+      originLatitude: normalized.pickupLatitude ?? undefined,
+      originLongitude: normalized.pickupLongitude ?? undefined,
+      destinationLatitude: normalized.destinationLatitude ?? undefined,
+      destinationLongitude: normalized.destinationLongitude ?? undefined,
+      truckType: normalized.truckType,
+      weightTons: normalized.weightTons,
+      volumeM3: normalized.cargoVolumeM3,
+    };
+    const quote = dto.quoteToken
+      ? this.mapsProvider.verifyQuoteToken(dto.quoteToken, quoteInput)
+      : await this.mapsProvider.routeEstimate(quoteInput);
+
+    // This used to catch ANY failure of the real insert/escrow/media creation below -
+    // including a genuine DB outage or a bug in one of those steps - and return a
+    // fabricated shipment (a fake TRK-<timestamp> id, a fake escrow, a full fake
+    // timeline) that was never written to the database. A customer would believe they'd
+    // booked a real shipment and could try to fund escrow against an id that resolves
+    // to nothing; dispatch would never see it because it doesn't exist. This is the
+    // single most consequential flow in the app - a real failure must throw.
+    try {
+      const shipment = await this.prisma.shipment.create({
+        data: {
+          reference: `TRK-${Date.now()}`,
+          customerId,
+          pickupLabel: normalized.pickupLabel,
+          pickupAddress: normalized.pickupAddress,
+          pickupLatitude: normalized.pickupLatitude,
+          pickupLongitude: normalized.pickupLongitude,
+          destinationLabel: normalized.destinationLabel,
+          destinationAddress: normalized.destinationAddress,
+          destinationLatitude: normalized.destinationLatitude,
+          destinationLongitude: normalized.destinationLongitude,
+          cargoDescription: normalized.cargoDescription,
+          quantity: normalized.quantity,
+          truckType: normalized.truckType,
+          cargoWeightKg: normalized.cargoWeightKg,
+          cargoVolumeM3: normalized.cargoVolumeM3,
+          cargoValueKobo: dto.cargoValueKobo,
+          quotedPriceKobo: quote.quotedPriceKobo,
+          distanceKm: quote.distanceKm,
+          durationMinutes: quote.durationMinutes,
+          pickupContactPhone: normalized.pickupContactPhone,
+          timeline: {
+            create: { status: 'DRAFT', note: 'Shipment created.' },
+          },
+        },
+        include: { timeline: true },
+      });
+
+      await this.recordQuoteSnapshot(customerId, shipment.id, quote);
+
+      const escrow = await this.createEscrowRecord(
+        shipment.id,
+        quote.quotedPriceKobo,
+      );
+      const media = dto.cargoPhotoUri
+        ? await this.createMediaRecord(customerId, shipment.id, dto.cargoPhotoUri)
+        : undefined;
+
+      await this.notifications.create({
+        userId: customerId,
+        title: 'Shipment created',
+        body: `${normalized.pickupLabel} to ${normalized.destinationLabel} is ready for dispatch.`,
+        tone: 'SUCCESS',
+        entity: 'Shipment',
+        entityId: shipment.id,
+        actionUrl: `/shipments/${shipment.id}`,
+      });
+
+      return this.toShipmentRecord(shipment, {
+        escrowId: escrow?.id,
+        media: media ? [media] : [],
+        quantity: normalized.quantity,
+        truckType: normalized.truckType,
+        weightTons: normalized.weightTons,
+        volumeM3: normalized.cargoVolumeM3,
+        pricingVersion: quote.pricingVersion,
+        quoteValidMinutes: quote.quoteValidMinutes,
+        pricingBreakdown: quote.pricingBreakdown,
+      });
+    } catch (error) {
+      this.logger.error(`create() failed to save shipment for customer ${customerId}: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not create this shipment. Please try again: ${this.errorMessage(error)}`);
+    }
+  }
+
+  private async assertCustomerCanCreateShipment(customerId: string) {
+    let rows: Array<{ verificationStatus: string; role: string; isActive: boolean }>;
+    try {
+      rows = await this.prisma.$queryRawUnsafe<Array<{ verificationStatus: string; role: string; isActive: boolean }>>(
+        'select "verificationStatus"::text as "verificationStatus", "role"::text as "role", "isActive" from "User" where "id" = $1 limit 1',
+        customerId,
+      );
+    } catch {
+      throw new InternalServerErrorException('Could not verify this customer account. Please try again.');
+    }
+
+    const customer = rows[0];
+    if (!customer || customer.role !== 'CUSTOMER' || !customer.isActive) {
+      throw new ForbiddenException('Only an active customer account can create shipments.');
+    }
+    if (customer.verificationStatus !== 'VERIFIED') {
+      throw new BadRequestException('Complete KYC approval before creating a shipment.');
+    }
+  }
+
+  // "Maintenance mode" was pure copy on the admin platform settings screen - its own
+  // description promised it would "block new shipment creation network-wide", but nothing
+  // ever checked the flag. Fails open (not in maintenance) on a read error, same as the
+  // other platform-setting gates added this session - an unrelated DB hiccup must never
+  // block every shipment.
+  private async assertNotInMaintenanceMode() {
+    let setting: { value: string } | null = null;
+    try {
+      setting = await this.prisma.platformSetting.findUnique({ where: { key: 'maintenanceMode' } });
+    } catch {
+      // Read failure - fail open, see above.
+    }
+    if (setting?.value === 'true') {
+      throw new BadRequestException('Trako is temporarily in maintenance mode. New shipments cannot be created right now - please try again shortly.');
+    }
+  }
+
+  async list(userId: string, role: UserRole) {
+    try {
+      if (role === 'CUSTOMER') {
+        const shipments = await this.prisma.shipment.findMany({
+          where: { customerId: userId },
+          include: { timeline: { orderBy: { createdAt: 'asc' } } },
+          orderBy: { createdAt: 'desc' },
+        });
+        return shipments.map((shipment) => this.toShipmentRecord(shipment));
+      }
+
+      if (role === 'DRIVER') {
+        const assignments = await this.prisma.driverAssignment.findMany({
+          where: { driverId: userId },
+          include: { shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } } },
+          orderBy: { offeredAt: 'desc' },
+        });
+        return assignments.map((assignment) => this.toShipmentRecord(assignment.shipment));
+      }
+
+      const shipments = await this.prisma.shipment.findMany({
+        include: { timeline: { orderBy: { createdAt: 'asc' } } },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      return shipments.map((shipment) => this.toShipmentRecord(shipment));
+    } catch (error) {
+      // Used to fall back to a single fabricated shipment on any read failure - a
+      // customer/driver/admin's shipment list would silently show fake content
+      // instead of surfacing the outage.
+      this.logger.error(`list(${userId}, ${role}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not load shipments. Please try again: ${this.errorMessage(error)}`);
+    }
+  }
+
+  async get(id: string, userId: string, role: UserRole) {
+    let shipment;
+    try {
+      shipment = await this.prisma.shipment.findUnique({
+        where: { id },
+        include: {
+          assignments: { include: { vehicle: { select: { ownerId: true } } } },
+          timeline: { orderBy: { createdAt: 'asc' } },
+        },
+      });
+    } catch (error) {
+      // Used to fall back to a fabricated shipment (with a fake escrow id and a fake
+      // "in progress" timeline) for ANY id on a real infrastructure failure - viewing
+      // shipment details during a DB hiccup would show made-up data instead of an error.
+      this.logger.error(`get(${id}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not load this shipment. Please try again: ${this.errorMessage(error)}`);
+    }
+
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+
+    // Authorization failures must propagate as real errors, not be swallowed into a
+    // successful-looking preview response - that would silently defeat this check.
+    const canView =
+      role === 'ADMIN' ||
+      role === 'DISPATCHER' ||
+      shipment.customerId === userId ||
+      shipment.assignments.some((assignment) => assignment.driverId === userId) ||
+      (role === 'TRUCK_OWNER' && shipment.assignments.some((assignment) => assignment.vehicle?.ownerId === userId));
+
+    if (!canView) throw new ForbiddenException('You do not have access to this shipment.');
+    return this.toShipmentRecord(shipment);
+  }
+
+  async updateStatus(id: string, userId: string, role: UserRole, dto: UpdateShipmentStatusDto) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id },
+      include: { assignments: true },
+    }).catch(() => null);
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+
+    const isOwner = shipment.customerId === userId;
+    const isAssignedDriver = shipment.assignments.some((assignment) => assignment.driverId === userId && assignment.status === 'ACCEPTED');
+    const isOperations = role === 'ADMIN' || role === 'DISPATCHER';
+    if (!isOwner && !isAssignedDriver && !isOperations) {
+      throw new ForbiddenException('You do not have access to this shipment.');
+    }
+
+    this.assertValidTransition(shipment.status, dto.status, role, { isOwner, isAssignedDriver, isOperations });
+
+    try {
+      const updated = await this.prisma.shipment.update({
+        where: { id },
+        data: {
+          status: dto.status,
+          timeline: {
+            create: {
+              status: dto.status,
+              note: dto.note,
+            },
+          },
+        },
+        include: { timeline: { orderBy: { createdAt: 'asc' } } },
+      });
+      if (['COMPLETED', 'CANCELLED'].includes(dto.status)) {
+        await this.activateQueuedOffers(
+          shipment.assignments.filter((assignment) => assignment.status === 'ACCEPTED').map((assignment) => assignment.driverId),
+          shipment.id,
+        );
+      }
+      return this.toShipmentRecord(updated);
+    } catch (error) {
+      // Used to fall back to a fake "updated" shipment reflecting the REQUESTED status
+      // as if it had actually been applied - e.g. a driver marking a delivery DELIVERED
+      // during a DB hiccup would see confirmation the status changed while the real row
+      // never moved, silently desyncing every party's view of the shipment's true state
+      // (and, for DELIVERED specifically, never actually starting the escrow release
+      // checklist). A real update failure must throw, not fabricate the new state.
+      this.logger.error(`updateStatus(${id} -> ${dto.status}) failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
+    }
+  }
+
+  // Which statuses a shipment may move to next, and which relationship to the shipment
+  // is allowed to make that specific move. Operations staff (ADMIN/DISPATCHER) can also
+  // force CANCELLED or DISPUTED from most states to handle exceptions.
+  private readonly statusTransitions: Partial<Record<ShipmentStatus, ShipmentStatus[]>> = {
     DRAFT: ['QUOTED', 'CANCELLED'],
     QUOTED: ['PENDING_PAYMENT', 'CANCELLED'],
     PENDING_PAYMENT: ['ESCROW_FUNDED', 'CANCELLED'],
@@ -1701,5 +1946,4 @@ export class ShipmentsService {
   }
 
 }
-
 
