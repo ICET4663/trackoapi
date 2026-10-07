@@ -140,7 +140,7 @@ export class CommunicationService {
                   shipment: {
                     assignments: {
                       some: {
-                        status: "ACCEPTED" as const,
+                        status: { in: ["OFFERED" as const, "ACCEPTED" as const] },
                         vehicle: { ownerId: user.sub },
                       },
                     },
@@ -175,8 +175,9 @@ export class CommunicationService {
           unreadCount: 0,
         };
       });
-    } catch {
-      return [];
+    } catch (error) {
+      this.logger.error(`listConversations() failed: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException("Could not load conversations. Please try again.");
     }
   }
 
