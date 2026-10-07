@@ -193,10 +193,57 @@ async function main() {
     );
     const approved = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'APPROVED', note: 'Lifecycle finance approval.' });
     expectValue(approved.status === 'APPROVED', 'admin approved payout');
-    const paid = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID', note: 'Lifecycle payout settled.' });
-    expectValue(paid.status === 'PAID', 'admin marked payout paid');
-    const paidReplay = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID' });
-    expectValue(paidReplay.status === 'PAID', 'repeated paid decision was idempotent');
+    // Exercise the real payout persistence path without contacting Paystack or moving funds.
+    await prisma.$executeRawUnsafe('alter table "BankAccount" add column if not exists "recipientCode" text');
+    await prisma.$executeRawUnsafe(
+      'update "BankAccount" set "recipientCode" = $1 where "userId" = $2',
+      'RCP_lifecycle_test',
+      driver.id,
+    );
+    const originalFetch = globalThis.fetch;
+    let transferAttempts = 0;
+    let rejectTransfer = true;
+    let acceptedReference = '';
+    try {
+      globalThis.fetch = async (url, options) => {
+        expectValue(String(url) === 'https://api.paystack.co/transfer', 'unexpected external request during payout test');
+        expectValue(options?.method === 'POST', 'payout used the transfer POST endpoint');
+        const body = JSON.parse(String(options?.body));
+        expectValue(body.recipient === 'RCP_lifecycle_test', 'transfer used the verified recipient');
+        expectValue(body.amount === withdrawalAmount, 'transfer used the approved amount');
+        expectValue(body.source === 'balance', 'transfer used the Paystack balance');
+        transferAttempts++;
+        if (rejectTransfer) {
+          return new Response(JSON.stringify({ status: false, message: 'Lifecycle simulated transfer failure' }), { status: 400 });
+        }
+        acceptedReference = body.reference;
+        return new Response(JSON.stringify({
+          status: true,
+          data: { status: 'success', transfer_code: 'TRF_lifecycle_test' },
+        }), { status: 200 });
+      };
+      await expectRejected(
+        () => settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID' }),
+        'failed transfer was marked paid',
+      );
+      const failedTransferPayout = await prisma.payout.findUnique({ where: { id: withdrawal.id } });
+      expectValue(failedTransferPayout?.status === 'APPROVED', 'failed transfer left payout approved');
+      rejectTransfer = false;
+      const paid = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID', note: 'Lifecycle payout settled.' });
+      expectValue(paid.status === 'PAID', 'successful transfer marked payout paid');
+      const paidReplay = await settings.reviewPayoutRequest(withdrawal.id, adminUser.id, { decision: 'PAID' });
+      expectValue(paidReplay.status === 'PAID', 'repeated paid decision was idempotent');
+      expectValue(transferAttempts === 2, 'paid replay did not send another transfer');
+      const [receipt] = await prisma.$queryRawUnsafe<Array<{ transferCode: string; transferReference: string; transferStatus: string }>>(
+        'select "transferCode", "transferReference", "transferStatus" from "Payout" where "id" = $1',
+        withdrawal.id,
+      );
+      expectValue(receipt?.transferCode === 'TRF_lifecycle_test', 'transfer code persisted');
+      expectValue(receipt.transferReference === acceptedReference, 'transfer reference persisted');
+      expectValue(receipt.transferStatus === 'success', 'transfer status persisted');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
 
     const persisted = await prisma.shipment.findUnique({ where: { id: shipment.id }, include: { escrow: true, assignments: true, deliveryProofs: true } });
     const payout = await prisma.payout.findUnique({ where: { id: withdrawal.id } });
