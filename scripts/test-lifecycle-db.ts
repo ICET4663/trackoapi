@@ -1,3 +1,6 @@
+import { CommunicationService } from '../src/communication/communication.service';
+import type { TranslationProviderService } from '../src/integrations/translation-provider.service';
+import type { AuthUser } from '../src/common/types/auth-user';
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
@@ -93,16 +96,17 @@ async function main() {
     const settings = new SettingsService(prisma, notifications, config, {} as AuthService);
 
     const suffix = randomUUID().slice(0, 8);
-    const [customer, driver, dispatcher, adminUser] = await Promise.all([
+    const [customer, driver, dispatcher, adminUser, owner] = await Promise.all([
       prisma.user.create({ data: { email: `customer-${suffix}@test.trako.com.ng`, phone: `+2348100${suffix.slice(0, 6)}`, passwordHash: 'test-only', role: 'CUSTOMER', availableRoles: ['CUSTOMER'], verificationStatus: 'VERIFIED', profile: { create: { fullName: 'Lifecycle Customer' } } } }),
       prisma.user.create({ data: { email: `driver-${suffix}@test.trako.com.ng`, phone: `+2348200${suffix.slice(0, 6)}`, passwordHash: 'test-only', role: 'DRIVER', availableRoles: ['DRIVER'], verificationStatus: 'VERIFIED', profile: { create: { fullName: 'Lifecycle Driver' } }, safetySettings: { create: { availableForAssignments: true } } } }),
       prisma.user.create({ data: { email: `dispatcher-${suffix}@test.trako.com.ng`, phone: `+2348300${suffix.slice(0, 6)}`, passwordHash: 'test-only', role: 'DISPATCHER', availableRoles: ['DISPATCHER'], verificationStatus: 'VERIFIED', profile: { create: { fullName: 'Lifecycle Dispatcher' } } } }),
       prisma.user.create({ data: { email: `admin-${suffix}@test.trako.com.ng`, phone: `+2348400${suffix.slice(0, 6)}`, passwordHash: 'test-only', role: 'ADMIN', availableRoles: ['ADMIN'], verificationStatus: 'VERIFIED', profile: { create: { fullName: 'Lifecycle Admin' } } } }),
+      prisma.user.create({ data: { email: `owner-${suffix}@test.trako.com.ng`, phone: `+2348500${suffix.slice(0, 6)}`, passwordHash: 'test-only', role: 'TRUCK_OWNER', availableRoles: ['TRUCK_OWNER'], verificationStatus: 'VERIFIED', profile: { create: { fullName: 'Lifecycle Owner' } } } }),
     ]);
 
     const vehicle = await prisma.vehicle.create({
       data: {
-        ownerId: driver.id,
+        ownerId: owner.id,
         assignedDriverId: driver.id,
         plateNumber: `TST-${suffix.toUpperCase()}`,
         type: 'Flatbed',
@@ -160,6 +164,51 @@ async function main() {
       () => shipments.offerAssignment(shipment.id, { driverId: driver.id, vehicleId: vehicle.id }, dispatcher.role),
       'a second pending assignment was accepted',
     );
+    const communication = new CommunicationService(config, prisma, notifications, {
+      translate: async () => null,
+    } as unknown as TranslationProviderService);
+    const actors = [customer, driver, owner, dispatcher, adminUser].map(user => ({
+      sub: user.id, role: user.role, email: user.email, verificationStatus: user.verificationStatus,
+    } as AuthUser));
+    const conversations = await Promise.all(actors.map(actor =>
+      communication.getOrCreateShipmentConversation(shipment.id, actor)));
+    expectValue(conversations.every(thread => thread.id === conversations[0].id), 'all roles opened the same shipment thread');
+    const conversationId = conversations[0].id;
+    for (const actor of actors) {
+      const sent = await communication.sendMessage(conversationId, actor.sub, {
+        kind: 'TEXT', body: `Lifecycle message from ${actor.role}`,
+      }, actor);
+      expectValue(sent.senderId === actor.sub, 'message retained its authenticated sender');
+    }
+    for (const [sourceLanguage, sourceTranscript, englishTranscript] of [
+      ['ig', 'Ututu oma', 'Good morning'],
+      ['yo', 'E kaaro', 'Good morning'],
+      ['ha', 'Ina kwana', 'Good morning'],
+    ]) {
+      await communication.sendMessage(conversationId, customer.id, {
+        kind: 'VOICE', body: 'Voice note sent', attachmentUrl: 'https://test.invalid/voice.webm',
+        durationSeconds: 4, sourceLanguage, sourceTranscript, englishTranscript,
+      }, actors[0]);
+    }
+    for (const actor of actors) {
+      const thread = await communication.listMessages(conversationId, actor);
+      expectValue(thread.messages.length === 8, 'each role retrieved every persisted message');
+      for (const language of ['ig', 'yo', 'ha']) {
+        const voice = thread.messages.find(message => message.kind === 'VOICE' && message.sourceLanguage === language);
+        expectValue(voice?.transcript && voice.translatedText === 'Good morning' && voice.translatedLanguage === 'en',
+          'original voice transcript and English translation remained available to every role');
+      }
+    }
+    const outsider = await prisma.user.create({ data: {
+      email: `outsider-${suffix}@test.trako.com.ng`, phone: `+2348600${suffix.slice(0, 6)}`,
+      passwordHash: 'test-only', role: 'CUSTOMER', availableRoles: ['CUSTOMER'],
+    } });
+    const outsiderActor = { sub: outsider.id, role: outsider.role, email: outsider.email } as AuthUser;
+    await expectRejected(() => communication.listMessages(conversationId, outsiderActor), 'unrelated customer read shipment messages');
+    await expectRejected(() => communication.sendMessage(conversationId, outsider.id, { kind: 'TEXT', body: 'Unauthorized' }, outsiderActor),
+      'unrelated customer sent a shipment message');
+    expectValue(await prisma.message.count({ where: { conversationId } }) === 8, 'denied message was not persisted');
+
     await shipments.respondToAssignment(assignment.id, driver.id, 'ACCEPT');
     const driverActor = { sub: driver.id, role: driver.role, email: driver.email, verificationStatus: driver.verificationStatus };
     await tracking.recordLocation(shipment.id, driverActor, { latitude: 6.6018, longitude: 3.3515, note: 'Pickup confirmed.' });
@@ -179,12 +228,15 @@ async function main() {
     expectValue(released.status === 'RELEASED', 'escrow was released');
 
     const earnings = await settings.driverEarnings(driver.id, { strict: true });
-    expectValue(earnings.availableBalance === initialized.amount, 'released escrow appeared in driver earnings');
-    const withdrawalAmount = Math.max(100, Math.floor(initialized.amount / 2));
+    const driverAmount = Math.round(initialized.amount * 70 / 100);
+    expectValue(earnings.availableBalance === driverAmount, 'driver received the configured share of owner-truck earnings');
+    const ownerEarnings = await settings.ownerEarnings(owner.id, { strict: true });
+    expectValue(ownerEarnings.availableBalance === initialized.amount - driverAmount, 'owner received the remaining settlement share');
+    const withdrawalAmount = Math.max(100, Math.floor(driverAmount / 2));
     const withdrawal = await settings.requestDriverWithdrawal(driver.id, { amountKobo: withdrawalAmount, note: 'Lifecycle test withdrawal.' });
     expectValue(withdrawal.status === 'PENDING', 'driver withdrawal entered finance queue');
     await expectRejected(
-      () => settings.requestDriverWithdrawal(driver.id, { amountKobo: initialized.amount - withdrawalAmount + 1 }),
+      () => settings.requestDriverWithdrawal(driver.id, { amountKobo: driverAmount - withdrawalAmount + 1 }),
       'driver could withdraw more than the remaining balance',
     );
     await expectRejected(
@@ -255,7 +307,8 @@ async function main() {
     const payoutAuditCount = await prisma.auditLog.count({ where: { entity: 'Payout', entityId: withdrawal.id, action: 'PAYOUT_WITHDRAWAL_REVIEWED' } });
     expectValue(payoutAuditCount === 2, 'payout approval and payment produced exactly two review audit entries');
 
-    console.log('OK customer and verified driver created');
+    console.log('OK customer, verified driver and truck owner created');
+    console.log('OK cross-role persisted text and voice transcript retrieval; unrelated customer blocked');
     console.log('OK shipment created and signed webhook funded escrow');
     console.log('OK admin approval, assignment, acceptance, pickup and delivery proof');
     console.log('OK escrow release, driver earnings, withdrawal approval and payout');
