@@ -50,7 +50,7 @@ export class CommunicationService {
       const ownerAssignment = await this.prisma.driverAssignment.findFirst({
         where: {
           shipmentId: conversation.shipmentId,
-          status: "ACCEPTED",
+          status: { in: ["OFFERED", "ACCEPTED"] },
           vehicle: { ownerId: user.sub },
         },
         select: { id: true },
