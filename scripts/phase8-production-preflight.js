@@ -6,6 +6,7 @@ const PREFLIGHT_ACCESS_TOKEN = process.env.PREFLIGHT_ACCESS_TOKEN;
 const fs = require('node:fs');
 const { validateAndroidAssociation, validateAppleAssociation, validateDeviceEvidence } = require('./lib/native-release-gates');
 const { validateRecoveryEvidence } = require('./lib/backup-recovery-gates');
+const { validatePaymentReadiness } = require('./lib/payment-release-gates');
 const RELEASE_PLATFORM = process.env.RELEASE_PLATFORM || 'web';
 if (!['web', 'android', 'ios', 'all'].includes(RELEASE_PLATFORM)) throw new Error('RELEASE_PLATFORM must be web, android, ios or all.');
 if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS < 1000 || REQUEST_TIMEOUT_MS > 120000) throw new Error('PREFLIGHT_TIMEOUT_MS must be between 1000 and 120000.');
@@ -163,8 +164,7 @@ async function main() {
   });
 
   await check('Paystack', 'required', async () => {
-    const configured = integrations?.payments?.mode === 'configured' || readiness?.escrowPayment?.paystackReady === true;
-    requireValue(configured, 'payment provider is not configured');
+    validatePaymentReadiness(integrations?.payments, readiness?.escrowPayment, STRICT_PRODUCTION);
     return integrations?.payments
       ? `${integrations.payments.provider} ${integrations.payments.environment || ''}`.trim()
       : 'configured';
