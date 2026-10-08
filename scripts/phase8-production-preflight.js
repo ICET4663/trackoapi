@@ -5,6 +5,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.PREFLIGHT_TIMEOUT_MS || 12000);
 const PREFLIGHT_ACCESS_TOKEN = process.env.PREFLIGHT_ACCESS_TOKEN;
 const fs = require('node:fs');
 const { validateAndroidAssociation, validateAppleAssociation, validateDeviceEvidence } = require('./lib/native-release-gates');
+const { validateRecoveryEvidence } = require('./lib/backup-recovery-gates');
 const RELEASE_PLATFORM = process.env.RELEASE_PLATFORM || 'web';
 if (!['web', 'android', 'ios', 'all'].includes(RELEASE_PLATFORM)) throw new Error('RELEASE_PLATFORM must be web, android, ios or all.');
 if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS < 1000 || REQUEST_TIMEOUT_MS > 120000) throw new Error('PREFLIGHT_TIMEOUT_MS must be between 1000 and 120000.');
@@ -240,6 +241,13 @@ async function main() {
       return 'published';
     });
   }
+
+  await check('backup recovery evidence', 'advisory', async () => {
+    requireValue(process.env.BACKUP_RECOVERY_EVIDENCE_FILE, 'Set BACKUP_RECOVERY_EVIDENCE_FILE to a completed isolated database and storage restore record.');
+    const evidence = JSON.parse(fs.readFileSync(process.env.BACKUP_RECOVERY_EVIDENCE_FILE, 'utf8'));
+    validateRecoveryEvidence(evidence, process.env.BACKUP_SOURCE_PROJECT_ID);
+    return 'Recent isolated restore evidence recorded; human verification still required';
+  });
 
   const requiredFailures = results.filter((result) => result.level === 'required' && !result.ok);
   const advisories = results.filter((result) => result.level === 'advisory' && !result.ok);
