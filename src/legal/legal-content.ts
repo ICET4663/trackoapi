@@ -10,7 +10,7 @@
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
 export const LEGAL_SUPPORT_EMAIL = 'support@trako.com.ng';
-export const LEGAL_LAST_UPDATED = 'September 28, 2026';
+export const LEGAL_LAST_UPDATED = 'October 8, 2026';
 
 export type LegalSection = { heading: string; body: string };
 
@@ -50,7 +50,11 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Sharing',
-        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Trako operations for that shipment only. We use third-party processors for payments (Paystack), identity verification (Smile ID), email delivery, maps and geocoding, push delivery and, where enabled, speech-to-text and translation. For an automated Smile ID check, we send the name, email or phone number, Nigerian ID type and number, and BVN when supplied; Smile ID returns verification status and reference data. Identity document images remain available to authorised Trako reviewers through our protected storage workflow. Processors receive only what they need for their function and may process data in countries where they or their infrastructure operate, subject to contractual and legal safeguards. We may disclose data where required by law or to protect safety and prevent fraud.',
+        body: 'Shipment and contact details are shared between the customer, the assigned driver, the truck owner and Trako operations for that shipment only. We use third-party processors for payments (Paystack), identity verification (Smile ID), email delivery (Resend), maps and geocoding (Google Maps), database and uploaded-media storage (Supabase), push delivery and, where enabled, speech-to-text and translation (Google Cloud). For an automated Smile ID check, we send the name, email or phone number, Nigerian ID type and number, and BVN when supplied; Smile ID returns verification status and reference data. Identity document images remain available to authorised Trako reviewers through our protected storage workflow. Processors receive only what they need for their function and may process data in countries where they or their infrastructure operate, subject to contractual and legal safeguards. We may disclose data where required by law or to protect safety and prevent fraud.',
+      },
+      {
+        heading: 'Voice notes and uploaded evidence',
+        body: 'Microphone and camera access require your device permission. Recording and uploading a voice note sends audio for storage and, where transcription is enabled, speech processing. Original transcripts and English translations may be shown to authorised participants in the shipment conversation. Transcription and translation can be inaccurate, especially with accents, background noise or specialised cargo terms; confirm important addresses, prices and delivery instructions in writing. Uploaded cargo photos and delivery evidence are linked to the shipment and available to its authorised participants and Trako operations.',
       },
       {
         heading: 'Retention and deletion',
