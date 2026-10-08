@@ -553,7 +553,8 @@ describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that di
 // the timeline insert or the shipment status update - the UI could show "delivered" while
 // the real shipment row silently stayed at its old status.
 describe('ShipmentsService.addTimelineEvent never fakes a status change on failure', () => {
-  const shipmentRow = { id: 'shp-1', customerId: 'customer-1', status: 'ASSIGNED', assignments: [] };
+  const shipmentRow = { id: 'shp-1', customerId: 'customer-1', status: 'ARRIVED_DESTINATION',
+    assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }] };
 
   function buildService(queryRawUnsafe: jest.Mock, executeRawUnsafe: jest.Mock) {
     const prisma = {
@@ -567,7 +568,7 @@ describe('ShipmentsService.addTimelineEvent never fakes a status change on failu
   it('throws a real error instead of a fake timeline entry when the insert fails', async () => {
     const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')), jest.fn());
 
-    await expect(service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED' }))
+    await expect(service.addTimelineEvent('shp-1', 'driver-1', 'DRIVER', { status: 'DELIVERED' }))
       .rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
@@ -576,7 +577,7 @@ describe('ShipmentsService.addTimelineEvent never fakes a status change on failu
     const executeRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
     const service = buildService(queryRawUnsafe, executeRawUnsafe);
 
-    await expect(service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED' }))
+    await expect(service.addTimelineEvent('shp-1', 'driver-1', 'DRIVER', { status: 'DELIVERED' }))
       .rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
@@ -585,7 +586,7 @@ describe('ShipmentsService.addTimelineEvent never fakes a status change on failu
     const executeRawUnsafe = jest.fn().mockResolvedValue(undefined);
     const service = buildService(queryRawUnsafe, executeRawUnsafe);
 
-    const result = await service.addTimelineEvent('shp-1', 'customer-1', 'CUSTOMER', { status: 'DELIVERED', note: 'Delivered to recipient' });
+    const result = await service.addTimelineEvent('shp-1', 'driver-1', 'DRIVER', { status: 'DELIVERED', note: 'Delivered to recipient' });
 
     expect(result.status).toBe('DELIVERED');
   });
@@ -949,4 +950,3 @@ describe('ShipmentsService driver counteroffers', () => {
     });
   });
 });
-
