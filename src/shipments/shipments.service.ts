@@ -1250,6 +1250,9 @@ export class ShipmentsService {
     // desyncing everything downstream that reads the real status (escrow release checks,
     // dispatcher views, notifications) from what the customer/driver were shown.
     const nextStatus = String(event.status ?? shipment.status ?? 'IN_TRANSIT');
+    this.assertValidTransition(shipment.status, nextStatus as ShipmentStatus, role, {
+      isOwner, isAssignedDriver, isOperations,
+    });
     let rows: { id: string; status: string; note: string | null; createdAt: Date }[];
     try {
       rows = await this.prisma.$queryRawUnsafe(
