@@ -1,0 +1,12 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { validatePaymentReadiness } = require('./payment-release-gates');
+const live = { provider: 'paystack', mode: 'configured', environment: 'live', realChargeEnabled: true };
+test('accepts live authenticated provider in strict mode', () => validatePaymentReadiness(live, null, true));
+test('rejects test mode for production', () => assert.throws(() => validatePaymentReadiness({ ...live, environment: 'test' }, null, true), /live/));
+test('allows configured test mode for demo checks', () => validatePaymentReadiness({ ...live, environment: 'test' }, null, false));
+test('rejects public-only evidence for production', () => assert.throws(() => validatePaymentReadiness(null, { paystackReady: true }, true), /authenticated/));
+test('retains public readiness fallback for demos', () => validatePaymentReadiness(null, { paystackReady: true }, false));
+test('rejects disabled charges for production', () => assert.throws(() => validatePaymentReadiness({ ...live, realChargeEnabled: false }, null, true), /enabled/));
+test('rejects unconfigured provider', () => assert.throws(() => validatePaymentReadiness({ mode: 'mock' }, null, false), /not configured/));
+test('rejects a different provider for production', () => assert.throws(() => validatePaymentReadiness({ ...live, provider: 'mock' }, null, true), /authenticated/));
