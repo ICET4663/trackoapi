@@ -278,6 +278,7 @@ export class PaymentProviderService {
               entity: 'Payout',
               entityId: payout.id,
               actionUrl: '/admin/finance',
+              preferenceKey: 'escrowPayments',
             }).catch(() => null);
           }
         }
@@ -674,6 +675,7 @@ export class PaymentProviderService {
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: `/customer/shipment/${shipmentId}`,
+        preferenceKey: 'escrowPayments',
       }),
       this.notifications.create({
         role: 'DISPATCHER',
@@ -683,6 +685,7 @@ export class PaymentProviderService {
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: '/dispatcher/assignment',
+        preferenceKey: 'escrowPayments',
       }),
       this.notifications.create({
         role: 'ADMIN',
@@ -692,6 +695,7 @@ export class PaymentProviderService {
         entity: 'Escrow',
         entityId: shipmentId,
         actionUrl: '/admin/finance',
+        preferenceKey: 'escrowPayments',
       }),
     ]).catch(() => null);
   }
@@ -807,4 +811,3 @@ export class PaymentProviderService {
     return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
   }
 }
-

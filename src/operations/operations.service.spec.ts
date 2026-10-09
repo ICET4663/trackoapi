@@ -139,6 +139,11 @@ describe('OperationsService.resolveDispute wires decisions to real escrow mutati
     expect(shipments.refundEscrow).not.toHaveBeenCalled();
     // releaseEscrow() already updates the shipment's status/timeline internally.
     expect(prisma.shipment.update).not.toHaveBeenCalled();
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1',
+      preferenceKey: 'escrowPayments',
+    }));
+    expect(notifications.create).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'CUSTOMER' }));
   });
 
   it('calls the real refundEscrow for a REFUND decision', async () => {

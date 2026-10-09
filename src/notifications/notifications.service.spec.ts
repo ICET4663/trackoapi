@@ -34,6 +34,8 @@ describe('NotificationsService push delivery', () => {
     await service.create({ userId: 'user-1', title: 'Hi', body: 'Body' });
 
     expect(fetchMock).toHaveBeenCalledWith('https://exp.host/--/api/v2/push/send', expect.objectContaining({ method: 'POST' }));
+    expect(queryRawUnsafe.mock.calls[1][0]).toContain('"NotificationPreference"');
+    expect(queryRawUnsafe.mock.calls[1][0]).toContain('np."key" = \'push\'');
     const sentBody = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
     expect(sentBody).toHaveLength(2);
     expect(sentBody[0]).toMatchObject({ to: 'ExponentPushToken[aaa]', title: 'Hi', body: 'Body' });
@@ -46,8 +48,28 @@ describe('NotificationsService push delivery', () => {
 
     await service.create({ role: 'DISPATCHER', title: 'Alert', body: 'New dispute' });
 
-    expect(queryRawUnsafe).toHaveBeenLastCalledWith(expect.stringContaining('join "User"'), 'DISPATCHER');
+    expect(queryRawUnsafe).toHaveBeenLastCalledWith(expect.stringContaining('join "User"'), 'DISPATCHER', null);
+    expect(queryRawUnsafe).toHaveBeenLastCalledWith(expect.stringContaining('"NotificationPreference"'), 'DISPATCHER', null);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the event category into recipient preference filtering', async () => {
+    queryRawUnsafe
+      .mockResolvedValueOnce([notificationRow])
+      .mockResolvedValueOnce([{ token: 'ExpoPushToken[customer]' }]);
+
+    await service.create({
+      userId: 'user-1',
+      title: 'Escrow funded',
+      body: 'Payment secured.',
+      preferenceKey: 'escrowPayments',
+    });
+
+    expect(queryRawUnsafe).toHaveBeenLastCalledWith(
+      expect.stringContaining('np."key" = $2'),
+      'user-1',
+      'escrowPayments',
+    );
   });
 
   it('does not call the push API at all when there are no registered tokens', async () => {
@@ -69,6 +91,24 @@ describe('NotificationsService push delivery', () => {
 
     expect(result).not.toBeNull();
     expect(result?.id).toBe('notif-1');
+  });
+
+  it('removes a token when Expo reports that the app is no longer installed', async () => {
+    queryRawUnsafe
+      .mockResolvedValueOnce([notificationRow])
+      .mockResolvedValueOnce([{ token: 'ExpoPushToken[stale]' }])
+      .mockResolvedValueOnce([]);
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ status: 'error', details: { error: 'DeviceNotRegistered' } }] }),
+    });
+
+    await service.create({ userId: 'user-1', title: 'Hi', body: 'Body' });
+
+    expect(queryRawUnsafe).toHaveBeenLastCalledWith(
+      expect.stringContaining('delete from "PushToken"'),
+      'ExpoPushToken[stale]',
+    );
   });
 });
 
@@ -191,5 +231,42 @@ describe('NotificationsService other methods never fake success on failure', () 
     const service = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
 
     await expect(service.registerPushToken('user-1', 'ExponentPushToken[aaa]')).rejects.toThrow();
+  });
+
+  it('rejects malformed push tokens before writing to the database', async () => {
+    const query = jest.fn();
+    const service = buildService(query);
+
+    await expect(service.registerPushToken('user-1', 'not-a-push-token')).rejects.toThrow('valid Expo push token');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('atomically reassigns a device token to the latest signed-in user', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const service = buildService(query);
+
+    await service.registerPushToken('user-2', 'ExpoPushToken[device-one]', 'android');
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('delete from "PushToken" where "token" = $3 and "userId" <> $2'),
+      expect.any(String),
+      'user-2',
+      'ExpoPushToken[device-one]',
+      'android',
+      null,
+    );
+  });
+
+  it('unregisters only the current user device token', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const service = buildService(query);
+
+    await expect(service.unregisterPushToken('user-1', 'ExpoPushToken[device-one]'))
+      .resolves.toEqual({ unregistered: true });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('where "userId" = $1 and "token" = $2'),
+      'user-1',
+      'ExpoPushToken[device-one]',
+    );
   });
 });

@@ -1473,6 +1473,7 @@ export class SettingsService {
       entity: 'Payout',
       entityId: payout.id,
       actionUrl: beneficiary === 'DRIVER' ? '/driver/earnings' : '/owner/earnings',
+      preferenceKey: 'escrowPayments',
     });
 
     return {
@@ -1622,6 +1623,7 @@ export class SettingsService {
       entity: 'Payout',
       entityId: updated.id,
       actionUrl: existing.driver?.role === 'TRUCK_OWNER' ? '/owner/earnings' : '/driver/earnings',
+      preferenceKey: 'escrowPayments',
     });
 
     return {

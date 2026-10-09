@@ -1,10 +1,11 @@
-import { Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { interpolateTemplate, notificationTemplateDefault } from './notification-templates';
 
 type NotificationTone = 'INFO' | 'SUCCESS' | 'WARNING' | 'DANGER';
+type NotificationPreferenceKey = 'shipmentStatusUpdates' | 'liveTrackingAlerts' | 'driverOffers' | 'escrowPayments';
 
 type NotificationInput = {
   userId?: string;
@@ -20,6 +21,7 @@ type NotificationInput = {
   // `vars`. `body` above stays as the last-resort fallback.
   templateKey?: string;
   vars?: Record<string, string | number>;
+  preferenceKey?: NotificationPreferenceKey;
 };
 
 type NotificationRow = {
@@ -119,7 +121,7 @@ export class NotificationsService {
       to: token,
       title: input.title,
       body: input.body,
-      data: { entity: input.entity, entityId: input.entityId, actionUrl: input.actionUrl },
+      data: { entity: input.entity, entityId: input.entityId, actionUrl: input.actionUrl, route: input.actionUrl },
     }));
 
     for (let i = 0; i < messages.length; i += 100) {
@@ -131,6 +133,18 @@ export class NotificationsService {
       });
       if (!response.ok) {
         this.logger.warn(`Expo push send returned ${response.status} for a batch of ${batch.length} tokens`);
+        continue;
+      }
+      const payload = await response.json().catch(() => null) as {
+        data?: { status?: string; details?: { error?: string } }[];
+      } | null;
+      const invalidTokens = (payload?.data ?? [])
+        .map((ticket, index) => ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered'
+          ? batch[index]?.to
+          : undefined)
+        .filter((token): token is string => Boolean(token));
+      for (const token of invalidTokens) {
+        await this.prisma.$queryRawUnsafe('delete from "PushToken" where "token" = $1', token);
       }
     }
   }
@@ -138,15 +152,57 @@ export class NotificationsService {
   private async resolvePushTokens(input: NotificationInput): Promise<string[]> {
     if (input.userId && !input.userId.startsWith('preview-')) {
       const rows = await this.prisma.$queryRawUnsafe<{ token: string }[]>(
-        'select "token" from "PushToken" where "userId" = $1',
+        `select pt."token"
+         from "PushToken" pt
+         join "User" u on u."id" = pt."userId"
+         where pt."userId" = $1
+           and not exists (
+             select 1 from "NotificationPreference" np
+             where np."userId" = pt."userId"
+               and np."role" = u."role"
+               and np."key" = 'push'
+               and np."value" = false
+           )
+           and (
+             $2::text is null
+             or not exists (
+               select 1 from "NotificationPreference" np
+               where np."userId" = pt."userId"
+                 and np."role" = u."role"
+                 and np."key" = $2
+                 and np."value" = false
+             )
+           )`,
         input.userId,
+        input.preferenceKey ?? null,
       );
       return rows.map((row) => row.token);
     }
     if (input.role) {
       const rows = await this.prisma.$queryRawUnsafe<{ token: string }[]>(
-        `select pt."token" from "PushToken" pt join "User" u on u."id" = pt."userId" where u."role" = cast($1 as "UserRole")`,
+        `select pt."token"
+         from "PushToken" pt
+         join "User" u on u."id" = pt."userId"
+         where u."role" = cast($1 as "UserRole")
+           and not exists (
+             select 1 from "NotificationPreference" np
+             where np."userId" = pt."userId"
+               and np."role" = u."role"
+               and np."key" = 'push'
+               and np."value" = false
+           )
+           and (
+             $2::text is null
+             or not exists (
+               select 1 from "NotificationPreference" np
+               where np."userId" = pt."userId"
+                 and np."role" = u."role"
+                 and np."key" = $2
+                 and np."value" = false
+             )
+           )`,
         input.role,
+        input.preferenceKey ?? null,
       );
       return rows.map((row) => row.token);
     }
@@ -235,9 +291,15 @@ export class NotificationsService {
   }
 
   async registerPushToken(userId: string, token: string, platform?: string, deviceId?: string) {
+    if (!/^(Expo|Exponent)PushToken\[[^\]]+\]$/.test(token)) {
+      throw new BadRequestException('A valid Expo push token is required.');
+    }
     try {
       await this.prisma.$queryRawUnsafe(
-        `insert into "PushToken" ("id", "userId", "token", "platform", "deviceId", "updatedAt")
+        `with reassigned as (
+           delete from "PushToken" where "token" = $3 and "userId" <> $2
+         )
+         insert into "PushToken" ("id", "userId", "token", "platform", "deviceId", "updatedAt")
          values ($1, $2, $3, $4, $5, current_timestamp)
          on conflict ("userId", "token")
          do update set "platform" = excluded."platform", "deviceId" = excluded."deviceId", "updatedAt" = current_timestamp`,
@@ -264,6 +326,20 @@ export class NotificationsService {
       platform,
       deviceId,
     };
+  }
+
+  async unregisterPushToken(userId: string, token: string) {
+    if (!token) return { unregistered: false };
+    try {
+      await this.prisma.$queryRawUnsafe(
+        'delete from "PushToken" where "userId" = $1 and "token" = $2',
+        userId.startsWith('preview-') ? 'preview-customer' : userId,
+        token,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not unregister this device from push notifications: ${this.errorMessage(error)}`);
+    }
+    return { unregistered: true };
   }
 
   private toRecord(row: NotificationRow) {

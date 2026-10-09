@@ -437,10 +437,10 @@ export class OperationsService {
 
   // Real operational alerts computed from actual trip data - deliberately narrower than
   // a typical "alerts" screen: only flags what can honestly be derived from data that
-  // exists (GPS ping recency, elapsed time vs. quoted duration). No route-deviation
-  // detection (would need real route geometry, not built) and no document-expiry
-  // tracking (no such column exists on Vehicle yet) - those are left out entirely
-  // rather than faked.
+  // exists (GPS ping recency, elapsed time vs. quoted duration). TrackingService
+  // separately emits conservative movement-away notifications from recent pings;
+  // neither path claims full route-polyline geofencing. Document-expiry tracking is
+  // omitted because Vehicle has no expiry column, rather than presenting fake data.
   async alerts(actor: OperationActor) {
     this.assertCanOperate(actor.role);
     const ACTIVE_STATUSES: ShipmentStatus[] = [
@@ -1012,6 +1012,7 @@ export class OperationsService {
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: `/shipments/${shipmentId}`,
+        preferenceKey: 'shipmentStatusUpdates',
       });
     } catch (error) {
       this.logger.error(`progressTrip(${shipmentId}) status saved but audit/notification failed: ${this.errorMessage(error)}`);
@@ -1121,6 +1122,7 @@ export class OperationsService {
         entity: 'Dispute',
         entityId: id,
         actionUrl: `/dispatcher/disputes`,
+        preferenceKey: 'escrowPayments',
       });
     } catch (error) {
       this.logger.error(`createDispute(${id}) saved but follow-up steps failed: ${this.errorMessage(error)}`);
@@ -1221,14 +1223,29 @@ export class OperationsService {
         });
       }
 
-      await this.notifications.create({
-        role: 'CUSTOMER',
-        title: 'Dispute resolved',
-        body: resolution,
-        tone: 'SUCCESS',
-        entity: 'Dispute',
-        entityId: id,
-      });
+      let recipientUserId = shipment?.customerId;
+      if (!recipientUserId) {
+        const [recipient] = await this.prisma.$queryRawUnsafe<{ userId: string | null; customerId: string | null }[]>(
+          `select d."userId", s."customerId"
+           from "Dispute" d
+           left join "Shipment" s on s."id" = d."shipmentId"
+           where d."id" = $1
+           limit 1`,
+          id,
+        );
+        recipientUserId = recipient?.userId ?? recipient?.customerId ?? undefined;
+      }
+      if (recipientUserId) {
+        await this.notifications.create({
+          userId: recipientUserId,
+          title: 'Dispute resolved',
+          body: resolution,
+          tone: 'SUCCESS',
+          entity: 'Dispute',
+          entityId: id,
+          preferenceKey: 'escrowPayments',
+        });
+      }
     } catch (error) {
       this.logger.error(`resolveDispute(${id}) resolved but follow-up steps failed: ${this.errorMessage(error)}`);
     }

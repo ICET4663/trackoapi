@@ -299,7 +299,7 @@ describe('SettingsService truck-owner fleet reporting', () => {
     const query = jest.fn().mockResolvedValue([{
       vehicleId: 'vehicle-1', plateNumber: 'TRK-OWN-01', type: 'Flatbed', isActive: true,
       releasedIncome: 3_000_000, expenses: 500_000, completedLoads: 3, activeLoads: 1,
-      distanceKm: 1200, operationalMinutes: 3600, nextServiceDate: new Date('2026-09-30T00:00:00Z'),
+      distanceKm: 1200, operationalMinutes: 3600, nextServiceDate: new Date(Date.now() + 7 * 86_400_000),
       latestOdometerKm: 24500,
     }]);
     const { service } = buildOwnerService({ $queryRawUnsafe: query });

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
 import { NotificationsService } from './notifications.service';
 
@@ -40,5 +40,14 @@ export class NotificationsController {
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
     return this.notifications.registerPushToken(user.sub, body.token ?? 'preview-token', body.platform, body.deviceId);
+  }
+
+  @Delete('push-token')
+  async unregisterPushToken(
+    @Body() body: { token?: string },
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.notifications.unregisterPushToken(user.sub, body.token ?? '');
   }
 }

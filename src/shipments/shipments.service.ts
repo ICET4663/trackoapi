@@ -174,6 +174,7 @@ export class ShipmentsService {
         entity: 'Shipment',
         entityId: shipment.id,
         actionUrl: `/shipments/${shipment.id}`,
+        preferenceKey: 'shipmentStatusUpdates',
       });
 
       return this.toShipmentRecord(shipment, {
@@ -639,6 +640,7 @@ export class ShipmentsService {
       entity: 'DriverAssignment',
       entityId: assignment.id,
       actionUrl: `/driver/jobs/${assignment.id}`,
+      preferenceKey: 'driverOffers',
     });
 
     return this.toAssignmentRecord(assignment, await this.assignmentOfferValidityMinutes());
@@ -753,6 +755,7 @@ export class ShipmentsService {
         entity: 'Shipment',
         entityId: updated.shipmentId,
         actionUrl: `/shipments/${updated.shipmentId}`,
+        preferenceKey: 'driverOffers',
       });
 
       const nextAssignment = action === 'REJECT'
@@ -812,6 +815,7 @@ export class ShipmentsService {
         entity: 'Shipment',
         entityId: assignment.shipmentId,
         actionUrl: `/shipments/${assignment.shipmentId}`,
+        preferenceKey: 'driverOffers',
       }).catch(() => null);
 
       const validityMinutes = await this.assignmentOfferValidityMinutes();
@@ -879,6 +883,7 @@ export class ShipmentsService {
         entity: 'Shipment',
         entityId: assignment.shipmentId,
         actionUrl: `/shipments/${assignment.shipmentId}`,
+        preferenceKey: 'driverOffers',
       }).catch(() => null);
 
       const validityMinutes = await this.assignmentOfferValidityMinutes();
@@ -945,6 +950,7 @@ export class ShipmentsService {
         entity: 'DriverAssignment',
         entityId: updated.id,
         actionUrl: '/driver/jobs',
+        preferenceKey: 'driverOffers',
       }).catch(() => null),
       this.notifications.create({
         userId: updated.shipment.customerId,
@@ -954,6 +960,7 @@ export class ShipmentsService {
         entity: 'Shipment',
         entityId: updated.shipmentId,
         actionUrl: `/shipments/${updated.shipmentId}`,
+        preferenceKey: 'driverOffers',
       }).catch(() => null),
       this.prisma.auditLog.create({
         data: {
@@ -1047,6 +1054,7 @@ export class ShipmentsService {
       entity: 'Shipment',
       entityId: shipmentId,
       actionUrl: `/shipments/${shipmentId}`,
+      preferenceKey: 'driverOffers',
     }).catch(() => null);
     await this.offerNextEligibleDriver(shipmentId, [driverId]);
     return true;
@@ -1359,6 +1367,7 @@ export class ShipmentsService {
       entity: 'Shipment',
       entityId: shipmentId,
       actionUrl: '/dispatcher/assignment',
+      preferenceKey: 'driverOffers',
     });
 
     return this.toShipmentRecord(updated, { escrow: shipment.escrow });
@@ -1697,6 +1706,7 @@ export class ShipmentsService {
         entity: 'Escrow',
         entityId: shipmentId,
         actionUrl: '/driver/earnings',
+        preferenceKey: 'escrowPayments',
       });
     } catch {
       // Escrow release should not fail because notification delivery failed.
