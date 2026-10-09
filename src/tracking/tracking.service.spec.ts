@@ -1,15 +1,17 @@
-import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, ConflictException, InternalServerErrorException } from '@nestjs/common';
 import { TrackingService } from './tracking.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
 import type { AuthUser } from '../common/types/auth-user';
 
 const adminUser: AuthUser = { sub: 'admin-1', role: 'ADMIN' } as AuthUser;
+const driverUser: AuthUser = { sub: 'driver-1', role: 'DRIVER' } as AuthUser;
 
 function buildPrisma(overrides: Record<string, unknown> = {}) {
   return {
     shipment: {
       findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }),
+      findUnique: jest.fn().mockResolvedValue(null),
       update: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }),
     },
     driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -34,13 +36,12 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
     expect(result).toBeNull();
   });
 
-  it('currentLocation returns null, not fake data, when the query fails', async () => {
+  it('currentLocation reports a database failure instead of pretending there is no ping', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
     const service = new TrackingService(prisma, {} as NotificationsService);
 
-    const result = await service.currentLocation('shp-1', adminUser);
-
-    expect(result).toBeNull();
+    await expect(service.currentLocation('shp-1', adminUser))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
   it('locationHistory returns an empty list, not a fake single-point route, when there is no history', async () => {
@@ -52,6 +53,14 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
     expect(result).toEqual([]);
   });
 
+  it('locationHistory reports a database failure instead of an empty route', async () => {
+    const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.locationHistory('shp-1', adminUser))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
   it('deliveryProofs returns an empty list, not a fake "SUBMITTED" proof, for an undelivered shipment', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([]) });
     const service = new TrackingService(prisma, {} as NotificationsService);
@@ -59,6 +68,30 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
     const result = await service.deliveryProofs('shp-1', adminUser);
 
     expect(result).toEqual([]);
+  });
+
+  it('deliveryProofs reports a database failure instead of an empty proof list', async () => {
+    const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.deliveryProofs('shp-1', adminUser))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('does not report a shipment lookup outage as a missing shipment', async () => {
+    const prisma = buildPrisma({ shipment: { findFirst: jest.fn().mockRejectedValue(new Error('connection reset')) } });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.currentLocation('shp-1', adminUser))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('does not report a driver-assignment lookup outage as forbidden access', async () => {
+    const prisma = buildPrisma({ driverAssignment: { findFirst: jest.fn().mockRejectedValue(new Error('connection reset')) } });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.currentLocation('shp-1', driverUser))
+      .rejects.toBeInstanceOf(InternalServerErrorException);
   });
 });
 
@@ -111,6 +144,115 @@ describe('TrackingService.recordLocation never fakes a saved ping on failure', (
 
     expect(result.id).toBe('ping-1');
   });
+
+  it('does not save a ping after a shipment leaves the active delivery stages', async () => {
+    const insert = jest.fn().mockResolvedValue([]);
+    const prisma = buildPrisma({ $queryRawUnsafe: insert });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5, longitude: 3.3 }))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(insert.mock.calls[0][0]).toContain('ARRIVED_DESTINATION');
+    expect(insert.mock.calls[0][0]).not.toContain("'DELIVERED'");
+    expect(insert.mock.calls[0][0]).not.toContain("'COMPLETED'");
+  });
+});
+
+describe('TrackingService live tracking alerts', () => {
+  const savedPing = {
+    id: 'ping-new', shipmentId: 'shp-1', driverId: 'driver-1', latitude: 0.3, longitude: 0,
+    heading: null, speedKph: 35, note: null, createdAt: new Date(),
+  };
+
+  it('alerts the customer and dispatcher when an active trip exceeds its estimate', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce([savedPing])
+      .mockResolvedValueOnce([{ exists: false }]);
+    const prisma = buildPrisma({
+      $queryRawUnsafe: query,
+      shipment: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shp-1', reference: 'TRK-1', customerId: 'cust-1', status: 'IN_TRANSIT',
+          durationMinutes: 60, destinationLatitude: 1, destinationLongitude: 1,
+          timeline: [{ status: 'IN_TRANSIT', createdAt: new Date(Date.now() - 100 * 60_000) }],
+          locationPings: [savedPing],
+        }),
+      },
+    });
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const service = new TrackingService(prisma, notifications);
+
+    await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0, speedKph: 35 });
+
+    expect(notifications.create).toHaveBeenCalledTimes(2);
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1',
+      title: 'Shipment delay detected',
+      preferenceKey: 'liveTrackingAlerts',
+    }));
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'DISPATCHER',
+      preferenceKey: 'liveTrackingAlerts',
+    }));
+  });
+
+  it('detects sustained movement away from the destination without requiring route geometry', async () => {
+    const now = Date.now();
+    const locationPings = [
+      { ...savedPing, latitude: 0.3, createdAt: new Date(now) },
+      { ...savedPing, id: 'ping-2', latitude: 0.2, createdAt: new Date(now - 10 * 60_000) },
+      { ...savedPing, id: 'ping-1', latitude: 0.1, createdAt: new Date(now - 20 * 60_000) },
+    ];
+    const query = jest.fn()
+      .mockResolvedValueOnce([savedPing])
+      .mockResolvedValueOnce([{ exists: false }]);
+    const prisma = buildPrisma({
+      $queryRawUnsafe: query,
+      shipment: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shp-1', reference: 'TRK-1', customerId: 'cust-1', status: 'IN_TRANSIT',
+          durationMinutes: null, destinationLatitude: 0, destinationLongitude: 0,
+          timeline: [{ status: 'IN_TRANSIT', createdAt: new Date(now - 30 * 60_000) }],
+          locationPings,
+        }),
+      },
+    });
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const service = new TrackingService(prisma, notifications);
+
+    await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0, speedKph: 35 });
+
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Possible route deviation',
+      preferenceKey: 'liveTrackingAlerts',
+    }));
+  });
+
+  it('does not repeat an alert inside its deduplication window', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce([savedPing])
+      .mockResolvedValueOnce([{ exists: true }]);
+    const prisma = buildPrisma({
+      $queryRawUnsafe: query,
+      shipment: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shp-1', reference: 'TRK-1', customerId: 'cust-1', status: 'IN_TRANSIT',
+          durationMinutes: 60, destinationLatitude: 1, destinationLongitude: 1,
+          timeline: [{ status: 'IN_TRANSIT', createdAt: new Date(Date.now() - 100 * 60_000) }],
+          locationPings: [savedPing],
+        }),
+      },
+    });
+    const notifications = { create: jest.fn() } as unknown as NotificationsService;
+    const service = new TrackingService(prisma, notifications);
+
+    await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0 });
+
+    expect(notifications.create).not.toHaveBeenCalled();
+  });
 });
 
 // recordLocation() used to default a missing latitude/longitude to a fixed Lagos
@@ -132,6 +274,21 @@ describe('TrackingService.recordLocation rejects a ping with no real coordinates
 
     await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5 } as never))
       .rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it.each([
+    { latitude: 90.01, longitude: 3.3 },
+    { latitude: -90.01, longitude: 3.3 },
+    { latitude: 6.5, longitude: 180.01 },
+    { latitude: 6.5, longitude: -180.01 },
+    { latitude: Number.NaN, longitude: 3.3 },
+  ])('rejects an out-of-range GPS point before saving it: %j', async (input) => {
+    const prisma = buildPrisma();
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, input))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
 
   it('accepts a real equatorial/prime-meridian zero coordinate rather than treating it as missing', async () => {

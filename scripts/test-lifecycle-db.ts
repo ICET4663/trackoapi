@@ -2,6 +2,7 @@ import { CommunicationService } from '../src/communication/communication.service
 import type { TranslationProviderService } from '../src/integrations/translation-provider.service';
 import type { AuthUser } from '../src/common/types/auth-user';
 import { ConfigService } from '@nestjs/config';
+import { ConflictException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { createHmac, randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
@@ -29,14 +30,13 @@ function assertSafeTestDatabase(url: string) {
   const parsed = new URL(url);
   const normalized = url.toLowerCase();
   const databaseName = parsed.pathname.replace(/^\//, '').toLowerCase();
-  const isLocal = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
   const explicitlyTestNamed = /(^|[-_])(test|testing)([-_]|$)/.test(databaseName);
 
   if (normalized.includes('supabase.co') || normalized === (process.env.DATABASE_URL ?? '').toLowerCase()) {
     throw new Error('Refusing to run lifecycle tests against Supabase or the configured application database.');
   }
-  if (!isLocal && !explicitlyTestNamed) {
-    throw new Error('Remote TEST_DATABASE_URL database names must contain "test" or "testing".');
+  if (!explicitlyTestNamed) {
+    throw new Error('TEST_DATABASE_URL database name must contain "test" or "testing".');
   }
   if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
     throw new Error('TEST_DATABASE_URL must be a PostgreSQL connection string.');
@@ -60,6 +60,24 @@ async function expectRejected(action: () => Promise<unknown>, message: string) {
     return;
   }
   throw new Error(`Lifecycle assertion failed: ${message}`);
+}
+
+async function expectConflict(action: () => Promise<unknown>, message: string) {
+  try {
+    await action();
+  } catch (error) {
+    expectValue(error instanceof ConflictException, `${message}: expected HTTP 409`);
+    return;
+  }
+  throw new Error(`Lifecycle assertion failed: ${message}`);
+}
+
+async function countLocationPings(prisma: PrismaService, shipmentId: string) {
+  const [row] = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+    'select count(*) as "count" from "ShipmentLocationPing" where "shipmentId" = $1',
+    shipmentId,
+  );
+  return Number(row.count);
 }
 
 async function main() {
@@ -216,8 +234,17 @@ async function main() {
     await shipments.addTimelineEvent(shipment.id, driver.id, 'DRIVER', { status: 'PICKED_UP', note: 'Cargo collected.' });
     await shipments.addTimelineEvent(shipment.id, driver.id, 'DRIVER', { status: 'IN_TRANSIT', note: 'Shipment in transit.' });
     await shipments.addTimelineEvent(shipment.id, driver.id, 'DRIVER', { status: 'ARRIVED_DESTINATION', note: 'Driver arrived at destination.' });
+    const arrivalPing = await tracking.recordLocation(shipment.id, driverActor, { latitude: 9.0765, longitude: 7.3986, note: 'Arrived at destination.' });
+    expectValue(arrivalPing.id, 'arrival GPS ping was persisted');
+    const pingsBeforeDelivery = await countLocationPings(prisma, shipment.id);
     const proof = await tracking.submitDeliveryProof(shipment.id, driverActor, { photoUrl: 'https://test.invalid/pod.jpg', recipientName: 'Lifecycle Receiver', note: 'Delivered intact.' });
     expectValue(proof.id, 'proof of delivery was persisted');
+    await expectConflict(
+      () => tracking.recordLocation(shipment.id, driverActor, { latitude: 9.0766, longitude: 7.3987 }),
+      'GPS write remained available after proof of delivery',
+    );
+    expectValue(await countLocationPings(prisma, shipment.id) === pingsBeforeDelivery,
+      'post-delivery GPS attempt did not create a ping');
 
     await shipments.confirmEscrowCheck(shipment.id, 'arrivalConfirmed', 'DRIVER');
     await shipments.confirmEscrowCheck(shipment.id, 'customerDeliveryConfirmed', 'CUSTOMER');
@@ -226,6 +253,12 @@ async function main() {
     expectValue(ready.status === 'RELEASE_READY', 'escrow reached release-ready state');
     const released = await shipments.releaseEscrow(shipment.id, 'ADMIN', 'Lifecycle test release.');
     expectValue(released.status === 'RELEASED', 'escrow was released');
+    await expectConflict(
+      () => tracking.recordLocation(shipment.id, driverActor, { latitude: 9.0767, longitude: 7.3988 }),
+      'GPS write remained available after escrow release',
+    );
+    expectValue(await countLocationPings(prisma, shipment.id) === pingsBeforeDelivery,
+      'completed shipment did not create a GPS ping');
 
     const earnings = await settings.driverEarnings(driver.id, { strict: true });
     const driverAmount = Math.round(initialized.amount * 70 / 100);
@@ -311,6 +344,7 @@ async function main() {
     console.log('OK cross-role persisted text and voice transcript retrieval; unrelated customer blocked');
     console.log('OK shipment created and signed webhook funded escrow');
     console.log('OK admin approval, assignment, acceptance, pickup and delivery proof');
+    console.log('OK arrival GPS persisted; delivery and completion both stopped further GPS writes');
     console.log('OK escrow release, driver earnings, withdrawal approval and payout');
     console.log('OK payment replay, duplicate assignment, over-withdrawal and payout transition guards');
     console.log('DONE Tracko temporary-database lifecycle passed');

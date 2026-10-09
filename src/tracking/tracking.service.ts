@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -21,6 +21,8 @@ type DeliveryProofInput = {
 
 @Injectable()
 export class TrackingService {
+  private readonly logger = new Logger(TrackingService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -33,7 +35,7 @@ export class TrackingService {
     const shipment = await this.prisma.shipment.findFirst({
       where: { OR: [{ id: shipmentIdentifier }, { reference: shipmentIdentifier }] },
       select: { id: true, customerId: true },
-    }).catch(() => null);
+    }).catch(() => { throw new InternalServerErrorException('Could not check shipment access. Please try again.'); });
     if (!shipment) throw new NotFoundException('Shipment was not found.');
 
     if (user.role === 'ADMIN' || user.role === 'DISPATCHER') return shipment.id;
@@ -43,7 +45,7 @@ export class TrackingService {
       const assignment = await this.prisma.driverAssignment.findFirst({
         where: { shipmentId: shipment.id, driverId: user.sub, status: 'ACCEPTED' },
         select: { id: true },
-      }).catch(() => null);
+      }).catch(() => { throw new InternalServerErrorException('Could not check driver assignment. Please try again.'); });
       if (assignment) return shipment.id;
     }
 
@@ -76,7 +78,7 @@ export class TrackingService {
 
       if (rows[0]) return this.toLocation(rows[0]);
     } catch {
-      // A real infra failure falls through to the honest "no location yet" below too.
+      throw new InternalServerErrorException('Could not load the current location. Please try again.');
     }
 
     // This used to fabricate a fixed Lagos coordinate here - so a customer/dispatcher
@@ -113,7 +115,7 @@ export class TrackingService {
 
       if (rows.length) return rows.map((row) => this.toLocation(row));
     } catch {
-      // A real infra failure falls through to the honest empty list below too.
+      throw new InternalServerErrorException('Could not load location history. Please try again.');
     }
 
     // Same fabricated-Lagos-coordinate bug as currentLocation() above, for the route
@@ -137,7 +139,8 @@ export class TrackingService {
     }
     const latitude = Number(input.latitude);
     const longitude = Number(input.longitude);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90
+      || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
       throw new BadRequestException('A valid GPS latitude and longitude are required to record a location.');
     }
 
@@ -160,7 +163,10 @@ export class TrackingService {
     try {
       rows = await this.prisma.$queryRawUnsafe(
         `insert into "ShipmentLocationPing" ("id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note")
-         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         select $1, $2, $3, $4, $5, $6, $7, $8
+         from "Shipment" s
+         where s."id" = $2
+           and s."status" in ('DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION')
          returning "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"`,
         // "id" has no database-level default (Prisma's @default(cuid()) is client-side
         // only) - this raw insert must generate its own, or every location ping ever
@@ -178,8 +184,113 @@ export class TrackingService {
       throw new InternalServerErrorException(`Could not record this location. Please try again: ${this.errorMessage(error)}`);
     }
 
-    if (!rows[0]) throw new InternalServerErrorException('Could not record this location. Please try again.');
+    if (!rows[0]) throw new ConflictException('Location sharing has ended for this shipment.');
+    await this.detectTrackingAlerts(shipmentId).catch((error) => {
+      this.logger.warn(`Tracking alert evaluation failed for ${shipmentId}: ${this.errorMessage(error)}`);
+    });
     return this.toLocation(rows[0]);
+  }
+
+  private async detectTrackingAlerts(shipmentId: string) {
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: {
+        timeline: { orderBy: { createdAt: 'asc' } },
+        locationPings: { orderBy: { createdAt: 'desc' }, take: 3 },
+      },
+    });
+    if (!shipment || shipment.status !== 'IN_TRANSIT') return;
+
+    const inTransitAt = shipment.timeline.find((event) => event.status === 'IN_TRANSIT')?.createdAt;
+    if (inTransitAt && shipment.durationMinutes) {
+      const elapsedMinutes = (Date.now() - inTransitAt.getTime()) / 60_000;
+      const delayThreshold = shipment.durationMinutes * 1.25;
+      if (elapsedMinutes > delayThreshold) {
+        await this.emitTrackingAlert({
+          shipmentId,
+          customerId: shipment.customerId,
+          title: 'Shipment delay detected',
+          body: `${shipment.reference} is ${Math.round(elapsedMinutes - shipment.durationMinutes)} minutes beyond its estimated journey time. Trako operations has been alerted.`,
+          since: inTransitAt,
+        });
+      }
+    }
+
+    const pings = shipment.locationPings;
+    if (shipment.destinationLatitude == null || shipment.destinationLongitude == null || pings.length < 3) return;
+    const latest = pings[0];
+    const oldest = pings[pings.length - 1];
+    const observationMinutes = (latest.createdAt.getTime() - oldest.createdAt.getTime()) / 60_000;
+    if (observationMinutes < 10) return;
+
+    const latestDistance = this.distanceKm(latest.latitude, latest.longitude, shipment.destinationLatitude, shipment.destinationLongitude);
+    const oldestDistance = this.distanceKm(oldest.latitude, oldest.longitude, shipment.destinationLatitude, shipment.destinationLongitude);
+    const movedAwayKm = latestDistance - oldestDistance;
+    if (latestDistance >= 15 && movedAwayKm >= 10) {
+      await this.emitTrackingAlert({
+        shipmentId,
+        customerId: shipment.customerId,
+        title: 'Possible route deviation',
+        body: `${shipment.reference} moved about ${Math.round(movedAwayKm)} km farther from its destination over the last ${Math.round(observationMinutes)} minutes. Trako operations is checking the route.`,
+        since: new Date(Date.now() - 2 * 60 * 60_000),
+      });
+    }
+  }
+
+  private async emitTrackingAlert(input: {
+    shipmentId: string;
+    customerId: string;
+    title: string;
+    body: string;
+    since: Date;
+  }) {
+    const [existing] = await this.prisma.$queryRawUnsafe<{ exists: boolean }[]>(
+      `select exists(
+         select 1 from "Notification"
+         where "entity" = 'Shipment'
+           and "entityId" = $1
+           and "title" = $2
+           and "createdAt" >= $3
+       ) as "exists"`,
+      input.shipmentId,
+      input.title,
+      input.since,
+    );
+    if (existing?.exists) return;
+
+    await Promise.all([
+      this.notifications.create({
+        userId: input.customerId,
+        title: input.title,
+        body: input.body,
+        tone: 'WARNING',
+        entity: 'Shipment',
+        entityId: input.shipmentId,
+        actionUrl: `/customer/shipment/${input.shipmentId}`,
+        preferenceKey: 'liveTrackingAlerts',
+      }),
+      this.notifications.create({
+        role: 'DISPATCHER',
+        title: input.title,
+        body: input.body,
+        tone: 'WARNING',
+        entity: 'Shipment',
+        entityId: input.shipmentId,
+        actionUrl: '/dispatcher/live-map',
+        preferenceKey: 'liveTrackingAlerts',
+      }),
+    ]);
+  }
+
+  private distanceKm(fromLatitude: number, fromLongitude: number, toLatitude: number, toLongitude: number) {
+    const radians = (degrees: number) => degrees * Math.PI / 180;
+    const latitudeDelta = radians(toLatitude - fromLatitude);
+    const longitudeDelta = radians(toLongitude - fromLongitude);
+    const startLatitude = radians(fromLatitude);
+    const endLatitude = radians(toLatitude);
+    const haversine = Math.sin(latitudeDelta / 2) ** 2
+      + Math.cos(startLatitude) * Math.cos(endLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
   }
 
   async submitDeliveryProof(shipmentId: string, user: AuthUser, input: DeliveryProofInput) {
@@ -271,6 +382,7 @@ export class TrackingService {
         entity: 'DeliveryProof',
         entityId: rows[0].id,
         actionUrl: `/shipments/${shipmentId}`,
+        preferenceKey: 'shipmentStatusUpdates',
       }),
       this.notifications.create({
         role: 'DISPATCHER',
@@ -280,6 +392,7 @@ export class TrackingService {
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: `/dispatcher/shipments/${shipmentId}`,
+        preferenceKey: 'shipmentStatusUpdates',
       }),
     ]).catch(() => null);
 
@@ -311,7 +424,7 @@ export class TrackingService {
 
       if (rows.length) return rows.map((row) => this.toProof(row));
     } catch {
-      // A real infra failure falls through to the honest empty list below too.
+      throw new InternalServerErrorException('Could not load delivery proofs. Please try again.');
     }
 
     // This used to fabricate a "SUBMITTED" proof of delivery, signed by "Preview
