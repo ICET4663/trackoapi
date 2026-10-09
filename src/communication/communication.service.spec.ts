@@ -584,6 +584,43 @@ describe("CommunicationService.uploadMedia never fakes success on failure", () =
     }
   });
 
+  // Uploads (including KYC ID photos) are served from a public bucket, so the object name is
+  // the only secret in the URL. It used to end in Math.random().toString(36).slice(2, 10).
+  it("names stored objects with 128 bits of CSPRNG randomness so public URLs cannot be guessed", async () => {
+    const originalFetch = global.fetch;
+    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const queryRawUnsafe = jest.fn().mockResolvedValue([
+      { id: "media-1", kind: "DOCUMENT", url: "u", storageKey: "k", label: "l", transcript: null, durationSeconds: null, createdAt: new Date() },
+    ]);
+    try {
+      const service = buildService(
+        { $queryRawUnsafe: queryRawUnsafe },
+        {
+          get: jest.fn(
+            (key: string) =>
+              (
+                ({
+                  SUPABASE_URL: "https://example.supabase.co",
+                  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+                }) as Record<string, string>
+              )[key],
+          ),
+        },
+      );
+
+      await service.uploadMedia({ kind: "DOCUMENT", base64: "AAAA", mimeType: "image/png" }, "user-1");
+      await service.uploadMedia({ kind: "DOCUMENT", base64: "AAAA", mimeType: "image/png" }, "user-1");
+
+      const names = fetchMock.mock.calls.map(([url]) => String(url).split("/").pop() as string);
+      expect(names[0]).toMatch(/^\d{13}-[0-9a-f]{32}\.png$/);
+      expect(names[1]).toMatch(/^\d{13}-[0-9a-f]{32}\.png$/);
+      expect(names[0]).not.toBe(names[1]);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   it("stores browser voice notes with a real audio extension and tolerates the legacy bucket MIME allow-list", async () => {
     const originalFetch = global.fetch;
     global.fetch = jest

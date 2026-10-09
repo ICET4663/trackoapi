@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import type { AuthUser } from "../common/types/auth-user";
 import { TranslationProviderService } from "../integrations/translation-provider.service";
 import { NotificationsService } from "../notifications/notifications.service";
@@ -599,7 +599,11 @@ export class CommunicationService {
     const owner = userId.startsWith("preview-")
       ? "preview"
       : userId.replace(/[^a-zA-Z0-9_-]/g, "");
-    return `${kind}/${owner}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${this.extensionForMime(mimeType)}`;
+    // Objects are served from a public bucket, so the filename is the only thing keeping a
+    // URL private. Math.random() (~41 bits, not cryptographically secure) after a
+    // millisecond timestamp and a user id that appears in API responses is guessable in
+    // principle; 128 bits from the OS CSPRNG is not.
+    return `${kind}/${owner}/${Date.now()}-${randomBytes(16).toString("hex")}.${this.extensionForMime(mimeType)}`;
   }
 
   private extensionForMime(mimeType: string) {
