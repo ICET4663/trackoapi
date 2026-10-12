@@ -498,3 +498,71 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
     expect(execute.mock.calls.some(([sql]) => String(sql).includes('add column if not exists "clientPingId"'))).toBe(true);
   });
 });
+
+// Location is personal data: a finished shipment's GPS trail must not be kept forever, but a
+// trail attached to an unresolved dispute is evidence and must survive the window.
+describe('TrackingService location history retention', () => {
+  function serviceWith(setting: unknown, query: jest.Mock) {
+    const prisma = buildPrisma({
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(setting) },
+      $queryRawUnsafe: query,
+    });
+    return new TrackingService(prisma, {} as NotificationsService);
+  }
+
+  it.each([
+    [null, 30],
+    [{ value: '90' }, 90],
+    [{ value: '2' }, 7],
+    [{ value: '9999' }, 365],
+    [{ value: 'soon' }, 30],
+  ])('reads the retention window from the platform setting (%j -> %i days), defaulting and clamping', async (setting, days) => {
+    const service = serviceWith(setting, jest.fn().mockResolvedValue([{ count: 0 }]));
+
+    await expect(service.locationRetentionDays()).resolves.toBe(days);
+  });
+
+  it('only deletes the trail of finished shipments past the window, and never one under an open dispute', async () => {
+    const query = jest.fn().mockResolvedValue([{ count: 3 }]);
+    const service = serviceWith({ value: '45' }, query);
+
+    const result = await service.purgeExpiredLocationHistory();
+
+    const [sql, days] = query.mock.calls[0];
+    expect(sql).toContain("'COMPLETED'::\"ShipmentStatus\", 'CANCELLED'::\"ShipmentStatus\"");
+    expect(sql).not.toContain("'DELIVERED'");
+    expect(sql).toContain("'OPEN'::\"DisputeStatus\", 'IN_REVIEW'::\"DisputeStatus\"");
+    expect(sql).toContain('delete from "ShipmentLocationPing"');
+    expect(days).toBe('45');
+    expect(result).toMatchObject({ retentionDays: 45, deleted: 3 });
+  });
+
+  it('works in bounded batches and stops as soon as a batch comes back short', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce([{ count: 100 }])
+      .mockResolvedValueOnce([{ count: 100 }])
+      .mockResolvedValueOnce([{ count: 40 }]);
+    const service = serviceWith(null, query);
+
+    const result = await service.purgeExpiredLocationHistory({ batchSize: 100, maxBatches: 5 });
+
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(result.deleted).toBe(240);
+  });
+
+  it('never runs more batches than allowed in one scheduled run', async () => {
+    const query = jest.fn().mockResolvedValue([{ count: 100 }]);
+    const service = serviceWith(null, query);
+
+    await service.purgeExpiredLocationHistory({ batchSize: 100, maxBatches: 2 });
+
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a database failure instead of pretending the purge ran', async () => {
+    const service = serviceWith(null, jest.fn().mockRejectedValue(new Error('connection reset')));
+
+    await expect(service.purgeExpiredLocationHistory()).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});
+

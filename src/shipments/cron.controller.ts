@@ -2,6 +2,7 @@ import { Controller, ForbiddenException, Get, Headers } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { Public } from '../common/decorators/public.decorator';
+import { TrackingService } from '../tracking/tracking.service';
 import { ShipmentsService } from './shipments.service';
 
 // Scheduled/system endpoints - never called by any client, only by Vercel Cron (see
@@ -12,6 +13,7 @@ import { ShipmentsService } from './shipments.service';
 export class CronController {
   constructor(
     private readonly shipments: ShipmentsService,
+    private readonly tracking: TrackingService,
     private readonly config: ConfigService,
   ) {}
 
@@ -28,7 +30,10 @@ export class CronController {
       this.shipments.autoReleaseEligibleEscrows(),
       this.shipments.expireStaleAssignmentOffers(),
     ]);
-    return { escrow, assignments, ranAt: new Date().toISOString() };
+    // Housekeeping must never break escrow release or offer expiry, which share this run.
+    const locationRetention = await this.tracking.purgeExpiredLocationHistory()
+      .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+    return { escrow, assignments, locationRetention, ranAt: new Date().toISOString() };
   }
 
   private secretsMatch(expected: string, presented: string) {

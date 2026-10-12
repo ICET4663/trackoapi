@@ -40,6 +40,11 @@ const MAX_FUTURE_SKEW_MS = 2 * 60_000;
 const MAX_PING_AGE_MS = 12 * 60 * 60_000;
 // Alerts compare recent positions, so only evaluate them for a fix that is itself recent.
 const ALERT_FRESHNESS_MS = 90_000;
+// How long a finished shipment's GPS trail is kept. Admin-configurable (platform setting
+// trackingRetentionDays); location is personal data, so it should not be kept indefinitely.
+const DEFAULT_LOCATION_RETENTION_DAYS = 30;
+const MIN_LOCATION_RETENTION_DAYS = 7;
+const MAX_LOCATION_RETENTION_DAYS = 365;
 const EFFECTIVE_TIME = 'coalesce("recordedAt", "createdAt")';
 const LOCATION_COLUMNS = `"id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt", "recordedAt", "accuracyM"`;
 
@@ -157,6 +162,56 @@ export class TrackingService {
     // Same fabricated-Lagos-coordinate bug as currentLocation() above, for the route
     // trail - an honest empty list, not an invented single-point "route".
     return [];
+  }
+
+  async locationRetentionDays() {
+    const setting = await this.prisma.platformSetting.findUnique({ where: { key: 'trackingRetentionDays' } }).catch(() => null);
+    const configured = Math.floor(Number(setting?.value));
+    if (!Number.isFinite(configured)) return DEFAULT_LOCATION_RETENTION_DAYS;
+    return Math.min(MAX_LOCATION_RETENTION_DAYS, Math.max(MIN_LOCATION_RETENTION_DAYS, configured));
+  }
+
+  // Deletes the GPS trail of shipments that finished (completed or cancelled) more than the
+  // retention window ago. A shipment with an open or in-review dispute is never touched: the
+  // trail is evidence there. Work is done in bounded batches so one run cannot hold the
+  // database for long; whatever is left is picked up by the next scheduled run.
+  async purgeExpiredLocationHistory(options: { batchSize?: number; maxBatches?: number } = {}) {
+    const batchSize = Math.max(1, Math.min(options.batchSize ?? 2000, 10_000));
+    const maxBatches = Math.max(1, options.maxBatches ?? 5);
+    const retentionDays = await this.locationRetentionDays();
+
+    let deleted = 0;
+    try {
+      for (let batch = 0; batch < maxBatches; batch += 1) {
+        const rows = await this.prisma.$queryRawUnsafe<{ count: number | bigint }[]>(
+          `with expired as (
+             select p."id"
+             from "ShipmentLocationPing" p
+             join "Shipment" s on s."id" = p."shipmentId"
+             where s."status" in ('COMPLETED'::"ShipmentStatus", 'CANCELLED'::"ShipmentStatus")
+               and s."updatedAt" <= now() - ($1 || ' days')::interval
+               and not exists (
+                 select 1 from "Dispute" d
+                 where d."shipmentId" = s."id"
+                   and d."status" in ('OPEN'::"DisputeStatus", 'IN_REVIEW'::"DisputeStatus")
+               )
+             limit $2::int
+           ), removed as (
+             delete from "ShipmentLocationPing" where "id" in (select "id" from expired) returning 1
+           )
+           select count(*)::int as "count" from removed`,
+          String(retentionDays),
+          batchSize,
+        );
+        const removed = Number(rows[0]?.count ?? 0);
+        deleted += removed;
+        if (removed < batchSize) break;
+      }
+    } catch (error) {
+      this.logger.error(`purgeExpiredLocationHistory() failed after deleting ${deleted} rows: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not purge expired location history.');
+    }
+    return { retentionDays, deleted, ranAt: new Date().toISOString() };
   }
 
   async recordLocation(shipmentId: string, user: AuthUser, input: LocationInput) {
