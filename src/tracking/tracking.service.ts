@@ -196,7 +196,7 @@ export class TrackingService {
       where: { id: shipmentId },
       include: {
         timeline: { orderBy: { createdAt: 'asc' } },
-        locationPings: { orderBy: { createdAt: 'desc' }, take: 3 },
+        locationPings: { orderBy: { createdAt: 'desc' }, take: 100 },
       },
     });
     if (!shipment || shipment.status !== 'IN_TRANSIT') return;
