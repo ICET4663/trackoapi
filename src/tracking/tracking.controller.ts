@@ -24,7 +24,7 @@ export class TrackingController {
   @Post('shipments/:id/location')
   async recordLocation(
     @Param('id') id: string,
-    @Body() body: { latitude?: number; longitude?: number; heading?: number; speedKph?: number; note?: string },
+    @Body() body: { latitude?: number; longitude?: number; heading?: number; speedKph?: number; note?: string; recordedAt?: string | number; accuracyM?: number; clientPingId?: string },
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.requireRole(authorization, ['DRIVER']);

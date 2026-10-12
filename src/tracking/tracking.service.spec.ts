@@ -373,3 +373,128 @@ describe('TrackingService.submitDeliveryProof never fakes a recorded delivery', 
   });
 });
 
+// A driver app that goes offline queues GPS fixes and sends them later. The API must keep
+// each fix's real capture time (so a delayed fix is neither shown as fresh nor allowed to
+// replace a newer position), tolerate retried requests without duplicating the trail, and
+// stay compatible with app versions that send none of this metadata.
+describe('TrackingService.recordLocation capture time, accuracy and idempotency', () => {
+  const baseRow = {
+    id: 'ping-1', shipmentId: 'shp-1', driverId: 'driver-1', latitude: 6.5, longitude: 3.3,
+    heading: null, speedKph: null, note: null, createdAt: new Date(), recordedAt: null, accuracyM: null,
+  };
+  const ping = { latitude: 6.5, longitude: 3.3 };
+
+  it('stores the device capture time, accuracy and client id, and reports the capture time as createdAt', async () => {
+    const capturedAt = new Date(Date.now() - 5 * 60_000);
+    const received = new Date();
+    const insert = jest.fn().mockResolvedValue([{ ...baseRow, createdAt: received, recordedAt: capturedAt, accuracyM: 12 }]);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+
+    const result = await service.recordLocation('shp-1', adminUser, {
+      ...ping, recordedAt: capturedAt.toISOString(), accuracyM: 12, clientPingId: 'ping-abcdef12',
+    });
+
+    expect(insert.mock.calls[0].slice(9)).toEqual([capturedAt, 12, 'ping-abcdef12']);
+    expect(result.createdAt).toBe(capturedAt.toISOString());
+    expect(result.receivedAt).toBe(received.toISOString());
+    expect(result.accuracyM).toBe(12);
+  });
+
+  it('still accepts an older app version that sends no capture metadata', async () => {
+    const insert = jest.fn().mockResolvedValue([baseRow]);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+
+    const result = await service.recordLocation('shp-1', adminUser, ping);
+
+    expect(insert.mock.calls[0].slice(9)).toEqual([null, null, null]);
+    expect(result.createdAt).toBe(baseRow.createdAt.toISOString());
+  });
+
+  it.each([
+    ['an unparseable recordedAt', { recordedAt: 'not-a-date' }],
+    ['a recordedAt far in the future', { recordedAt: new Date(Date.now() + 10 * 60_000).toISOString() }],
+    ['a recordedAt older than the offline-queue limit', { recordedAt: new Date(Date.now() - 13 * 3600_000).toISOString() }],
+    ['a negative accuracy', { accuracyM: -1 }],
+    ['an absurd accuracy', { accuracyM: 1_000_000 }],
+    ['a malformed clientPingId', { clientPingId: 'has spaces!' }],
+    ['a too-short clientPingId', { clientPingId: 'abc' }],
+  ])('rejects %s without touching the database', async (_label, extra) => {
+    const insert = jest.fn().mockResolvedValue([baseRow]);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { ...ping, ...extra })).rejects.toBeInstanceOf(BadRequestException);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a few seconds of device clock skew ahead of the server', async () => {
+    const insert = jest.fn().mockResolvedValue([baseRow]);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { ...ping, recordedAt: new Date(Date.now() + 30_000).toISOString() }))
+      .resolves.toBeDefined();
+  });
+
+  it('returns the original ping when a client retries the same fix instead of storing a duplicate', async () => {
+    const stored = { ...baseRow, id: 'ping-original' };
+    const query = jest.fn()
+      .mockResolvedValueOnce([])        // insert hit the unique (shipmentId, clientPingId) index
+      .mockResolvedValueOnce([stored]); // lookup of the original
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+
+    const result = await service.recordLocation('shp-1', adminUser, { ...ping, clientPingId: 'ping-abcdef12' });
+
+    expect(result.id).toBe('ping-original');
+    expect(query.mock.calls[0][0]).toContain('on conflict ("shipmentId", "clientPingId")');
+  });
+
+  it('still ends location sharing with a 409 for a queued fix sent after the trip finished', async () => {
+    const query = jest.fn().mockResolvedValue([]); // nothing inserted, no earlier duplicate either
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, { ...ping, clientPingId: 'ping-abcdef12' }))
+      .rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('orders the latest position and the trail by capture time, so a late fix cannot replace a newer one', async () => {
+    const query = jest.fn().mockResolvedValue([]);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+
+    await service.currentLocation('shp-1', adminUser);
+    await service.locationHistory('shp-1', adminUser);
+
+    for (const [sql] of query.mock.calls) {
+      expect(sql).toContain('order by coalesce("recordedAt", "createdAt") desc');
+    }
+  });
+
+  it('runs alert checks for a fresh fix but not for a delayed one drained from an offline queue', async () => {
+    const findUnique = jest.fn().mockResolvedValue(null);
+    const prisma = buildPrisma({
+      shipment: { findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', customerId: 'cust-1' }), findUnique },
+      $queryRawUnsafe: jest.fn()
+        .mockResolvedValueOnce([{ ...baseRow, recordedAt: new Date(Date.now() - 20 * 60_000) }])
+        .mockResolvedValueOnce([{ ...baseRow, recordedAt: new Date(Date.now() - 5_000) }]),
+    });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await service.recordLocation('shp-1', adminUser, { ...ping, recordedAt: new Date(Date.now() - 20 * 60_000).toISOString() });
+    expect(findUnique).not.toHaveBeenCalled();
+
+    await service.recordLocation('shp-1', adminUser, { ...ping, recordedAt: new Date(Date.now() - 5_000).toISOString() });
+    expect(findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates the additive columns once per process, and retries after a failed attempt', async () => {
+    const execute = jest.fn().mockRejectedValueOnce(new Error('ddl lock timeout')).mockResolvedValue(undefined);
+    const prisma = buildPrisma({ $executeRawUnsafe: execute, $queryRawUnsafe: jest.fn().mockResolvedValue([baseRow]) });
+    const service = new TrackingService(prisma, {} as NotificationsService);
+
+    await expect(service.recordLocation('shp-1', adminUser, ping)).rejects.toBeInstanceOf(InternalServerErrorException);
+    await service.recordLocation('shp-1', adminUser, ping);
+    const callsAfterRecovery = execute.mock.calls.length;
+    await service.recordLocation('shp-1', adminUser, ping);
+
+    expect(execute.mock.calls.length).toBe(callsAfterRecovery);
+    expect(execute.mock.calls.some(([sql]) => String(sql).includes('add column if not exists "clientPingId"'))).toBe(true);
+  });
+});

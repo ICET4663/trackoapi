@@ -10,7 +10,38 @@ type LocationInput = {
   heading?: number;
   speedKph?: number;
   note?: string;
+  // When the device actually captured this fix (ISO string or epoch ms). Lets a delayed,
+  // queued update keep its real time instead of looking brand new on arrival.
+  recordedAt?: string | number;
+  // Horizontal GPS accuracy in metres, as reported by the device.
+  accuracyM?: number;
+  // Device-generated id, unique per fix: a retried request after a network timeout
+  // returns the original ping instead of storing a duplicate.
+  clientPingId?: string;
 };
+
+type LocationRow = {
+  id: string;
+  shipmentId: string;
+  driverId: string | null;
+  latitude: number;
+  longitude: number;
+  heading: number | null;
+  speedKph: number | null;
+  note: string | null;
+  createdAt: Date;
+  recordedAt?: Date | null;
+  accuracyM?: number | null;
+};
+
+// A device clock a little ahead of ours is normal; far ahead is a bad clock or spoofing.
+const MAX_FUTURE_SKEW_MS = 2 * 60_000;
+// An offline queue is bounded; a fix older than this is no longer useful for a live trip.
+const MAX_PING_AGE_MS = 12 * 60 * 60_000;
+// Alerts compare recent positions, so only evaluate them for a fix that is itself recent.
+const ALERT_FRESHNESS_MS = 90_000;
+const EFFECTIVE_TIME = 'coalesce("recordedAt", "createdAt")';
+const LOCATION_COLUMNS = `"id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt", "recordedAt", "accuracyM"`;
 
 type DeliveryProofInput = {
   photoUrl?: string;
@@ -27,6 +58,31 @@ export class TrackingService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  // Additive, nullable columns created lazily (the same pattern used elsewhere in this
+  // codebase) so older rows and a rollback to the previous release both keep working -
+  // nothing reads these columns except this service. Memoized: this runs on every GPS
+  // ping, and re-issuing DDL each time would be wasted load. A failure clears the cache
+  // so the next request retries instead of leaving tracking broken.
+  private locationColumnsReady?: Promise<void>;
+
+  private ensureLocationColumns() {
+    this.locationColumnsReady ??= (async () => {
+      await this.prisma.$executeRawUnsafe('alter table "ShipmentLocationPing" add column if not exists "recordedAt" timestamp(3)');
+      await this.prisma.$executeRawUnsafe('alter table "ShipmentLocationPing" add column if not exists "accuracyM" double precision');
+      await this.prisma.$executeRawUnsafe('alter table "ShipmentLocationPing" add column if not exists "clientPingId" text');
+      await this.prisma.$executeRawUnsafe(
+        'create unique index if not exists "ShipmentLocationPing_shipment_clientPing_key" on "ShipmentLocationPing" ("shipmentId", "clientPingId") where "clientPingId" is not null',
+      );
+      await this.prisma.$executeRawUnsafe(
+        `create index if not exists "ShipmentLocationPing_shipment_effective_idx" on "ShipmentLocationPing" ("shipmentId", (coalesce("recordedAt", "createdAt")) desc)`,
+      );
+    })().catch((error) => {
+      this.locationColumnsReady = undefined;
+      throw error;
+    });
+    return this.locationColumnsReady;
+  }
 
   // Authentication alone isn't enough here - a logged-in customer must not be able to
   // read another customer's live GPS trail or delivery photos just by knowing/guessing a
@@ -55,23 +111,14 @@ export class TrackingService {
   async currentLocation(shipmentId: string, user: AuthUser) {
     shipmentId = await this.assertShipmentAccess(shipmentId, user);
     try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        {
-          id: string;
-          shipmentId: string;
-          driverId: string | null;
-          latitude: number;
-          longitude: number;
-          heading: number | null;
-          speedKph: number | null;
-          note: string | null;
-          createdAt: Date;
-        }[]
-      >(
-        `select "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"
+      await this.ensureLocationColumns();
+      // "Latest" means the newest fix by when it was CAPTURED, not when it arrived - a
+      // delayed update from an offline queue must never replace a newer position.
+      const rows = await this.prisma.$queryRawUnsafe<LocationRow[]>(
+        `select ${LOCATION_COLUMNS}
          from "ShipmentLocationPing"
          where "shipmentId" = $1
-         order by "createdAt" desc
+         order by ${EFFECTIVE_TIME} desc, "createdAt" desc
          limit 1`,
         shipmentId,
       );
@@ -92,23 +139,12 @@ export class TrackingService {
   async locationHistory(shipmentId: string, user: AuthUser) {
     shipmentId = await this.assertShipmentAccess(shipmentId, user);
     try {
-      const rows = await this.prisma.$queryRawUnsafe<
-        {
-          id: string;
-          shipmentId: string;
-          driverId: string | null;
-          latitude: number;
-          longitude: number;
-          heading: number | null;
-          speedKph: number | null;
-          note: string | null;
-          createdAt: Date;
-        }[]
-      >(
-        `select "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"
+      await this.ensureLocationColumns();
+      const rows = await this.prisma.$queryRawUnsafe<LocationRow[]>(
+        `select ${LOCATION_COLUMNS}
          from "ShipmentLocationPing"
          where "shipmentId" = $1
-         order by "createdAt" desc
+         order by ${EFFECTIVE_TIME} desc, "createdAt" desc
          limit 100`,
         shipmentId,
       );
@@ -144,30 +180,24 @@ export class TrackingService {
       throw new BadRequestException('A valid GPS latitude and longitude are required to record a location.');
     }
 
+    const { recordedAt, accuracyM, clientPingId } = this.parseCaptureMetadata(input);
+
     // This used to echo the submitted coordinates straight back as a fake "saved" ping
     // whenever the INSERT failed - so a driver's GPS trail could silently stop being
     // recorded (DB error, connection drop) while the driver-side reporter, the pickup
     // confirmation flow, and the trip-stage-advance flow all believed every ping saved
     // fine. A location that wasn't actually saved must surface as a real error.
-    let rows: {
-      id: string;
-      shipmentId: string;
-      driverId: string | null;
-      latitude: number;
-      longitude: number;
-      heading: number | null;
-      speedKph: number | null;
-      note: string | null;
-      createdAt: Date;
-    }[];
+    let rows: LocationRow[];
     try {
+      await this.ensureLocationColumns();
       rows = await this.prisma.$queryRawUnsafe(
-        `insert into "ShipmentLocationPing" ("id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note")
-         select $1, $2, $3, $4, $5, $6, $7, $8
+        `insert into "ShipmentLocationPing" ("id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "recordedAt", "accuracyM", "clientPingId")
+         select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
          from "Shipment" s
          where s."id" = $2
            and s."status" in ('DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION')
-         returning "id", "shipmentId", "driverId", "latitude", "longitude", "heading", "speedKph", "note", "createdAt"`,
+         on conflict ("shipmentId", "clientPingId") where "clientPingId" is not null do nothing
+         returning ${LOCATION_COLUMNS}`,
         // "id" has no database-level default (Prisma's @default(cuid()) is client-side
         // only) - this raw insert must generate its own, or every location ping ever
         // sent silently fails.
@@ -179,16 +209,73 @@ export class TrackingService {
         input.heading ?? null,
         input.speedKph ?? null,
         input.note ?? null,
+        recordedAt,
+        accuracyM,
+        clientPingId,
       );
+      if (!rows[0] && clientPingId) {
+        // Either a retry of a fix we already stored (return it - idempotent), or the
+        // shipment is no longer in a tracking stage (fall through to the 409 below).
+        rows = await this.prisma.$queryRawUnsafe(
+          `select ${LOCATION_COLUMNS} from "ShipmentLocationPing" where "shipmentId" = $1 and "clientPingId" = $2 limit 1`,
+          shipmentId,
+          clientPingId,
+        );
+      }
     } catch (error) {
       throw new InternalServerErrorException(`Could not record this location. Please try again: ${this.errorMessage(error)}`);
     }
 
     if (!rows[0]) throw new ConflictException('Location sharing has ended for this shipment.');
-    await this.detectTrackingAlerts(shipmentId).catch((error) => {
-      this.logger.warn(`Tracking alert evaluation failed for ${shipmentId}: ${this.errorMessage(error)}`);
-    });
+    // Alerts compare the most recent positions, so a delayed fix drained from an offline
+    // queue shouldn't trigger (or suppress) them - only evaluate for a recent one.
+    const capturedAt = rows[0].recordedAt ?? rows[0].createdAt;
+    if (Date.now() - capturedAt.getTime() <= ALERT_FRESHNESS_MS) {
+      await this.detectTrackingAlerts(shipmentId).catch((error) => {
+        this.logger.warn(`Tracking alert evaluation failed for ${shipmentId}: ${this.errorMessage(error)}`);
+      });
+    }
     return this.toLocation(rows[0]);
+  }
+
+  // Validates the optional capture metadata a driver app sends with a fix. Old app
+  // versions send none of it, in which case the server receipt time is used as before.
+  private parseCaptureMetadata(input: LocationInput) {
+    let recordedAt: Date | null = null;
+    if (input.recordedAt != null && input.recordedAt !== '') {
+      const parsed = new Date(input.recordedAt);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException('recordedAt must be a valid ISO timestamp.');
+      }
+      const age = Date.now() - parsed.getTime();
+      if (age < -MAX_FUTURE_SKEW_MS) {
+        throw new BadRequestException('recordedAt is in the future - check the device clock.');
+      }
+      if (age > MAX_PING_AGE_MS) {
+        throw new BadRequestException('This location is too old to record for a live trip.');
+      }
+      recordedAt = parsed;
+    }
+
+    let accuracyM: number | null = null;
+    if (input.accuracyM != null) {
+      const accuracy = Number(input.accuracyM);
+      if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100_000) {
+        throw new BadRequestException('accuracyM must be a number of metres between 0 and 100000.');
+      }
+      accuracyM = accuracy;
+    }
+
+    let clientPingId: string | null = null;
+    if (input.clientPingId != null && input.clientPingId !== '') {
+      const id = String(input.clientPingId);
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+        throw new BadRequestException('clientPingId must be 8-64 letters, digits, dashes or underscores.');
+      }
+      clientPingId = id;
+    }
+
+    return { recordedAt, accuracyM, clientPingId };
   }
 
   private async detectTrackingAlerts(shipmentId: string) {
@@ -505,17 +592,11 @@ export class TrackingService {
     }
   }
 
-  private toLocation(row: {
-    id: string;
-    shipmentId: string;
-    driverId: string | null;
-    latitude: number;
-    longitude: number;
-    heading: number | null;
-    speedKph: number | null;
-    note: string | null;
-    createdAt: Date;
-  }) {
+  private toLocation(row: LocationRow) {
+    // createdAt is the moment the position was CAPTURED (falling back to arrival time for
+    // older rows and app versions): existing clients already treat it as the freshness
+    // timestamp, so a delayed update keeps showing its true age. receivedAt is arrival.
+    const capturedAt = row.recordedAt ?? row.createdAt;
     return {
       id: row.id,
       shipmentId: row.shipmentId,
@@ -524,8 +605,10 @@ export class TrackingService {
       longitude: row.longitude,
       heading: row.heading ?? undefined,
       speedKph: row.speedKph ?? undefined,
+      accuracyM: row.accuracyM ?? undefined,
       note: row.note ?? undefined,
-      createdAt: row.createdAt.toISOString(),
+      createdAt: capturedAt.toISOString(),
+      receivedAt: row.createdAt.toISOString(),
     };
   }
 
