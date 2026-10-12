@@ -10,7 +10,7 @@
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
 export const LEGAL_SUPPORT_EMAIL = 'support@trako.com.ng';
-export const LEGAL_LAST_UPDATED = 'October 8, 2026';
+export const LEGAL_LAST_UPDATED = 'October 12, 2026';
 
 export type LegalSection = { heading: string; body: string };
 
@@ -42,7 +42,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Location data',
-        body: 'When a driver has an active accepted trip, the app shares the device location with Trako so the customer, the truck owner and dispatch can follow the shipment and so we can confirm pickup and delivery. Location is collected only while a trip is active and the app is in use (foreground); Trako does not collect background location. Customers and dispatch see the driver location only for shipments they are party to. A driver can stop sharing by ending or declining trips and by revoking the location permission in the device settings; doing so prevents accepting new trips. Location points attached to a completed shipment are retained with that shipment record.',
+        body: 'When a driver has an active accepted trip, the app shares the device location with Trako so the customer, the truck owner and dispatch can follow the shipment and so we can confirm pickup and delivery. Location is collected only during an active accepted trip. On Android, if the driver chooses "Allow all the time", sharing continues while the app is in the background or the screen is locked, with a persistent notification showing while it runs; on iOS, location is shared only while the app is open. Sharing stops when the trip ends. If the phone has no signal, recent location points are held on the device and sent when it reconnects. Customers and dispatch see the driver location only for shipments they are party to. A driver can stop sharing by ending or declining trips and by revoking the location permission in the device settings; doing so prevents accepting new trips. Location points for a completed or cancelled shipment are deleted automatically after the retention period Trako configures (30 days by default); points for a shipment under an open dispute are kept until the dispute is resolved.',
       },
       {
         heading: 'How data is used',

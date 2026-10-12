@@ -5,12 +5,24 @@ import { LEGAL_DOCUMENTS } from './legal-content';
 describe('LegalController', () => {
   const controller = new LegalController();
 
-  it('serves an HTML privacy policy that discloses foreground-only location use', () => {
+  // The policy must match what the apps actually do. Android keeps sharing during an active
+  // trip when the driver allows "all the time" access; iOS is foreground only. If a build
+  // ever collects location outside an active trip, or iOS gains background tracking, this
+  // wording (and the store privacy declarations) must change first.
+  it('serves an HTML privacy policy that discloses background location on Android, foreground-only on iOS, and the retention period', () => {
     const html = controller.privacy();
     expect(html).toContain('<!doctype html>');
     expect(html).toContain('<h1>Privacy Policy</h1>');
-    expect(html.toLowerCase()).toContain('foreground');
-    expect(html.toLowerCase()).toContain('does not collect background location');
+    const text = html.toLowerCase();
+    expect(text).toContain('only during an active accepted trip');
+    expect(text).toContain('on android');
+    expect(text).toContain('allow all the time');
+    expect(text).toContain('persistent notification');
+    expect(text).toContain('on ios, location is shared only while the app is open');
+    expect(text).toContain('deleted automatically after the retention period');
+    expect(text).toContain('open dispute');
+    expect(text).not.toContain('does not collect background location');
+    expect(text).not.toContain('retained with that shipment record');
   });
 
   it('names Smile ID and the identity fields used for automated KYC checks', () => {
