@@ -224,6 +224,9 @@ describe('TrackingService live tracking alerts', () => {
 
     await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0, speedKph: 35 });
 
+    expect(prisma.shipment.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({ locationPings: { orderBy: { createdAt: 'desc' }, take: 100 } }),
+    }));
     expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Possible route deviation',
       preferenceKey: 'liveTrackingAlerts',
