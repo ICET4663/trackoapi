@@ -14,7 +14,8 @@ describe('PortalService always queries with the real authenticated userId', () =
       profile: { fullName: 'Ada Lovelace' },
       customerShipments: [],
     });
-    const service = new PortalService({ user: { findUnique } } as unknown as PrismaService);
+    const findFirst = jest.fn().mockResolvedValue(null);
+    const service = new PortalService({ user: { findUnique }, shipment: { findFirst } } as unknown as PrismaService);
 
     const result = await service.customer('cust-1');
 
@@ -91,5 +92,49 @@ describe('PortalService always queries with the real authenticated userId', () =
       id: 'driver-1', assignedTruck: 'LAG-1', activeShipmentReference: 'TRK-1', canReceiveTruck: false,
     });
     expect(result.activeLoads[0]).toMatchObject({ reference: 'TRK-1', truck: 'LAG-1', driver: 'Driver One' });
+  });
+});
+
+describe('PortalService.customer() active shipment', () => {
+  const shipment = (overrides: Record<string, unknown>) => ({
+    id: 'shipment', reference: 'TRK-0', status: 'DRAFT', createdAt: new Date('2026-10-01T10:00:00Z'),
+    pickupLabel: 'Lagos', destinationLabel: 'Ibadan', cargoDescription: 'Rice', quantity: null, truckType: null,
+    cargoWeightKg: null, cargoVolumeM3: null, quotedPriceKobo: null,
+    pickupLatitude: null, pickupLongitude: null, destinationLatitude: null, destinationLongitude: null,
+    ...overrides,
+  });
+
+  it('prefers the shipment on the road over a newer draft, and includes its route ends', async () => {
+    const draft = shipment({ id: 'draft-1', reference: 'TRK-2', status: 'DRAFT', createdAt: new Date('2026-10-10T10:00:00Z') });
+    const live = shipment({
+      id: 'live-1', reference: 'TRK-1', status: 'IN_TRANSIT',
+      pickupLatitude: 6.5244, pickupLongitude: 3.3792, destinationLatitude: 7.3775, destinationLongitude: 3.947,
+    });
+    const findUnique = jest.fn().mockResolvedValue({ profile: null, customerShipments: [draft, live] });
+    const findFirst = jest.fn().mockResolvedValue(live);
+    const service = new PortalService({ user: { findUnique }, shipment: { findFirst } } as unknown as PrismaService);
+
+    const result = await service.customer('cust-1');
+
+    expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { customerId: 'cust-1', status: { in: expect.arrayContaining(['IN_TRANSIT', 'DRIVER_EN_ROUTE']) } },
+    }));
+    expect(result.activeShipment).toMatchObject({
+      id: 'live-1',
+      originCoordinates: { latitude: 6.5244, longitude: 3.3792 },
+      destinationCoordinates: { latitude: 7.3775, longitude: 3.947 },
+    });
+  });
+
+  it('falls back to the newest unfinished booking when no driver is on the road', async () => {
+    const draft = shipment({ id: 'draft-1', status: 'DRAFT' });
+    const findUnique = jest.fn().mockResolvedValue({ profile: null, customerShipments: [draft] });
+    const service = new PortalService({
+      user: { findUnique }, shipment: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService);
+
+    const result = await service.customer('cust-1');
+
+    expect(result.activeShipment).toMatchObject({ id: 'draft-1', originCoordinates: null, destinationCoordinates: null });
   });
 });

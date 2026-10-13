@@ -6,6 +6,13 @@ function money(kobo?: number | null) {
   return `N${new Intl.NumberFormat('en-NG').format(naira)}`;
 }
 
+// Statuses with a driver on the job - the ones the customer's Track tab can follow.
+const LIVE_SHIPMENT_STATUSES = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'] as const;
+
+function coordinates(latitude: number | null, longitude: number | null) {
+  return latitude != null && longitude != null ? { latitude, longitude } : null;
+}
+
 function initials(name: string) {
   return name
     .split(' ')
@@ -32,7 +39,16 @@ export class PortalService {
     });
 
     const shipments = user?.customerShipments ?? [];
-    const activeShipment = shipments.find((shipment) => !['COMPLETED', 'CANCELLED'].includes(shipment.status)) ?? null;
+    // A shipment with a driver on the road comes first: a newer draft or unpaid booking
+    // used to take its place, so the Track tab said nothing was in transit while a truck
+    // was moving. Queried separately so it is found even behind 10 newer bookings.
+    const liveShipment = user
+      ? await this.prisma.shipment.findFirst({
+          where: { customerId: userId, status: { in: [...LIVE_SHIPMENT_STATUSES] } },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
+    const activeShipment = liveShipment ?? shipments.find((shipment) => !['COMPLETED', 'CANCELLED'].includes(shipment.status)) ?? null;
 
     return {
       greetingName: user?.profile?.fullName?.split(' ')[0] ?? 'Customer',
@@ -260,6 +276,10 @@ export class PortalService {
     cargoWeightKg: number | null;
     cargoVolumeM3: number | null;
     quotedPriceKobo: number | null;
+    pickupLatitude?: number | null;
+    pickupLongitude?: number | null;
+    destinationLatitude?: number | null;
+    destinationLongitude?: number | null;
   }) {
     const month = shipment.createdAt.toLocaleString('en-US', { month: 'short' }).toUpperCase();
     return {
@@ -270,6 +290,8 @@ export class PortalService {
       month,
       origin: shipment.pickupLabel,
       destination: shipment.destinationLabel,
+      originCoordinates: coordinates(shipment.pickupLatitude ?? null, shipment.pickupLongitude ?? null),
+      destinationCoordinates: coordinates(shipment.destinationLatitude ?? null, shipment.destinationLongitude ?? null),
       commodity: shipment.cargoDescription,
       quantity: shipment.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
       weightTons: shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0,
