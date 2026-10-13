@@ -592,14 +592,21 @@ export class PaymentProviderService {
       }
       const wasPending = escrow.status === 'PENDING';
       if (!wasPending && !['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED'].includes(escrow.status)) return false;
+      // The webhook and the app's own verification often arrive together for one payment.
+      // Both can read PENDING above, so only the call whose update actually flips the row
+      // records the charge and notifies; the other would send every alert a second time.
+      let claimed = false;
       if (wasPending) {
-        await this.prisma.$queryRawUnsafe(
+        const claimedRows = await this.prisma.$queryRawUnsafe<Array<{ shipmentId: string }>>(
           `update "Escrow"
            set "status" = 'FUNDED'::"EscrowStatus",
                "updatedAt" = current_timestamp
-           where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"`,
+           where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"
+           returning "shipmentId"`,
           shipmentId,
         );
+        claimed = claimedRows.length > 0;
+        if (!claimed) return true;
       }
 
       // Paystack verification can be replayed safely. Besides making the callback
@@ -622,7 +629,7 @@ export class PaymentProviderService {
         });
       }
 
-      if (!wasPending) return true;
+      if (!claimed) return true;
       // Resolve/save the card *before* recording the charge, so the charge can be
       // attributed to it - the two used to run independently, leaving every BillingCharge
       // row with a NULL paymentMethodId and every "billing history for this card" screen

@@ -523,7 +523,7 @@ export class TrackingService {
         tone: 'SUCCESS',
         entity: 'DeliveryProof',
         entityId: rows[0].id,
-        actionUrl: `/shipments/${shipmentId}`,
+        actionUrl: `/customer/shipment/${shipmentId}`,
         preferenceKey: 'shipmentStatusUpdates',
       }),
       this.notifications.create({
@@ -533,7 +533,7 @@ export class TrackingService {
         tone: 'INFO',
         entity: 'Shipment',
         entityId: shipmentId,
-        actionUrl: `/dispatcher/shipments/${shipmentId}`,
+        actionUrl: `/dispatcher/shipment/${shipmentId}`,
         preferenceKey: 'shipmentStatusUpdates',
       }),
     ]).catch(() => null);

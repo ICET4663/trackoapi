@@ -173,7 +173,7 @@ export class ShipmentsService {
         tone: 'SUCCESS',
         entity: 'Shipment',
         entityId: shipment.id,
-        actionUrl: `/shipments/${shipment.id}`,
+        actionUrl: `/customer/shipment/${shipment.id}`,
         preferenceKey: 'shipmentStatusUpdates',
       });
 
@@ -335,6 +335,12 @@ export class ShipmentsService {
           shipment.id,
         );
       }
+      // Only a real change is announced: a retried or double-tapped update re-sends the
+      // current status, which is accepted as a no-op. And a customer who made the change
+      // themselves needs no alert about it.
+      if (shipment.status !== dto.status && (!isOwner || isOperations)) {
+        await this.notifyCustomerOfStatus(shipment.customerId, shipment.id, shipment.reference, dto.status).catch(() => null);
+      }
       return this.toShipmentRecord(updated);
     } catch (error) {
       // Used to fall back to a fake "updated" shipment reflecting the REQUESTED status
@@ -346,6 +352,34 @@ export class ShipmentsService {
       this.logger.error(`updateStatus(${id} -> ${dto.status}) failed: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
     }
+  }
+
+  // What the customer is told when the driver or operations move their shipment along.
+  // Statuses not listed here either notify through their own flow (proof of delivery,
+  // disputes, escrow release) or are internal steps the customer does not act on.
+  private readonly customerStatusAlerts: Partial<Record<ShipmentStatus, { title: string; body: string; tone: 'INFO' | 'SUCCESS' | 'WARNING' }>> = {
+    DRIVER_EN_ROUTE: { title: 'Driver on the way to pickup', body: 'Your driver is heading to the pickup address for {reference}.', tone: 'INFO' },
+    ARRIVED_PICKUP: { title: 'Driver at pickup', body: 'Your driver has arrived at the pickup address for {reference}.', tone: 'INFO' },
+    PICKED_UP: { title: 'Cargo picked up', body: 'Your cargo for {reference} has been loaded.', tone: 'SUCCESS' },
+    IN_TRANSIT: { title: 'Shipment on the road', body: '{reference} is on its way. You can follow the truck on the live map.', tone: 'INFO' },
+    ARRIVED_DESTINATION: { title: 'Driver at destination', body: 'Your driver has arrived at the destination for {reference}.', tone: 'INFO' },
+    DELIVERED: { title: 'Delivery awaiting your confirmation', body: '{reference} was marked delivered. Check the cargo, then confirm receipt in the app.', tone: 'SUCCESS' },
+    CANCELLED: { title: 'Shipment cancelled', body: '{reference} was cancelled. Contact support if you did not expect this.', tone: 'WARNING' },
+  };
+
+  private async notifyCustomerOfStatus(customerId: string, shipmentId: string, reference: string, status: ShipmentStatus) {
+    const alert = this.customerStatusAlerts[status];
+    if (!alert) return;
+    await this.notifications.create({
+      userId: customerId,
+      title: alert.title,
+      body: alert.body.replace('{reference}', reference),
+      tone: alert.tone,
+      entity: 'Shipment',
+      entityId: shipmentId,
+      actionUrl: `/customer/shipment/${shipmentId}`,
+      preferenceKey: 'shipmentStatusUpdates',
+    });
   }
 
   // Which statuses a shipment may move to next, and which relationship to the shipment
@@ -639,7 +673,7 @@ export class ShipmentsService {
       tone: 'INFO',
       entity: 'DriverAssignment',
       entityId: assignment.id,
-      actionUrl: `/driver/jobs/${assignment.id}`,
+      actionUrl: `/driver/load-offer?assignmentId=${assignment.id}`,
       preferenceKey: 'driverOffers',
     });
 
@@ -754,7 +788,7 @@ export class ShipmentsService {
         tone: action === 'ACCEPT' ? 'SUCCESS' : 'WARNING',
         entity: 'Shipment',
         entityId: updated.shipmentId,
-        actionUrl: `/shipments/${updated.shipmentId}`,
+        actionUrl: `/customer/shipment/${updated.shipmentId}`,
         preferenceKey: 'driverOffers',
       });
 
@@ -814,7 +848,7 @@ export class ShipmentsService {
         tone: 'INFO',
         entity: 'Shipment',
         entityId: assignment.shipmentId,
-        actionUrl: `/shipments/${assignment.shipmentId}`,
+        actionUrl: `/customer/shipment/${assignment.shipmentId}`,
         preferenceKey: 'driverOffers',
       }).catch(() => null);
 
@@ -882,7 +916,7 @@ export class ShipmentsService {
         tone: decision === 'ACCEPT' ? 'SUCCESS' : 'WARNING',
         entity: 'Shipment',
         entityId: assignment.shipmentId,
-        actionUrl: `/shipments/${assignment.shipmentId}`,
+        actionUrl: `/driver/load-offer?assignmentId=${assignment.id}`,
         preferenceKey: 'driverOffers',
       }).catch(() => null);
 
@@ -959,7 +993,7 @@ export class ShipmentsService {
         tone: 'INFO',
         entity: 'Shipment',
         entityId: updated.shipmentId,
-        actionUrl: `/shipments/${updated.shipmentId}`,
+        actionUrl: `/customer/shipment/${updated.shipmentId}`,
         preferenceKey: 'driverOffers',
       }).catch(() => null),
       this.prisma.auditLog.create({
@@ -1053,7 +1087,7 @@ export class ShipmentsService {
       tone: 'WARNING',
       entity: 'Shipment',
       entityId: shipmentId,
-      actionUrl: `/shipments/${shipmentId}`,
+      actionUrl: `/customer/shipment/${shipmentId}`,
       preferenceKey: 'driverOffers',
     }).catch(() => null);
     await this.offerNextEligibleDriver(shipmentId, [driverId]);

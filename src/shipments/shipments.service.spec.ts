@@ -950,3 +950,93 @@ describe('ShipmentsService driver counteroffers', () => {
     });
   });
 });
+
+// The driver's trip steps used to change the shipment silently: the customer heard
+// nothing between "driver accepted" and "proof of delivery submitted", including the
+// moment their cargo was picked up or the delivery was waiting for their confirmation.
+describe('ShipmentsService.updateStatus tells the customer about trip progress', () => {
+  function buildService(currentStatus: string) {
+    const notificationCreate = jest.fn().mockResolvedValue({ id: 'notification-1' });
+    const prisma = {
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'shp-1',
+          reference: 'TRK-42',
+          customerId: 'cust-1',
+          status: currentStatus,
+          assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }],
+        }),
+        update: jest.fn().mockImplementation(({ data }: { data: { status: string } }) => Promise.resolve({
+          id: 'shp-1', reference: 'TRK-42', customerId: 'cust-1', status: data.status, timeline: [],
+        })),
+      },
+      // Cancelling releases any offers queued behind this trip.
+      driverAssignment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+    } as unknown as PrismaService;
+    const notifications = { create: notificationCreate } as unknown as NotificationsService;
+    const service = new ShipmentsService(prisma, notifications, {} as MapsProviderService);
+    return { service, notificationCreate };
+  }
+
+  it('alerts the customer when the driver picks up the cargo, linking to their shipment page', async () => {
+    const { service, notificationCreate } = buildService('ARRIVED_PICKUP');
+
+    await service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'PICKED_UP' } as never);
+
+    expect(notificationCreate).toHaveBeenCalledTimes(1);
+    expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1',
+      title: 'Cargo picked up',
+      body: 'Your cargo for TRK-42 has been loaded.',
+      actionUrl: '/customer/shipment/shp-1',
+      preferenceKey: 'shipmentStatusUpdates',
+    }));
+  });
+
+  it('asks the customer to confirm receipt once the shipment is marked delivered', async () => {
+    const { service, notificationCreate } = buildService('ARRIVED_DESTINATION');
+
+    await service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'DELIVERED' } as never);
+
+    expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1', title: 'Delivery awaiting your confirmation',
+    }));
+  });
+
+  it('does not alert again when a retried update repeats the current status', async () => {
+    const { service, notificationCreate } = buildService('PICKED_UP');
+
+    await service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'PICKED_UP' } as never);
+
+    expect(notificationCreate).not.toHaveBeenCalled();
+  });
+
+  it('does not alert the customer about a change they made themselves', async () => {
+    const { service, notificationCreate } = buildService('QUOTED');
+
+    await service.updateStatus('shp-1', 'cust-1', 'CUSTOMER', { status: 'CANCELLED' } as never);
+
+    expect(notificationCreate).not.toHaveBeenCalled();
+  });
+
+  it('alerts the customer when operations cancel their shipment', async () => {
+    const { service, notificationCreate } = buildService('ESCROW_FUNDED');
+
+    await service.updateStatus('shp-1', 'dispatcher-1', 'DISPATCHER', { status: 'CANCELLED' } as never);
+
+    expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1', title: 'Shipment cancelled', tone: 'WARNING',
+    }));
+  });
+
+  it('a failed alert never fails the status update itself', async () => {
+    const { service, notificationCreate } = buildService('ARRIVED_PICKUP');
+    notificationCreate.mockRejectedValue(new Error('push service down'));
+
+    await expect(service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'PICKED_UP' } as never))
+      .resolves.toEqual(expect.objectContaining({ status: 'PICKED_UP' }));
+  });
+});

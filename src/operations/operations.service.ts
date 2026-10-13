@@ -1011,7 +1011,7 @@ export class OperationsService {
         tone: status === 'DELIVERED' || status === 'COMPLETED' ? 'SUCCESS' : 'INFO',
         entity: 'Shipment',
         entityId: shipmentId,
-        actionUrl: `/shipments/${shipmentId}`,
+        actionUrl: `/customer/shipment/${shipmentId}`,
         preferenceKey: 'shipmentStatusUpdates',
       });
     } catch (error) {

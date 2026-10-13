@@ -265,7 +265,9 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
     },
   });
 
-  function buildService() {
+  // `claimsEscrow: false` simulates a concurrent confirmation (webhook vs. verify)
+  // that already flipped the escrow from PENDING between our read and our update.
+  function buildService({ claimsEscrow = true } = {}) {
     const config = {
       get: jest.fn((key: string) => (key === 'PAYSTACK_SECRET_KEY' ? secretKey : undefined)),
     } as unknown as ConfigService;
@@ -276,6 +278,9 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
       $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
         if (sql.includes('select e."amount", e."currency"')) {
           return Promise.resolve([{ amount: 500000, currency: 'NGN', status: 'PENDING', shipmentStatus: 'PENDING_PAYMENT' }]);
+        }
+        if (sql.includes(`set "status" = 'FUNDED'`)) {
+          return Promise.resolve(claimsEscrow ? [{ shipmentId: 'ship-1' }] : []);
         }
         return Promise.resolve([]);
       }),
@@ -296,10 +301,35 @@ describe('PaymentProviderService charge.success attributes the BillingCharge to 
         create: paymentMethodCreate,
       },
     } as unknown as PrismaService;
-    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const notificationCreate = jest.fn().mockResolvedValue({ id: 'notif-1' });
+    const notifications = { create: notificationCreate } as unknown as NotificationsService;
     const service = new PaymentProviderService(config, prisma, notifications);
-    return { service, executeRawUnsafe, paymentMethodCreate, shipmentUpdate };
+    return { service, executeRawUnsafe, paymentMethodCreate, shipmentUpdate, notificationCreate };
   }
+
+  it('notifies once: a confirmation that loses the race to fund escrow sends no alerts and records no charge', async () => {
+    const { service, executeRawUnsafe, shipmentUpdate, notificationCreate } = buildService({ claimsEscrow: false });
+    const signature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
+
+    const result = await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), signature, rawBody);
+
+    // The escrow is funded (by the other call), so this is still a success...
+    expect(result.escrowUpdated).toBe(true);
+    // ...but the winning call owns the timeline entry, the charge and the alerts.
+    expect(shipmentUpdate).not.toHaveBeenCalled();
+    expect(executeRawUnsafe).not.toHaveBeenCalledWith(expect.stringContaining('"BillingCharge"'), expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(notificationCreate).not.toHaveBeenCalled();
+  });
+
+  it('the confirmation that funds escrow notifies the customer, dispatch and admin', async () => {
+    const { service, notificationCreate } = buildService();
+    const signature = createHmac('sha512', secretKey).update(rawBody).digest('hex');
+
+    await service.recordWebhook('paystack', 'charge.success', JSON.parse(rawBody), signature, rawBody);
+
+    expect(notificationCreate).toHaveBeenCalledTimes(3);
+    expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cust-1', title: 'Escrow funded' }));
+  });
 
   it('saves the card, then inserts the BillingCharge tagged with that card\'s id', async () => {
     const { service, executeRawUnsafe, paymentMethodCreate, shipmentUpdate } = buildService();
