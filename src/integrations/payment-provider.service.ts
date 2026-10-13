@@ -280,6 +280,18 @@ export class PaymentProviderService {
               actionUrl: '/admin/finance',
               preferenceKey: 'escrowPayments',
             }).catch(() => null);
+            // The driver was already told this withdrawal was paid.
+            await this.notifications.create({
+              userId: payout.driverId,
+              title: 'Withdrawal delayed',
+              body: `Your ${this.formatMoney(payout.amountKobo)} withdrawal did not reach your bank. Our finance team is looking into it; you do not need to request it again.`,
+              tone: 'WARNING',
+              entity: 'Payout',
+              entityId: payout.id,
+              actionUrl: '/driver/earnings',
+              preferenceKey: 'escrowPayments',
+              onceOnly: true,
+            }).catch(() => null);
           }
         }
       } catch (error) {
@@ -366,6 +378,10 @@ export class PaymentProviderService {
     const escrowUpdated = verified && payment.shipmentId
       ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference, payment.authorization)
       : false;
+    if (!verified && response.ok && payment.shipmentId) {
+      await this.notifyUnsuccessfulPayment(payment.shipmentId, payload.data?.reference ?? reference, payload.data?.status, actor)
+        .catch(() => null);
+    }
 
     try {
       await this.prisma.auditLog.create({
@@ -394,6 +410,45 @@ export class PaymentProviderService {
           : 'Payment verified, but escrow could not be updated automatically.'
         : this.unverifiedMessage(payload.data?.status),
     };
+  }
+
+  // A payment Paystack has settled as unsuccessful leaves the shipment unpaid, and the
+  // customer may have closed checkout without seeing why. Tell them once per payment
+  // reference (they can re-check it any number of times). Pending payments are not
+  // final, and a shipment that was paid by a later attempt needs no alert.
+  private async notifyUnsuccessfulPayment(
+    shipmentId: string,
+    reference: string,
+    transactionStatus: string | undefined,
+    actor?: PaymentActor,
+  ) {
+    const alerts: Record<string, { title: string; body: string }> = {
+      failed: { title: 'Payment declined', body: 'Paystack declined the payment for {reference}. Try another card or payment method to book your truck.' },
+      abandoned: { title: 'Payment not completed', body: 'The payment for {reference} was not completed. Pay again to fund escrow and book your truck.' },
+      reversed: { title: 'Payment reversed', body: 'The payment for {reference} was reversed, so escrow was not funded. Pay again to continue.' },
+    };
+    const alert = transactionStatus ? alerts[transactionStatus] : undefined;
+    if (!alert) return;
+
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { customerId: true, reference: true, status: true },
+    });
+    if (!shipment || !['DRAFT', 'QUOTED', 'PENDING_PAYMENT'].includes(String(shipment.status))) return;
+    // Only the shipment's own customer (or operations) checking it may trigger the alert.
+    if (actor && actor.sub !== shipment.customerId && !['ADMIN', 'DISPATCHER'].includes(actor.role)) return;
+
+    await this.notifications.create({
+      userId: shipment.customerId,
+      title: alert.title,
+      body: alert.body.replace('{reference}', shipment.reference),
+      tone: 'WARNING',
+      entity: 'Escrow',
+      entityId: reference,
+      actionUrl: `/customer/escrow?shipmentId=${encodeURIComponent(shipmentId)}`,
+      preferenceKey: 'escrowPayments',
+      onceOnly: true,
+    });
   }
 
   // Paystack's own `message` is "Verification successful" even for an abandoned

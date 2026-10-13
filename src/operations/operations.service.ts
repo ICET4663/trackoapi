@@ -1032,6 +1032,47 @@ export class OperationsService {
     };
   }
 
+  // A dispute freezes the payment, so the customer and the assigned driver both need to
+  // know - except whichever of them opened it.
+  private async notifyDisputeParties(shipmentId: string, reference: string, disputeId: string, openedBy: string) {
+    const [parties] = await this.prisma.$queryRawUnsafe<Array<{ customerId: string; driverId: string | null }>>(
+      `select s."customerId",
+              (select da."driverId" from "DriverAssignment" da
+               where da."shipmentId" = s."id" and da."status" = 'ACCEPTED'
+               order by da."acceptedAt" desc nulls last limit 1) as "driverId"
+       from "Shipment" s where s."id" = $1`,
+      shipmentId,
+    );
+    if (!parties) return;
+    const sends: Promise<unknown>[] = [];
+    if (parties.customerId !== openedBy) {
+      sends.push(this.notifications.create({
+        userId: parties.customerId,
+        title: 'Dispute opened on your shipment',
+        body: `A dispute was opened on ${reference}. The payment stays in escrow until Trako reviews it.`,
+        tone: 'WARNING',
+        entity: 'Dispute',
+        entityId: disputeId,
+        actionUrl: `/customer/shipment/${shipmentId}`,
+        preferenceKey: 'escrowPayments',
+      }));
+    }
+    if (parties.driverId && parties.driverId !== openedBy) {
+      sends.push(this.notifications.create({
+        userId: parties.driverId,
+        role: 'DRIVER',
+        title: 'Dispute opened on your delivery',
+        body: `A dispute was opened on ${reference}. Payment for it is on hold until Trako reviews it.`,
+        tone: 'WARNING',
+        entity: 'Dispute',
+        entityId: disputeId,
+        actionUrl: '/driver/earnings',
+        preferenceKey: 'escrowPayments',
+      }));
+    }
+    await Promise.all(sends);
+  }
+
   async createDispute(body: Record<string, unknown>, actor: OperationActor) {
     const id = `DSP-${Date.now()}`;
     const shipmentIdentifier = body.shipmentId ? String(body.shipmentId) : undefined;
@@ -1124,6 +1165,7 @@ export class OperationsService {
         actionUrl: `/dispatcher/disputes`,
         preferenceKey: 'escrowPayments',
       });
+      if (shipment) await this.notifyDisputeParties(shipment.id, shipment.reference, id, actor.sub);
     } catch (error) {
       this.logger.error(`createDispute(${id}) saved but follow-up steps failed: ${this.errorMessage(error)}`);
     }

@@ -87,6 +87,14 @@ type AssignmentRecordInput = {
   } | null;
 };
 
+type ShipmentPartyAlert = {
+  title: string;
+  body: string;
+  tone: 'INFO' | 'SUCCESS' | 'WARNING' | 'DANGER';
+  entity: string;
+  preferenceKey: 'shipmentStatusUpdates' | 'liveTrackingAlerts' | 'driverOffers' | 'escrowPayments';
+};
+
 @Injectable()
 export class ShipmentsService {
   private readonly logger = new Logger(ShipmentsService.name);
@@ -340,6 +348,18 @@ export class ShipmentsService {
       // themselves needs no alert about it.
       if (shipment.status !== dto.status && (!isOwner || isOperations)) {
         await this.notifyCustomerOfStatus(shipment.customerId, shipment.id, shipment.reference, dto.status).catch(() => null);
+      }
+      // A driver whose trip is cancelled under them would otherwise keep driving.
+      if (shipment.status !== dto.status && dto.status === 'CANCELLED') {
+        await this.notifyShipmentParties(shipment.id, {
+          driver: {
+            title: 'Shipment cancelled',
+            body: '{reference} was cancelled. You no longer need to deliver it.',
+            tone: 'WARNING',
+            entity: 'Shipment',
+            preferenceKey: 'driverOffers',
+          },
+        }, { skipUserId: userId });
       }
       return this.toShipmentRecord(updated);
     } catch (error) {
@@ -1449,6 +1469,15 @@ export class ShipmentsService {
     // internally - supplementary to the release itself, which already succeeded above.
     await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
     await this.notifyAssignedDriverOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
+    await this.notifyShipmentParties(shipmentId, {
+      customer: {
+        title: 'Shipment completed',
+        body: 'Payment for {reference} has been released to your driver. Thank you for shipping with Trako.',
+        tone: 'SUCCESS',
+        entity: 'Escrow',
+        preferenceKey: 'escrowPayments',
+      },
+    });
     return releasedEscrow;
   }
 
@@ -1592,19 +1621,47 @@ export class ShipmentsService {
       throw new ForbiddenException('Only platform operations can refund escrow.');
     }
 
+    // A refund used to overwrite any escrow state, including one already released to
+    // the driver, leaving the records saying both parties had the same money. Released
+    // money cannot be refunded from here, and refunding twice is a no-op.
+    const escrow = await this.findEscrowOrThrow(shipmentId);
+    if (escrow.status === 'RELEASED') {
+      throw new BadRequestException('Escrow was already released to the driver and cannot be refunded here.');
+    }
+    if (escrow.status === 'REFUNDED') return this.toEscrowRecord(escrow);
+
     const rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
       `update "Escrow"
        set "status" = 'REFUNDED'::"EscrowStatus",
            "updatedAt" = current_timestamp
        where "shipmentId" = $1
+         and "status" not in ('RELEASED'::"EscrowStatus", 'REFUNDED'::"EscrowStatus")
        returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
                  "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
       shipmentId,
     );
+    // Released or refunded by someone else in the meantime.
+    if (!rows[0]) return this.getEscrow(shipmentId);
 
     await this.updateShipmentTimeline(shipmentId, 'CANCELLED', note ?? 'Escrow refunded by platform operations.');
-    if (rows[0]) return this.toEscrowRecord(rows[0]);
-    return this.getEscrow(shipmentId);
+    const amount = this.formatMoney(rows[0].amount, rows[0].currency);
+    await this.notifyShipmentParties(shipmentId, {
+      customer: {
+        title: 'Refund approved',
+        body: `Trako approved a refund of ${amount} for {reference}. Contact support with this reference if it has not reached you.`,
+        tone: 'INFO',
+        entity: 'Escrow',
+        preferenceKey: 'escrowPayments',
+      },
+      driver: {
+        title: 'Shipment cancelled',
+        body: '{reference} was cancelled and the customer refunded. You no longer need to deliver it.',
+        tone: 'WARNING',
+        entity: 'Shipment',
+        preferenceKey: 'driverOffers',
+      },
+    });
+    return this.toEscrowRecord(rows[0]);
   }
 
   async confirmEscrowCheck(shipmentId: string, check: string, actorRole: UserRole) {
@@ -1627,10 +1684,16 @@ export class ShipmentsService {
     // the shipment marked ready for payout, even though nothing was actually confirmed
     // in the database. A confirmation that didn't really happen must surface as a real
     // error, the same way releaseEscrow() itself already does.
-    let rows: EscrowRow[];
+    let rows: Array<EscrowRow & { previousStatus: string | null; wasConfirmed: boolean | null }>;
     try {
-      rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
-        `update "Escrow"
+      // The CTE reads the row as it was before this update, so the alerts below fire
+      // only for a confirmation or a ready-to-release state that is actually new.
+      rows = await this.prisma.$queryRawUnsafe<Array<EscrowRow & { previousStatus: string | null; wasConfirmed: boolean | null }>>(
+        `with previous as (
+           select "status"::text as "previousStatus", "${check}" as "wasConfirmed"
+           from "Escrow" where "shipmentId" = $1
+         )
+         update "Escrow"
          set "${check}" = true,
              "status" = case
                when "status" = 'DISPUTED'::"EscrowStatus" then "status"
@@ -1647,7 +1710,9 @@ export class ShipmentsService {
              "updatedAt" = current_timestamp
          where "shipmentId" = $1
          returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
-                   "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
+                   "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved",
+                   (select "previousStatus" from previous) as "previousStatus",
+                   (select "wasConfirmed" from previous) as "wasConfirmed"`,
         shipmentId,
         check,
       );
@@ -1656,7 +1721,37 @@ export class ShipmentsService {
     }
 
     if (!rows[0]) throw new NotFoundException('Escrow record not found for this shipment.');
-    return this.toEscrowRecord(rows[0]);
+    const row = rows[0];
+
+    if (check === 'customerDeliveryConfirmed' && !row.wasConfirmed) {
+      await this.notifyShipmentParties(shipmentId, {
+        driver: {
+          title: 'Customer confirmed delivery',
+          body: 'The customer confirmed they received {reference}. Payment is released once the remaining checks clear.',
+          tone: 'SUCCESS',
+          entity: 'Shipment',
+          preferenceKey: 'shipmentStatusUpdates',
+        },
+        dispatcher: {
+          title: 'Customer confirmed delivery',
+          body: 'The customer confirmed receipt of {reference}.',
+          tone: 'INFO',
+          entity: 'Shipment',
+          preferenceKey: 'shipmentStatusUpdates',
+        },
+      });
+    }
+    if (row.status === 'RELEASE_READY' && row.previousStatus !== 'RELEASE_READY') {
+      const readyAlert: ShipmentPartyAlert = {
+        title: 'Escrow ready to release',
+        body: 'Every release check for {reference} is complete. Release the payment to the driver.',
+        tone: 'SUCCESS',
+        entity: 'Escrow',
+        preferenceKey: 'escrowPayments',
+      };
+      await this.notifyShipmentParties(shipmentId, { dispatcher: readyAlert, admin: readyAlert });
+    }
+    return this.toEscrowRecord(row);
   }
 
   private assertEscrowCheckRole(check: string, actorRole: UserRole) {
@@ -1714,6 +1809,53 @@ export class ShipmentsService {
     );
     if (!rows[0]) throw new NotFoundException('Escrow record not found.');
     return rows[0];
+  }
+
+  // One alert per party of a shipment, each linking to that party's own screen for it.
+  // `{reference}` in a body becomes the shipment reference. Never throws: the action
+  // that triggered the alerts has already succeeded.
+  private async notifyShipmentParties(
+    shipmentId: string,
+    alerts: Partial<Record<'customer' | 'driver' | 'dispatcher' | 'admin', ShipmentPartyAlert>>,
+    options: { skipUserId?: string } = {},
+  ) {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ customerId: string; reference: string; driverId: string | null }>>(
+        `select s."customerId", s."reference",
+                (select da."driverId" from "DriverAssignment" da
+                 where da."shipmentId" = s."id" and da."status" = 'ACCEPTED'
+                 order by da."acceptedAt" desc nulls last, da."offeredAt" desc
+                 limit 1) as "driverId"
+         from "Shipment" s where s."id" = $1`,
+        shipmentId,
+      );
+      const shipment = rows[0];
+      if (!shipment) return;
+      const send = (alert: ShipmentPartyAlert, target: { userId?: string; role?: UserRole }, actionUrl: string) =>
+        this.notifications.create({
+          ...target,
+          title: alert.title,
+          body: alert.body.replace('{reference}', shipment.reference),
+          tone: alert.tone,
+          entity: alert.entity,
+          entityId: shipmentId,
+          actionUrl,
+          preferenceKey: alert.preferenceKey,
+        }).catch(() => null);
+
+      const sends: Promise<unknown>[] = [];
+      if (alerts.customer && shipment.customerId !== options.skipUserId) {
+        sends.push(send(alerts.customer, { userId: shipment.customerId }, `/customer/shipment/${shipmentId}`));
+      }
+      if (alerts.driver && shipment.driverId && shipment.driverId !== options.skipUserId) {
+        sends.push(send(alerts.driver, { userId: shipment.driverId, role: 'DRIVER' }, '/driver/jobs'));
+      }
+      if (alerts.dispatcher) sends.push(send(alerts.dispatcher, { role: 'DISPATCHER' }, `/dispatcher/shipment/${shipmentId}`));
+      if (alerts.admin) sends.push(send(alerts.admin, { role: 'ADMIN' }, `/admin/shipment/${shipmentId}`));
+      await Promise.all(sends);
+    } catch (error) {
+      this.logger.warn(`Could not notify the parties of shipment ${shipmentId}: ${this.errorMessage(error)}`);
+    }
   }
 
   private async notifyAssignedDriverOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {

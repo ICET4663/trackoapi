@@ -22,6 +22,9 @@ type NotificationInput = {
   templateKey?: string;
   vars?: Record<string, string | number>;
   preferenceKey?: NotificationPreferenceKey;
+  // Send at most once per recipient, entity, entityId and title. For events that can be
+  // reported repeatedly (a customer re-checking a failed payment, a webhook replayed).
+  onceOnly?: boolean;
 };
 
 type NotificationRow = {
@@ -74,6 +77,7 @@ export class NotificationsService {
   // failure taking down the primary action), but a failure now returns null instead of
   // fake data. Log the failure so it's actually visible instead of invisible either way.
   async create(input: NotificationInput) {
+    if (input.onceOnly && await this.alreadySent(input)) return null;
     const body = await this.resolveBody(input).catch(() => input.body);
     let rows: NotificationRow[];
     try {
@@ -109,6 +113,30 @@ export class NotificationsService {
       this.logger.error(`Push delivery failed for notification ${record.id}: ${this.errorMessage(error)}`);
     });
     return record;
+  }
+
+  private async alreadySent(input: NotificationInput) {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
+        `select "id" from "Notification"
+         where "userId" is not distinct from $1
+           and "role" is not distinct from cast($2 as "UserRole")
+           and "entity" is not distinct from $3
+           and "entityId" is not distinct from $4
+           and "title" = $5
+         limit 1`,
+        input.userId && !input.userId.startsWith('preview-') ? input.userId : null,
+        input.role ?? null,
+        input.entity ?? null,
+        input.entityId ?? null,
+        input.title,
+      );
+      return rows.length > 0;
+    } catch (error) {
+      // Better a possible repeat than a lost alert.
+      this.logger.warn(`Could not check for an earlier "${input.title}" notification: ${this.errorMessage(error)}`);
+      return false;
+    }
   }
 
   // Expo's push service needs no API key - just the recipient's Expo push token(s), sent
