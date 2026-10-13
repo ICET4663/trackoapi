@@ -280,3 +280,34 @@ describe('DataService driver workflow collections', () => {
     ]);
   });
 });
+
+describe('DataService route ends for trip maps', () => {
+  const shipment = {
+    id: 'ship-1', reference: 'TRK-1', status: 'IN_TRANSIT', createdAt: new Date('2026-10-13T10:00:00Z'),
+    pickupLabel: 'Ikeja City Mall', pickupAddress: 'Obafemi Awolowo Wy, Alausa, Lagos',
+    destinationLabel: 'Bodija Market', destinationAddress: 'Bodija Market, Ibadan, Oyo',
+    pickupLatitude: 6.6144, pickupLongitude: 3.3581, destinationLatitude: null, destinationLongitude: null,
+    cargoDescription: 'Rice', quantity: null, cargoWeightKg: null, cargoVolumeM3: null, truckType: null,
+    distanceKm: null, durationMinutes: null, quotedPriceKobo: null, mediaAssets: [],
+  };
+
+  it('gives the customer the full addresses and the map point of each end that has one', async () => {
+    const prisma = { shipment: { findMany: jest.fn().mockResolvedValue([shipment]) } } as unknown as PrismaService;
+    const [result] = await new DataService(prisma).list('customer-shipments', 'cust-1', 'CUSTOMER') as Array<Record<string, unknown>>;
+
+    expect(result).toMatchObject({
+      originAddress: 'Obafemi Awolowo Wy, Alausa, Lagos',
+      destinationAddress: 'Bodija Market, Ibadan, Oyo',
+      originCoordinates: { latitude: 6.6144, longitude: 3.3581 },
+      destinationCoordinates: null,
+    });
+  });
+
+  it('gives the driver the map point of each end of an active trip', async () => {
+    const assignment = { id: 'assign-1', status: 'ACCEPTED', offeredAt: new Date(), shipment, vehicle: null, proposedPriceKobo: null, proposedNote: null, proposedAt: null };
+    const prisma = { driverAssignment: { findMany: jest.fn().mockResolvedValue([assignment]) } } as unknown as PrismaService;
+    const [result] = await new DataService(prisma).list('active-trips', 'driver-1', 'DRIVER') as Array<Record<string, unknown>>;
+
+    expect(result).toMatchObject({ originCoordinates: { latitude: 6.6144, longitude: 3.3581 }, destinationCoordinates: null });
+  });
+});

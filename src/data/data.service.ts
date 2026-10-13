@@ -84,6 +84,10 @@ export class DataService {
             month: shipment.createdAt.toLocaleString('en-US', { month: 'short' }).toUpperCase(),
             origin: shipment.pickupLabel,
             destination: shipment.destinationLabel,
+            originAddress: shipment.pickupAddress,
+            destinationAddress: shipment.destinationAddress,
+            originCoordinates: this.coordinates(shipment.pickupLatitude, shipment.pickupLongitude),
+            destinationCoordinates: this.coordinates(shipment.destinationLatitude, shipment.destinationLongitude),
             commodity: shipment.cargoDescription,
             quantity: shipment.quantity ?? (shipment.cargoWeightKg ? `${shipment.cargoWeightKg} kg` : '1 truckload'),
             weightTons: shipment.cargoWeightKg ? shipment.cargoWeightKg / 1000 : 0,
@@ -177,6 +181,8 @@ export class DataService {
             shipmentId: assignment.shipment.reference,
             origin: assignment.shipment.pickupLabel,
             destination: assignment.shipment.destinationLabel,
+            originCoordinates: this.coordinates(assignment.shipment.pickupLatitude, assignment.shipment.pickupLongitude),
+            destinationCoordinates: this.coordinates(assignment.shipment.destinationLatitude, assignment.shipment.destinationLongitude),
             cargo: assignment.shipment.cargoDescription,
             price: this.formatMoney(assignment.shipment.quotedPriceKobo),
             quotedPriceKobo: assignment.shipment.quotedPriceKobo,
@@ -670,6 +676,11 @@ export class DataService {
   private formatMoney(amountKobo?: number | null) {
     if (!amountKobo) return 'N0';
     return `N${Math.round(amountKobo / 100).toLocaleString('en-US')}`;
+  }
+
+  // Map point for a pickup/destination; null when the address was typed rather than picked.
+  private coordinates(latitude: number | null, longitude: number | null) {
+    return latitude != null && longitude != null ? { latitude, longitude } : null;
   }
 
   // Owners type free text like "30 tons" or "12000 kg" into the capacity field - pull
