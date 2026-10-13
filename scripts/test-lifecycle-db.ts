@@ -246,10 +246,10 @@ async function main() {
     expectValue(await countLocationPings(prisma, shipment.id) === pingsBeforeDelivery,
       'post-delivery GPS attempt did not create a ping');
 
-    await shipments.confirmEscrowCheck(shipment.id, 'arrivalConfirmed', 'DRIVER');
-    await shipments.confirmEscrowCheck(shipment.id, 'customerDeliveryConfirmed', 'CUSTOMER');
-    await shipments.confirmEscrowCheck(shipment.id, 'disputeWindowClear', 'CUSTOMER');
-    const ready = await shipments.confirmEscrowCheck(shipment.id, 'platformApproved', 'ADMIN');
+    await shipments.confirmEscrowCheck(shipment.id, 'arrivalConfirmed', 'DRIVER', driver.id);
+    await shipments.confirmEscrowCheck(shipment.id, 'customerDeliveryConfirmed', 'CUSTOMER', customer.id);
+    await shipments.confirmEscrowCheck(shipment.id, 'disputeWindowClear', 'CUSTOMER', customer.id);
+    const ready = await shipments.confirmEscrowCheck(shipment.id, 'platformApproved', 'ADMIN', 'lifecycle-admin');
     expectValue(ready.status === 'RELEASE_READY', 'escrow reached release-ready state');
     const released = await shipments.releaseEscrow(shipment.id, 'ADMIN', 'Lifecycle test release.');
     expectValue(released.status === 'RELEASED', 'escrow was released');

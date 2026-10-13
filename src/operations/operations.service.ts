@@ -1,8 +1,9 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
+import { customerStatusAlert, isForwardTripStep } from '../shipments/trip-status-rules';
 
 type OperationActor = {
   sub: string;
@@ -973,12 +974,30 @@ export class OperationsService {
     }
     const status = body.status ?? 'IN_TRANSIT';
 
+    // This route used to write whatever status it was sent, so an assigned driver could
+    // rewind a trip or jump it straight to COMPLETED or a payment state. Drivers may only
+    // move forward along their own trip steps; operations staff also get the general
+    // status rules (cancellation, disputes, completion).
+    const current = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { id: true, reference: true, status: true, updatedAt: true },
+    });
+    if (!current) throw new NotFoundException('Shipment not found.');
+    // A retried or double-tapped step changes nothing and tells no one again.
+    if (current.status === status) {
+      return { id: current.id, reference: current.reference, status: current.status, updatedAt: current.updatedAt.toISOString() };
+    }
+    const allowed = isForwardTripStep(current.status, status)
+      || (actor.role !== 'DRIVER' && this.shipments.isAllowedTransition(current.status, status));
+    if (!allowed) throw new BadRequestException(`Shipment cannot move from ${current.status} to ${status}.`);
+
     // The status update is the actual point of this call: if it fails, the caller must
     // see a real error rather than a fabricated "success" that was never persisted.
+    // Matching on the status just read means a concurrent update cannot be overwritten.
     let shipment;
     try {
       shipment = await this.prisma.shipment.update({
-        where: { id: shipmentId },
+        where: { id: shipmentId, status: current.status },
         data: {
           status,
           timeline: {
@@ -991,6 +1010,9 @@ export class OperationsService {
         include: { timeline: { orderBy: { createdAt: 'asc' } } },
       });
     } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new ConflictException('This shipment was just updated. Refresh it and try again.');
+      }
       this.logger.error(`progressTrip(${shipmentId}) failed to persist status ${status}: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException('Could not update shipment progress. Please try again.');
     }
@@ -1004,11 +1026,12 @@ export class OperationsService {
         location: body.location,
       });
 
+      const alert = customerStatusAlert(status, shipment.reference);
       await this.notifications.create({
         userId: shipment.customerId,
-        title: 'Shipment status updated',
-        body: body.note ?? this.statusNote(status),
-        tone: status === 'DELIVERED' || status === 'COMPLETED' ? 'SUCCESS' : 'INFO',
+        title: alert?.title ?? 'Shipment status updated',
+        body: alert?.body ?? body.note ?? this.statusNote(status),
+        tone: alert?.tone ?? (status === 'COMPLETED' ? 'SUCCESS' : 'INFO'),
         entity: 'Shipment',
         entityId: shipmentId,
         actionUrl: `/customer/shipment/${shipmentId}`,
@@ -1079,10 +1102,18 @@ export class OperationsService {
     const shipment = shipmentIdentifier
       ? await this.prisma.shipment.findFirst({
           where: { OR: [{ id: shipmentIdentifier }, { reference: shipmentIdentifier }] },
-          select: { id: true, reference: true },
+          select: { id: true, reference: true, customerId: true, assignments: { select: { driverId: true, status: true } } },
         })
       : null;
     if (shipmentIdentifier && !shipment) throw new BadRequestException('Shipment was not found.');
+    // Opening a dispute freezes the shipment's escrow, so only the shipment's own
+    // customer, its accepted driver or operations staff may do it. Any signed-in
+    // account used to be able to freeze anyone's payment.
+    if (shipment && actor.role !== 'ADMIN' && actor.role !== 'DISPATCHER') {
+      const isCustomer = shipment.customerId === actor.sub;
+      const isDriver = shipment.assignments.some((assignment) => assignment.driverId === actor.sub && assignment.status === 'ACCEPTED');
+      if (!isCustomer && !isDriver) throw new ForbiddenException('You do not have access to this shipment.');
+    }
     const shipmentId = shipment?.id;
 
     if (shipmentId) {
@@ -1149,7 +1180,8 @@ export class OperationsService {
             },
           }),
           this.prisma.$executeRawUnsafe(
-            `update "Escrow" set "status" = 'DISPUTED'::"EscrowStatus", "updatedAt" = current_timestamp where "shipmentId" = $1`,
+            `update "Escrow" set "status" = 'DISPUTED'::"EscrowStatus", "updatedAt" = current_timestamp
+             where "shipmentId" = $1 and "status" not in ('RELEASED'::"EscrowStatus", 'REFUNDED'::"EscrowStatus")`,
             shipmentId,
           ),
         ]);

@@ -24,7 +24,7 @@ const verifiedDocuments = [
 describe('OperationsService.progressTrip', () => {
   let prisma: {
     driverAssignment: { findFirst: jest.Mock };
-    shipment: { update: jest.Mock };
+    shipment: { update: jest.Mock; findUnique: jest.Mock };
     auditLog: { create: jest.Mock };
   };
   let notifications: { create: jest.Mock };
@@ -42,11 +42,19 @@ describe('OperationsService.progressTrip', () => {
   beforeEach(() => {
     prisma = {
       driverAssignment: { findFirst: jest.fn() },
-      shipment: { update: jest.fn().mockResolvedValue(shipmentRow) },
+      shipment: {
+        update: jest.fn().mockImplementation(({ data }: { data: { status: string } }) => Promise.resolve({ ...shipmentRow, status: data.status })),
+        findUnique: jest.fn().mockResolvedValue({ id: 'shp-1', reference: 'TRK-1', status: 'IN_TRANSIT', updatedAt: shipmentRow.updatedAt }),
+      },
       auditLog: { create: jest.fn().mockResolvedValue(undefined) },
     };
     notifications = { create: jest.fn().mockResolvedValue(undefined) };
-    service = new OperationsService(prisma as unknown as PrismaService, notifications as unknown as NotificationsService, {} as ShipmentsService);
+    const shipments = { isAllowedTransition: (current: string, next: string) => current === 'ARRIVED_DESTINATION' && next === 'DELIVERED' };
+    service = new OperationsService(prisma as unknown as PrismaService, notifications as unknown as NotificationsService, shipments as unknown as ShipmentsService);
+  });
+
+  const currentStatus = (status: string) => prisma.shipment.findUnique.mockResolvedValue({
+    id: 'shp-1', reference: 'TRK-1', status, updatedAt: shipmentRow.updatedAt,
   });
 
   it('rejects a DRIVER with no ACCEPTED assignment on the shipment, and never touches the shipment row', async () => {
@@ -74,6 +82,7 @@ describe('OperationsService.progressTrip', () => {
 
   it('allows ADMIN to progress a trip without any assignment lookup at all', async () => {
     const actor: OperationActor = { sub: 'admin-1', role: 'ADMIN' };
+    currentStatus('ARRIVED_DESTINATION');
 
     await service.progressTrip('shp-1', { status: 'DELIVERED' }, actor);
 
@@ -83,6 +92,7 @@ describe('OperationsService.progressTrip', () => {
 
   it('allows DISPATCHER to progress a trip without any assignment lookup at all', async () => {
     const actor: OperationActor = { sub: 'dispatch-1', role: 'DISPATCHER' };
+    currentStatus('ARRIVED_PICKUP');
 
     await service.progressTrip('shp-1', { status: 'PICKED_UP' }, actor);
 
@@ -96,6 +106,54 @@ describe('OperationsService.progressTrip', () => {
     await expect(service.progressTrip('shp-1', { status: 'DELIVERED' }, actor)).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.driverAssignment.findFirst).not.toHaveBeenCalled();
     expect(prisma.shipment.update).not.toHaveBeenCalled();
+  });
+
+  // The route used to write any status it was sent: an assigned driver could rewind a
+  // trip, jump it to COMPLETED (skipping customer confirmation and escrow release), or
+  // re-send a step and alert the customer again.
+  it('an assigned driver cannot jump a trip to COMPLETED', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+
+    await expect(service.progressTrip('shp-1', { status: 'COMPLETED' }, { sub: 'driver-assigned', role: 'DRIVER' }))
+      .rejects.toThrow('Shipment cannot move from IN_TRANSIT to COMPLETED.');
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+  });
+
+  it('an assigned driver cannot rewind a trip', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+
+    await expect(service.progressTrip('shp-1', { status: 'ARRIVED_PICKUP' }, { sub: 'driver-assigned', role: 'DRIVER' }))
+      .rejects.toThrow('Shipment cannot move from IN_TRANSIT to ARRIVED_PICKUP.');
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+  });
+
+  it('a lost intermediate step does not strand the driver: picked up straight to arrived is accepted', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+    currentStatus('PICKED_UP');
+
+    await service.progressTrip('shp-1', { status: 'ARRIVED_DESTINATION' }, { sub: 'driver-assigned', role: 'DRIVER' });
+
+    expect(prisma.shipment.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'shp-1', status: 'PICKED_UP' } }));
+  });
+
+  it('a repeated step writes nothing and does not alert the customer again', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+
+    const result = await service.progressTrip('shp-1', { status: 'IN_TRANSIT' }, { sub: 'driver-assigned', role: 'DRIVER' });
+
+    expect(result.status).toBe('IN_TRANSIT');
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+    expect(notifications.create).not.toHaveBeenCalled();
+  });
+
+  it('tells the customer what actually happened, in the same words as the other status route', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+
+    await service.progressTrip('shp-1', { status: 'ARRIVED_DESTINATION' }, { sub: 'driver-assigned', role: 'DRIVER' });
+
+    expect(notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'cust-1', title: 'Driver at destination', body: 'Your driver has arrived at the destination for TRK-1.',
+    }));
   });
 
   it('treats an infra failure looking up the assignment as "not assigned", not as a bypass', async () => {

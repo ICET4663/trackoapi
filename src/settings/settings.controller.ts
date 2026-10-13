@@ -315,8 +315,9 @@ export class SettingsController {
   }
 
   @Delete('customer/addresses/:id')
-  deleteAddress() {
-    return { deleted: true };
+  async deleteAddress(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization, 'CUSTOMER');
+    return this.settingsService.deleteAddress(id, user.sub);
   }
 
   @Get('customer/payment-methods')

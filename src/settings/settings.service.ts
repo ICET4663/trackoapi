@@ -849,10 +849,14 @@ export class SettingsService {
   // Was faking success on any insert/update failure by echoing the submitted input
   // straight back - the customer saw their new address "saved" when it never was, and it
   // would silently vanish (revert to whatever was really in the DB) on the next real fetch.
+  // An edit used to upsert by address id alone, so a customer who sent another
+  // customer's address id overwrote that customer's saved address. The conflict update
+  // now only applies to the caller's own row; anything else is "not found".
   async saveAddress(input: Record<string, unknown>, id: string | undefined, userId: string) {
     const addressId = id ?? `addr_${randomUUID().replace(/-/g, '')}`;
+    let rows: SavedAddressRecord[];
     try {
-      const rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
+      rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
         `insert into "SavedAddress" ("id", "userId", "label", "line", "city", "address", "icon", "isDefaultPickup", "updatedAt")
          values ($1, $2, $3, $4, $5, $6, $7, $8, current_timestamp)
          on conflict ("id") do update set
@@ -863,6 +867,7 @@ export class SettingsService {
            "icon" = excluded."icon",
            "isDefaultPickup" = excluded."isDefaultPickup",
            "updatedAt" = current_timestamp
+         where "SavedAddress"."userId" = excluded."userId"
          returning "id", "label", "line", "city", "address", "icon", "isDefaultPickup"`,
         addressId,
         userId,
@@ -873,11 +878,28 @@ export class SettingsService {
         input.icon ? String(input.icon) : null,
         Boolean(input.isDefaultPickup),
       );
-      if (!rows[0]) throw new Error('Insert returned no row.');
-      return rows[0];
     } catch (error) {
       throw new InternalServerErrorException(`Could not save this address. Please try again: ${this.errorMessage(error)}`);
     }
+    if (!rows[0]) throw new NotFoundException('Saved address not found.');
+    return rows[0];
+  }
+
+  // The delete endpoint used to answer { deleted: true } without deleting anything, so
+  // a removed address came straight back on the next load.
+  async deleteAddress(id: string, userId: string) {
+    let rows: { id: string }[];
+    try {
+      rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
+        'delete from "SavedAddress" where "id" = $1 and "userId" = $2 returning "id"',
+        id,
+        userId,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not delete this address. Please try again: ${this.errorMessage(error)}`);
+    }
+    if (!rows[0]) throw new NotFoundException('Saved address not found.');
+    return { deleted: true };
   }
 
   // Was faking a "Visa **** 4242, Preview card" payment method whenever the read failed

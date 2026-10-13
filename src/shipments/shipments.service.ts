@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
 import { UpdateShipmentStatusDto } from './dto/update-shipment-status.dto';
 
@@ -374,26 +375,13 @@ export class ShipmentsService {
     }
   }
 
-  // What the customer is told when the driver or operations move their shipment along.
-  // Statuses not listed here either notify through their own flow (proof of delivery,
-  // disputes, escrow release) or are internal steps the customer does not act on.
-  private readonly customerStatusAlerts: Partial<Record<ShipmentStatus, { title: string; body: string; tone: 'INFO' | 'SUCCESS' | 'WARNING' }>> = {
-    DRIVER_EN_ROUTE: { title: 'Driver on the way to pickup', body: 'Your driver is heading to the pickup address for {reference}.', tone: 'INFO' },
-    ARRIVED_PICKUP: { title: 'Driver at pickup', body: 'Your driver has arrived at the pickup address for {reference}.', tone: 'INFO' },
-    PICKED_UP: { title: 'Cargo picked up', body: 'Your cargo for {reference} has been loaded.', tone: 'SUCCESS' },
-    IN_TRANSIT: { title: 'Shipment on the road', body: '{reference} is on its way. You can follow the truck on the live map.', tone: 'INFO' },
-    ARRIVED_DESTINATION: { title: 'Driver at destination', body: 'Your driver has arrived at the destination for {reference}.', tone: 'INFO' },
-    DELIVERED: { title: 'Delivery awaiting your confirmation', body: '{reference} was marked delivered. Check the cargo, then confirm receipt in the app.', tone: 'SUCCESS' },
-    CANCELLED: { title: 'Shipment cancelled', body: '{reference} was cancelled. Contact support if you did not expect this.', tone: 'WARNING' },
-  };
-
   private async notifyCustomerOfStatus(customerId: string, shipmentId: string, reference: string, status: ShipmentStatus) {
-    const alert = this.customerStatusAlerts[status];
+    const alert = customerStatusAlert(status, reference);
     if (!alert) return;
     await this.notifications.create({
       userId: customerId,
       title: alert.title,
-      body: alert.body.replace('{reference}', reference),
+      body: alert.body,
       tone: alert.tone,
       entity: 'Shipment',
       entityId: shipmentId,
@@ -422,6 +410,11 @@ export class ShipmentsService {
     CANCELLED: [],
   };
 
+  // Whether the general status rules allow this move (ignoring who is making it).
+  isAllowedTransition(current: ShipmentStatus, next: ShipmentStatus) {
+    return (this.statusTransitions[current] ?? []).includes(next);
+  }
+
   private assertValidTransition(
     current: ShipmentStatus,
     next: ShipmentStatus,
@@ -439,8 +432,7 @@ export class ShipmentsService {
     // participant whose job that step actually is can trigger it.
     if (relationship.isOperations) return;
 
-    const driverSteps: ShipmentStatus[] = ['DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION', 'DELIVERED'];
-    if (driverSteps.includes(next)) {
+    if (DRIVER_TRIP_STEPS.includes(next) && next !== 'DRIVER_ASSIGNED') {
       if (!relationship.isAssignedDriver) throw new ForbiddenException('Only the assigned driver can make this update.');
       return;
     }
@@ -1596,24 +1588,31 @@ export class ShipmentsService {
     return review;
   }
 
-  async disputeEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
+  async disputeEscrow(shipmentId: string, actorRole: UserRole, actorId: string, note?: string) {
     if (!['CUSTOMER', 'DISPATCHER', 'ADMIN'].includes(actorRole)) {
       throw new ForbiddenException('This role cannot dispute escrow.');
     }
+    await this.assertShipmentParty(shipmentId, actorId, actorRole);
 
+    // Settled money cannot be frozen again: a dispute on released or refunded escrow
+    // used to rewrite it to DISPUTED, contradicting what had already been paid out.
     const rows = await this.prisma.$queryRawUnsafe<EscrowRow[]>(
       `update "Escrow"
        set "status" = 'DISPUTED'::"EscrowStatus",
            "updatedAt" = current_timestamp
        where "shipmentId" = $1
+         and "status" not in ('RELEASED'::"EscrowStatus", 'REFUNDED'::"EscrowStatus")
        returning "id", "shipmentId", "amount", "currency", "status"::text as "status",
                  "arrivalConfirmed", "proofOfDeliveryUploaded", "customerDeliveryConfirmed", "disputeWindowClear", "platformApproved"`,
       shipmentId,
     );
 
+    if (!rows[0]) {
+      const escrow = await this.findEscrowOrThrow(shipmentId);
+      throw new BadRequestException(`Escrow is already ${escrow.status.toLowerCase()} and cannot be disputed.`);
+    }
     await this.updateShipmentTimeline(shipmentId, 'DISPUTED', note ?? 'Escrow dispute opened.');
-    if (rows[0]) return this.toEscrowRecord(rows[0]);
-    return this.getEscrow(shipmentId);
+    return this.toEscrowRecord(rows[0]);
   }
 
   async refundEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
@@ -1664,7 +1663,7 @@ export class ShipmentsService {
     return this.toEscrowRecord(rows[0]);
   }
 
-  async confirmEscrowCheck(shipmentId: string, check: string, actorRole: UserRole) {
+  async confirmEscrowCheck(shipmentId: string, check: string, actorRole: UserRole, actorId: string) {
     const allowedChecks = new Set([
       'arrivalConfirmed',
       'proofOfDeliveryUploaded',
@@ -1677,6 +1676,7 @@ export class ShipmentsService {
     // assertEscrowCheckRole already throws BadRequestException for any check outside
     // this set, so reaching here means check is one of the 5 known columns.
     if (!allowedChecks.has(check)) throw new BadRequestException('Unknown escrow release check.');
+    await this.assertShipmentParty(shipmentId, actorId, actorRole);
 
     // This used to fall back to a fabricated "RELEASE_READY, every check true" record
     // whenever the UPDATE failed (a real DB error) or the shipment had no Escrow row -
@@ -1752,6 +1752,22 @@ export class ShipmentsService {
       await this.notifyShipmentParties(shipmentId, { dispatcher: readyAlert, admin: readyAlert });
     }
     return this.toEscrowRecord(row);
+  }
+
+  // Role checks alone let any customer confirm delivery of (or dispute) any shipment and
+  // any driver tick release checks on trips that were not theirs, moving someone else's
+  // escrow towards release. Customers and drivers may act only on their own shipments;
+  // operations staff on any.
+  private async assertShipmentParty(shipmentId: string, actorId: string, actorRole: UserRole) {
+    if (actorRole === 'ADMIN' || actorRole === 'DISPATCHER') return;
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { customerId: true, assignments: { select: { driverId: true, status: true } } },
+    });
+    if (!shipment) throw new NotFoundException('Shipment not found.');
+    if (actorRole === 'CUSTOMER' && shipment.customerId === actorId) return;
+    if (actorRole === 'DRIVER' && shipment.assignments.some((assignment) => assignment.driverId === actorId && assignment.status === 'ACCEPTED')) return;
+    throw new ForbiddenException('You do not have access to this shipment.');
   }
 
   private assertEscrowCheckRole(check: string, actorRole: UserRole) {

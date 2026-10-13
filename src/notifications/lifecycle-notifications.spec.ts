@@ -131,7 +131,10 @@ describe('Escrow refund, release and release checks notify the right people', ()
     const prisma = {
       $queryRawUnsafe: queryRawUnsafe,
       $executeRawUnsafe: jest.fn().mockResolvedValue(1),
-      shipment: { update: jest.fn().mockResolvedValue({}), findUnique: jest.fn().mockResolvedValue(null) },
+      shipment: {
+        update: jest.fn().mockResolvedValue({}),
+        findUnique: jest.fn().mockResolvedValue({ customerId: 'cust-1', assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }] }),
+      },
       shipmentTimelineEvent: { create: jest.fn().mockResolvedValue({}) },
     } as unknown as PrismaService;
     const notificationCreate = jest.fn().mockResolvedValue(null);
@@ -184,7 +187,7 @@ describe('Escrow refund, release and release checks notify the right people', ()
       escrowRow({ customerDeliveryConfirmed: true, previousStatus: 'FUNDED', wasConfirmed: false }),
     );
 
-    await service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER');
+    await service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER', 'cust-1');
 
     expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', title: 'Customer confirmed delivery' }));
     expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -198,7 +201,7 @@ describe('Escrow refund, release and release checks notify the right people', ()
       escrowRow({ customerDeliveryConfirmed: true, previousStatus: 'FUNDED', wasConfirmed: true }),
     );
 
-    await service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER');
+    await service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER', 'cust-1');
 
     expect(notificationCreate).not.toHaveBeenCalled();
   });
@@ -209,7 +212,7 @@ describe('Escrow refund, release and release checks notify the right people', ()
       escrowRow({ status: 'RELEASE_READY', platformApproved: true, previousStatus: 'HELD', wasConfirmed: false }),
     );
 
-    await service.confirmEscrowCheck('shp-1', 'platformApproved', 'ADMIN');
+    await service.confirmEscrowCheck('shp-1', 'platformApproved', 'ADMIN', 'admin-1');
 
     expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'DISPATCHER', title: 'Escrow ready to release' }));
     expect(notificationCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -264,7 +267,9 @@ describe('Opening a dispute tells the other party their payment is on hold', () 
       $queryRawUnsafe: queryRawUnsafe,
       $executeRawUnsafe: jest.fn().mockResolvedValue(1),
       shipment: {
-        findFirst: jest.fn().mockResolvedValue({ id: 'shp-1', reference: 'TRK-7' }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'shp-1', reference: 'TRK-7', customerId: 'cust-1', assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }],
+        }),
         update: jest.fn().mockResolvedValue({}),
       },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -278,5 +283,29 @@ describe('Opening a dispute tells the other party their payment is on hold', () 
       userId: 'driver-1', title: 'Dispute opened on your delivery', tone: 'WARNING',
     }));
     expect(notificationCreate).not.toHaveBeenCalledWith(expect.objectContaining({ userId: 'cust-1' }));
+  });
+});
+
+describe('Only a shipment\'s own parties can open a dispute on it', () => {
+  it('another customer cannot freeze this shipment\'s escrow', async () => {
+    const executeRawUnsafe = jest.fn().mockResolvedValue(1);
+    const queryRawUnsafe = jest.fn().mockResolvedValue([]);
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: executeRawUnsafe,
+      shipment: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'shp-1', reference: 'TRK-7', customerId: 'cust-1', assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }],
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    } as unknown as PrismaService;
+    const service = new OperationsService(prisma, { create: jest.fn() } as unknown as NotificationsService, {} as ShipmentsService);
+
+    await expect(service.createDispute({ shipmentId: 'TRK-7', reason: 'x' }, { sub: 'cust-other', role: 'CUSTOMER' }))
+      .rejects.toThrow('You do not have access to this shipment.');
+    expect(queryRawUnsafe.mock.calls.some(([sql]) => String(sql).includes('insert into "Dispute"'))).toBe(false);
+    expect(executeRawUnsafe).not.toHaveBeenCalled();
   });
 });

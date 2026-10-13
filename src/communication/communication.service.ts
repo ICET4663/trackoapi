@@ -483,6 +483,17 @@ export class CommunicationService {
     }
   }
 
+  static isAllowedUploadType(mimeType: string) {
+    // SVG is an image type that can carry script, so it is excluded with the rest.
+    if (mimeType === "image/svg+xml") return false;
+    return (
+      /^(image|audio|video)\/[a-z0-9.+-]+$/.test(mimeType) ||
+      mimeType === "application/pdf" ||
+      // What prepareMedia() falls back to when no type is given.
+      mimeType === "application/octet-stream"
+    );
+  }
+
   private async prepareMedia(input: Record<string, unknown>, userId: string) {
     // MediaRecorder commonly reports `audio/webm;codecs=opus`. Supabase bucket MIME
     // allow-lists and file extensions expect the canonical media type without params.
@@ -491,6 +502,14 @@ export class CommunicationService {
         ? input.mimeType.trim()
         : "application/octet-stream";
     const mimeType = suppliedMimeType.split(";", 1)[0].trim().toLowerCase();
+    // The stored file is served with this type, and it used to be whatever the client
+    // claimed - so a signed-in user could host HTML or script in Trako's public storage.
+    // The apps only upload photos, voice notes, video and PDFs.
+    if (!CommunicationService.isAllowedUploadType(mimeType)) {
+      throw new BadRequestException(
+        "This file type cannot be uploaded. Send a photo, a voice note, a video or a PDF.",
+      );
+    }
     const base64 =
       typeof input.base64 === "string" && input.base64.trim()
         ? input.base64.trim()

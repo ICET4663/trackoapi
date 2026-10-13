@@ -37,7 +37,7 @@ describe('ShipmentsController escrow role routing', () => {
     await controller.confirmEscrowCheck('shipment-1', 'arrivalConfirmed', 'Bearer token');
 
     expect(requestUser.requireRole).toHaveBeenCalledWith('Bearer token', ['CUSTOMER', 'DRIVER', 'DISPATCHER', 'ADMIN']);
-    expect(shipments.confirmEscrowCheck).toHaveBeenCalledWith('shipment-1', 'arrivalConfirmed', 'DRIVER');
+    expect(shipments.confirmEscrowCheck).toHaveBeenCalledWith('shipment-1', 'arrivalConfirmed', 'DRIVER', 'driver-1');
   });
 
   it('passes the authenticated admin role to platform approval', async () => {
@@ -45,7 +45,7 @@ describe('ShipmentsController escrow role routing', () => {
 
     await controller.confirmEscrowCheck('shipment-1', 'platformApproved', 'Bearer token');
 
-    expect(shipments.confirmEscrowCheck).toHaveBeenCalledWith('shipment-1', 'platformApproved', 'ADMIN');
+    expect(shipments.confirmEscrowCheck).toHaveBeenCalledWith('shipment-1', 'platformApproved', 'ADMIN', 'admin-1');
   });
 
   it('allows admin or dispatcher sessions to release and refund escrow', async () => {

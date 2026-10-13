@@ -504,7 +504,10 @@ describe('ShipmentsService.getEscrow never fakes an already-funded escrow', () =
 // nothing was actually confirmed in the database.
 describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that did not happen', () => {
   function buildService(queryRawUnsafe: jest.Mock) {
-    const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      shipment: { findUnique: jest.fn().mockResolvedValue({ customerId: 'cust-1', assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }] }) },
+    } as unknown as PrismaService;
     return new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
   }
 
@@ -512,14 +515,14 @@ describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that di
     const queryRawUnsafe = jest.fn().mockRejectedValue(new Error('connection reset'));
     const service = buildService(queryRawUnsafe);
 
-    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER')).rejects.toBeInstanceOf(InternalServerErrorException);
+    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER', 'driver-1')).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
   it('throws NotFoundException instead of fabricating success when there is no Escrow row for this shipment', async () => {
     const queryRawUnsafe = jest.fn().mockResolvedValue([]);
     const service = buildService(queryRawUnsafe);
 
-    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER')).rejects.toThrow('Escrow record not found');
+    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER', 'driver-1')).rejects.toThrow('Escrow record not found');
   });
 
   it('returns the real updated record on genuine success', async () => {
@@ -531,7 +534,7 @@ describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that di
     const queryRawUnsafe = jest.fn().mockResolvedValue([escrowRow]);
     const service = buildService(queryRawUnsafe);
 
-    const result = await service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER');
+    const result = await service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER', 'driver-1');
 
     expect(result.releaseChecks.arrivalConfirmed).toBe(true);
   });
@@ -540,7 +543,7 @@ describe('ShipmentsService.confirmEscrowCheck never fakes a confirmation that di
     const queryRawUnsafe = jest.fn();
     const service = buildService(queryRawUnsafe);
 
-    await expect(service.confirmEscrowCheck('shp-1', 'platformApproved', 'CUSTOMER')).rejects.toThrow(
+    await expect(service.confirmEscrowCheck('shp-1', 'platformApproved', 'CUSTOMER', 'cust-1')).rejects.toThrow(
       'cannot complete that escrow release check',
     );
     expect(queryRawUnsafe).not.toHaveBeenCalled();
@@ -1038,5 +1041,74 @@ describe('ShipmentsService.updateStatus tells the customer about trip progress',
 
     await expect(service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'PICKED_UP' } as never))
       .resolves.toEqual(expect.objectContaining({ status: 'PICKED_UP' }));
+  });
+});
+
+// Escrow checks and disputes used to verify only the caller's role: any customer could
+// confirm delivery of (or freeze) another customer's shipment and any driver could tick
+// release checks on trips that were not theirs, moving someone else's money.
+describe('ShipmentsService escrow actions are limited to the shipment\'s own parties', () => {
+  const escrowRow = {
+    id: 'escrow-1', shipmentId: 'shp-1', amount: 500000, currency: 'NGN', status: 'FUNDED',
+    arrivalConfirmed: false, proofOfDeliveryUploaded: false, customerDeliveryConfirmed: false,
+    disputeWindowClear: false, platformApproved: false,
+  };
+
+  function buildService(escrowStatus = 'FUNDED') {
+    const queryRawUnsafe = jest.fn().mockImplementation((sql: string) => {
+      if (sql.includes('update "Escrow"') && sql.includes("'DISPUTED'")) {
+        return Promise.resolve(['RELEASED', 'REFUNDED'].includes(escrowStatus) ? [] : [{ ...escrowRow, status: 'DISPUTED' }]);
+      }
+      if (sql.includes('update "Escrow"')) return Promise.resolve([{ ...escrowRow, customerDeliveryConfirmed: true, wasConfirmed: true }]);
+      if (sql.includes('from "Escrow"')) return Promise.resolve([{ ...escrowRow, status: escrowStatus }]);
+      return Promise.resolve([]);
+    });
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue({ customerId: 'cust-1', assignments: [{ driverId: 'driver-1', status: 'ACCEPTED' }, { driverId: 'driver-old', status: 'REJECTED' }] }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, { create: jest.fn().mockResolvedValue(null) } as unknown as NotificationsService, {} as MapsProviderService);
+    return { service, queryRawUnsafe };
+  }
+
+  const escrowWrites = (mock: jest.Mock) => mock.mock.calls.filter(([sql]) => String(sql).includes('update "Escrow"'));
+
+  it('another customer cannot confirm delivery of this shipment', async () => {
+    const { service, queryRawUnsafe } = buildService();
+
+    await expect(service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER', 'cust-other'))
+      .rejects.toThrow('You do not have access to this shipment.');
+    expect(escrowWrites(queryRawUnsafe)).toHaveLength(0);
+  });
+
+  it('a driver who is not the accepted driver cannot tick release checks', async () => {
+    const { service, queryRawUnsafe } = buildService();
+
+    await expect(service.confirmEscrowCheck('shp-1', 'arrivalConfirmed', 'DRIVER', 'driver-old'))
+      .rejects.toThrow('You do not have access to this shipment.');
+    expect(escrowWrites(queryRawUnsafe)).toHaveLength(0);
+  });
+
+  it('the shipment\'s own customer and operations staff can', async () => {
+    const { service } = buildService();
+
+    await expect(service.confirmEscrowCheck('shp-1', 'customerDeliveryConfirmed', 'CUSTOMER', 'cust-1')).resolves.toBeDefined();
+    await expect(service.confirmEscrowCheck('shp-1', 'platformApproved', 'ADMIN', 'any-admin')).resolves.toBeDefined();
+  });
+
+  it('another customer cannot dispute (freeze) this shipment\'s escrow', async () => {
+    const { service, queryRawUnsafe } = buildService();
+
+    await expect(service.disputeEscrow('shp-1', 'CUSTOMER', 'cust-other')).rejects.toThrow('You do not have access to this shipment.');
+    expect(escrowWrites(queryRawUnsafe)).toHaveLength(0);
+  });
+
+  it('settled escrow cannot be disputed', async () => {
+    const { service } = buildService('RELEASED');
+
+    await expect(service.disputeEscrow('shp-1', 'CUSTOMER', 'cust-1')).rejects.toThrow('Escrow is already released and cannot be disputed.');
   });
 });
