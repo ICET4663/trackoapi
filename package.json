@@ -27,6 +27,8 @@
     "test:release-gates": "node scripts/lib/native-release-gates.test.js && node scripts/phase8-production-preflight.test.js",
     "smoke:settlement": "node scripts/smoke-settlement.js",
     "smoke:workflow": "node scripts/smoke-workflow.js",
+    "simulate:trip": "node scripts/simulate-trip.js",
+    "check:journey": "node scripts/check-customer-journey.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run prisma:validate",
