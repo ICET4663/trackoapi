@@ -106,6 +106,18 @@ async function main() {
     check('no truck position is shown before a driver starts', view.location === null, `tracking ${view.locationStatus}`);
   }
 
+  // Operations approve a paid shipment before it can be dispatched.
+  console.log('\nApproved for dispatch');
+  const unapproved = !booked.adminApproved;
+  if (unapproved) {
+    const early = await request(shipmentPath('/assignments'), { method: 'POST', accessToken: dispatcher.accessToken, body: {} });
+    check('dispatch is refused until an admin approves the paid shipment', !early.ok, `${early.status}`);
+    const byCustomer = await request(shipmentPath('/approve'), { method: 'POST', accessToken: customer.accessToken });
+    check('a customer cannot approve their own shipment', byCustomer.status === 401 || byCustomer.status === 403, `${byCustomer.status}`);
+  }
+  const approved = await expectOk(shipmentPath('/approve'), { method: 'POST', accessToken: admin.accessToken });
+  check('admin approves the paid shipment for dispatch', approved.adminApproved === true, unapproved ? 'approved now' : 'already approved');
+
   // 2. Driver assigned.
   console.log('\nDriver assigned');
   let assignments = await expectOk(shipmentPath('/assignments'), { accessToken: dispatcher.accessToken });

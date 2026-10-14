@@ -295,7 +295,8 @@ describe('ShipmentsService.listAssignments access control', () => {
   it('does not expose assignment history to an unrelated authenticated user', async () => {
     const prisma = {
       shipment: {
-        findUnique: jest.fn().mockResolvedValue({
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'shipment-1',
           customerId: 'customer-owner',
           assignments: [{ driverId: 'driver-1', vehicle: { ownerId: 'truck-owner-1' } }],
         }),

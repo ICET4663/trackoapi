@@ -96,6 +96,9 @@ type ShipmentPartyAlert = {
   preferenceKey: 'shipmentStatusUpdates' | 'liveTrackingAlerts' | 'driverOffers' | 'escrowPayments';
 };
 
+// Trip steps before the cargo is on the truck: an accepted driver can still be replaced.
+const RELEASABLE_BEFORE_PICKUP: ShipmentStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP'];
+
 @Injectable()
 export class ShipmentsService {
   private readonly logger = new Logger(ShipmentsService.name);
@@ -583,9 +586,11 @@ export class ShipmentsService {
 
   async listAssignments(shipmentId: string, userId?: string, role?: UserRole) {
     if (userId && role) {
-      const shipment = await this.prisma.shipment.findUnique({
-        where: { id: shipmentId },
+      // Operations screens identify shipments by reference (TRK-...); accept either.
+      const shipment = await this.prisma.shipment.findFirst({
+        where: { OR: [{ id: shipmentId }, { reference: shipmentId }] },
         select: {
+          id: true,
           customerId: true,
           assignments: { select: { driverId: true, vehicle: { select: { ownerId: true } } } },
         },
@@ -595,6 +600,7 @@ export class ShipmentsService {
         || shipment.customerId === userId
         || shipment.assignments.some((assignment) => assignment.driverId === userId || assignment.vehicle?.ownerId === userId);
       if (!canView) throw new ForbiddenException('You do not have access to this shipment assignment history.');
+      shipmentId = shipment.id;
     }
     await this.expireStaleAssignmentOffers(shipmentId);
     try {
@@ -797,7 +803,7 @@ export class ShipmentsService {
 
   async respondToAssignment(assignmentId: string, driverId: string, action: 'ACCEPT' | 'REJECT') {
     const status: AssignmentStatus = action === 'ACCEPT' ? 'ACCEPTED' : 'REJECTED';
-    const shipmentStatus: ShipmentStatus = action === 'ACCEPT' ? 'DRIVER_EN_ROUTE' : 'QUOTED';
+    let shipmentStatus: ShipmentStatus = 'DRIVER_EN_ROUTE';
 
     try {
       const assignment = await this.prisma.driverAssignment.findUnique({
@@ -807,6 +813,7 @@ export class ShipmentsService {
       if (!assignment) throw new NotFoundException('Assignment not found.');
       if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
       if (assignment.status !== 'OFFERED') throw new BadRequestException('This assignment has already been handled.');
+      if (action === 'REJECT') shipmentStatus = await this.awaitingDriverStatus(assignment.shipmentId);
 
       if (action === 'ACCEPT') {
         const activeTrip = await this.prisma.driverAssignment.findFirst({
@@ -1027,12 +1034,19 @@ export class ShipmentsService {
       include: { shipment: true, driver: { include: { profile: true } }, vehicle: true },
     });
     if (!assignment) throw new NotFoundException('Assignment not found.');
-    if (assignment.status !== 'OFFERED') {
-      throw new BadRequestException('Only a pending driver offer can be cancelled.');
+    // Operations can withdraw a pending offer, or take an accepted driver off the job
+    // until the cargo is picked up (breakdown, driver unreachable). After pickup the cargo
+    // is on that truck, so a handover is an operational decision outside this action.
+    const releasingAcceptedJob = assignment.status === 'ACCEPTED';
+    if (releasingAcceptedJob && !RELEASABLE_BEFORE_PICKUP.includes(assignment.shipment.status)) {
+      throw new BadRequestException('The driver has already picked up the cargo, so this job cannot be reassigned here. Contact the driver and customer to arrange a handover.');
+    }
+    if (assignment.status !== 'OFFERED' && !releasingAcceptedJob) {
+      throw new BadRequestException('Only a pending offer, or a job whose cargo has not been picked up, can be withdrawn.');
     }
 
     const claimed = await this.prisma.driverAssignment.updateMany({
-      where: { id: assignmentId, status: 'OFFERED' },
+      where: { id: assignmentId, status: assignment.status },
       data: {
         status: 'CANCELLED',
         rejectedAt: new Date(),
@@ -1040,14 +1054,17 @@ export class ShipmentsService {
     });
     if (!claimed.count) throw new BadRequestException('This assignment was already handled by another action.');
 
+    const awaitingDriver = await this.awaitingDriverStatus(assignment.shipmentId);
     await this.prisma.shipment.update({
       where: { id: assignment.shipmentId },
       data: {
-        status: 'QUOTED',
+        status: awaitingDriver,
         timeline: {
           create: {
-            status: 'QUOTED',
-            note: `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
+            status: awaitingDriver,
+            note: releasingAcceptedJob
+              ? `Driver taken off the job before pickup by ${actorRole.toLowerCase()} operations. Reassignment started.`
+              : `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
           },
         },
       },
@@ -1066,8 +1083,10 @@ export class ShipmentsService {
       this.notifications.create({
         userId: updated.driverId,
         role: 'DRIVER',
-        title: 'Shipment offer withdrawn',
-        body: 'Trako operations withdrew this offer. It is no longer available to accept.',
+        title: releasingAcceptedJob ? 'Removed from shipment' : 'Shipment offer withdrawn',
+        body: releasingAcceptedJob
+          ? 'Trako operations reassigned this shipment before pickup. You no longer need to collect it, and location sharing for it has stopped.'
+          : 'Trako operations withdrew this offer. It is no longer available to accept.',
         tone: 'WARNING',
         entity: 'DriverAssignment',
         entityId: updated.id,
@@ -1077,7 +1096,9 @@ export class ShipmentsService {
       this.notifications.create({
         userId: updated.shipment.customerId,
         title: 'Driver reassignment started',
-        body: 'Operations withdrew the previous offer and is selecting another eligible driver.',
+        body: releasingAcceptedJob
+          ? 'Operations is assigning a new driver to your shipment. Your payment stays held.'
+          : 'Operations withdrew the previous offer and is selecting another eligible driver.',
         tone: 'INFO',
         entity: 'Shipment',
         entityId: updated.shipmentId,
@@ -1154,13 +1175,14 @@ export class ShipmentsService {
       select: { id: true },
     });
     if (!activeAssignment) {
+      const awaitingDriver = await this.awaitingDriverStatus(shipmentId);
       await this.prisma.shipment.update({
         where: { id: shipmentId },
         data: {
-          status: 'QUOTED',
+          status: awaitingDriver,
           timeline: {
             create: {
-              status: 'QUOTED',
+              status: awaitingDriver,
               note: 'Driver offer expired. Shipment returned to dispatch for the next eligible driver.',
             },
           },
@@ -1888,6 +1910,21 @@ export class ShipmentsService {
         platformApproved: row.platformApproved,
       },
     };
+  }
+
+  // Where a shipment goes when its driver drops off (declined, offer withdrawn or
+  // expired, taken off the job): a paid shipment is "payment held, awaiting a driver",
+  // never back to the pre-payment QUOTED state it used to show.
+  private async awaitingDriverStatus(shipmentId: string): Promise<ShipmentStatus> {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ status: string }>>(
+        'select "status"::text as "status" from "Escrow" where "shipmentId" = $1 limit 1',
+        shipmentId,
+      );
+      return ['FUNDED', 'HELD', 'RELEASE_READY'].includes(rows?.[0]?.status ?? '') ? 'ESCROW_FUNDED' : 'QUOTED';
+    } catch {
+      return 'QUOTED';
+    }
   }
 
   private async findEscrowOrThrow(shipmentId: string) {

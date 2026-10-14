@@ -58,6 +58,8 @@ async function main() {
   const booked = await expectOk(shipmentPath(), { token: customer.accessToken });
   const point = booked.originCoordinates;
 
+  await expectOk(shipmentPath('/approve'), { method: 'POST', token: admin.accessToken });
+
   // Which demo drivers can take the job right now.
   const listing = await expectOk('/v1/shipments/dispatch/available-drivers', { token: dispatcher.accessToken });
   const available = (Array.isArray(listing) ? listing : listing.drivers ?? []);
@@ -72,30 +74,45 @@ async function main() {
 
   const offer = (driver) => expectOk(shipmentPath('/assignments'), { method: 'POST', token: dispatcher.accessToken, body: { driverId: driver.id } });
 
-  // X1: a declined offer gives the driver nothing.
-  const declined = await offer(second);
-  const reject = await request(`/v1/shipments/assignments/${declined.id}/reject`, { method: 'POST', token: second.session.accessToken });
-  const afterReject = await request(trackingPath('/history'), { token: second.session.accessToken });
-  check('X1', 'a driver who declines an offer gets no access to the shipment', reject.ok && reject.payload?.status === 'REJECTED' && denied(afterReject.status), `reject ${reject.payload?.status ?? reject.status}, trail ${afterReject.status}`);
+  const shipmentStatus = async () => (await expectOk(shipmentPath(), { token: dispatcher.accessToken })).status;
+  let assignments = await expectOk(shipmentPath('/assignments'), { token: dispatcher.accessToken });
+  let current = assignments.find((item) => item.status === 'ACCEPTED');
 
-  // X2: dispatch withdraws an accepted job and reassigns it.
-  const withdrawn = await offer(first);
-  await expectOk(`/v1/shipments/assignments/${withdrawn.id}/accept`, { method: 'POST', token: first.session.accessToken });
-  const cancel = await request(`/v1/shipments/assignments/${withdrawn.id}/cancel`, { method: 'POST', token: dispatcher.accessToken });
-  const staleGps = await request(trackingPath('/location'), { method: 'POST', token: first.session.accessToken, body: { ...point, recordedAt: new Date().toISOString() } });
-  check('X2', 'after dispatch withdraws a job, the old driver can no longer send GPS', cancel.ok && denied(staleGps.status), `cancel ${cancel.payload?.status ?? cancel.status}, GPS ${staleGps.status}`);
-  const lateAccept = await request(`/v1/shipments/assignments/${withdrawn.id}/accept`, { method: 'POST', token: first.session.accessToken });
-  check('X3', 'a withdrawn offer cannot be accepted again', !lateAccept.ok || lateAccept.payload?.status !== 'ACCEPTED', `${lateAccept.status} ${lateAccept.payload?.status ?? lateAccept.payload?.message ?? ''}`);
+  // X1: a declined offer gives the driver nothing, and a paid shipment stays paid.
+  let declined = assignments.find((item) => item.status === 'REJECTED');
+  if (!current) {
+    declined = await offer(second);
+    const reject = await request(`/v1/shipments/assignments/${declined.id}/reject`, { method: 'POST', token: second.session.accessToken });
+    const afterReject = await request(trackingPath('/history'), { token: second.session.accessToken });
+    const statusAfter = await shipmentStatus();
+    check('X1', 'a driver who declines gets no access; the paid shipment stays paid', reject.ok && denied(afterReject.status) && statusAfter === 'ESCROW_FUNDED', `reject ${reject.payload?.status ?? reject.status}, trail ${afterReject.status}, shipment ${statusAfter}`);
+    current = await offer(first);
+    current = await expectOk(`/v1/shipments/assignments/${current.id}/accept`, { method: 'POST', token: first.session.accessToken });
+  } else {
+    console.log('      X1 skipped: a driver already accepted this shipment (decline was checked on an earlier run)');
+  }
+  const released = drivers.find((item) => item.id === current.driverId) ?? first;
 
-  const driver = second;
-  const reassigned = await offer(driver);
+  // X2: operations take the accepted driver off the job before pickup.
+  const cancel = await request(`/v1/shipments/assignments/${current.id}/cancel`, { method: 'POST', token: dispatcher.accessToken });
+  const staleGps = await request(trackingPath('/location'), { method: 'POST', token: released.session.accessToken, body: { ...point, recordedAt: new Date().toISOString() } });
+  const afterRelease = await shipmentStatus();
+  check('X2', 'operations take an accepted driver off before pickup; their GPS is refused; payment stays held', cancel.ok && denied(staleGps.status) && afterRelease === 'ESCROW_FUNDED', `cancel ${cancel.status}, GPS ${staleGps.status}, shipment ${afterRelease}`);
+  const lateAccept = await request(`/v1/shipments/assignments/${current.id}/accept`, { method: 'POST', token: released.session.accessToken });
+  check('X3', 'a withdrawn job cannot be accepted again', !lateAccept.ok, `${lateAccept.status} ${lateAccept.payload?.message ?? ''}`);
+  const withdrawn = current;
+
+  // X4: reassignment (the API offers the next eligible driver; otherwise dispatch picks one).
+  let reassigned = cancel.payload?.nextAssignment;
+  if (!reassigned) reassigned = await offer(second);
+  const driver = drivers.find((item) => item.id === reassigned.driverId) ?? second;
   const accepted = await request(`/v1/shipments/assignments/${reassigned.id}/accept`, { method: 'POST', token: driver.session.accessToken });
   const acceptedAgain = await request(`/v1/shipments/assignments/${reassigned.id}/accept`, { method: 'POST', token: driver.session.accessToken });
-  const assignments = await expectOk(shipmentPath('/assignments'), { token: dispatcher.accessToken });
+  assignments = await expectOk(shipmentPath('/assignments'), { token: dispatcher.accessToken });
   const active = assignments.filter((item) => item.status === 'ACCEPTED');
-  check('X4', 'reassigned driver accepts; a double tap leaves exactly one active assignment', accepted.ok && active.length === 1 && active[0].id === reassigned.id, `second tap ${acceptedAgain.status}, active ${active.length}`);
+  check('X4', 'reassigned driver accepts; a double tap leaves exactly one active assignment', accepted.ok && active.length === 1 && active[0].id === reassigned.id, `${driver.email}, second tap ${acceptedAgain.status}, active ${active.length}`);
   const timeline = (await expectOk(shipmentPath(), { token: dispatcher.accessToken })).timeline ?? [];
-  check('X5', 'the shipment history keeps the withdrawn assignment and the reassignment', assignments.some((item) => item.id === withdrawn.id && item.status === 'CANCELLED') && assignments.some((item) => item.id === declined.id && item.status === 'REJECTED'), `${assignments.length} assignments, ${timeline.length} timeline entries`);
+  check('X5', 'the shipment history keeps the withdrawn and declined assignments', assignments.some((item) => item.id === withdrawn.id && item.status === 'CANCELLED') && (!declined || assignments.some((item) => item.id === declined.id && item.status === 'REJECTED')), `${assignments.length} assignments, ${timeline.length} timeline entries`);
 
   // X6: the trip only moves forward.
   await expectOk(shipmentPath('/status'), { method: 'PATCH', token: driver.session.accessToken, body: { status: 'DRIVER_EN_ROUTE', note: 'Exception check: en route.' } });
