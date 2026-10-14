@@ -240,6 +240,15 @@ async function main() {
     return [denied(result.status), message(result)];
   });
 
+  // --- Cancellation (last, so the checks above can use the booking) ---------------
+  await check('B10', 'customer cancels an unpaid booking; nothing is refunded and the driver cannot cancel', async () => {
+    if (!shipment?.id) return [null, 'no booking'];
+    const byDriver = await request(`/v1/shipments/${shipment.id}/status`, { method: 'PATCH', token: token('DRIVER'), body: { status: 'CANCELLED' } });
+    const cancel = await request(`/v1/shipments/${shipment.id}/status`, { method: 'PATCH', token: token('CUSTOMER'), body: { status: 'CANCELLED', note: 'Acceptance run cleanup (demo).' } });
+    const escrow = await request(`/v1/shipments/${shipment.id}/escrow`, { token: token('CUSTOMER') });
+    return [denied(byDriver.status) && cancel.ok && cancel.payload?.status === 'CANCELLED' && escrow.payload?.status === 'PENDING', `driver ${byDriver.status}, customer ${cancel.payload?.status ?? cancel.status}, escrow ${escrow.payload?.status}`];
+  });
+
   // --- Messaging --------------------------------------------------------------------
   await check('C1', 'a customer cannot open or create a conversation from a made-up id', async () => {
     const result = await request(`/v1/conversations/acceptance-unused-${Date.now()}/messages`, { token: token('CUSTOMER') });
@@ -264,7 +273,7 @@ async function main() {
 
   const failed = results.filter((item) => item.status === 'FAIL');
   console.log(`\n${results.length - failed.length}/${results.length} passed or skipped, ${failed.length} failed.`);
-  if (shipment?.id) console.log(`Demo booking left unpaid for the funded-journey check: ${shipment.reference ?? ''} (${shipment.id})`);
+  if (shipment?.id) console.log(`Demo booking ${shipment.id} was cancelled by check B10.`);
   const jsonIndex = process.argv.indexOf('--json');
   if (jsonIndex > 0 && process.argv[jsonIndex + 1]) {
     fs.writeFileSync(process.argv[jsonIndex + 1], JSON.stringify({ api: API_BASE_URL, checkedAt: new Date().toISOString(), paymentEnvironment, shipment: shipment && { id: shipment.id, reference: shipment.reference }, results }, null, 2));
