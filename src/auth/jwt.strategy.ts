@@ -11,7 +11,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: config.get<string>('JWT_ACCESS_SECRET'),
+      // passport-jwt refuses to start with a missing or empty secret, as before; the
+      // fallback only satisfies passport-jwt 4's stricter types.
+      secretOrKey: config.get<string>('JWT_ACCESS_SECRET') ?? '',
     });
   }
 
