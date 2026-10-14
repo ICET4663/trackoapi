@@ -31,6 +31,12 @@ export class TrackingController {
     return this.tracking.recordLocation(id, user, body);
   }
 
+  @Get('shipments/:id/planned-route')
+  async plannedRoute(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.fromAuthorizationHeader(authorization);
+    return this.tracking.plannedRoute(id, user);
+  }
+
   @Get('shipments/:id/proof-of-delivery')
   async deliveryProofs(@Param('id') id: string, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization);

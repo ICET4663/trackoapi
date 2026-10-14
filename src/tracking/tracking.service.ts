@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { MapsProviderService } from '../integrations/maps-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AuthUser } from '../common/types/auth-user';
@@ -62,6 +63,7 @@ export class TrackingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly maps: MapsProviderService,
   ) {}
 
   // Additive, nullable columns created lazily (the same pattern used elsewhere in this
@@ -87,6 +89,59 @@ export class TrackingService {
       throw error;
     });
     return this.locationColumnsReady;
+  }
+
+  private routeColumnReady?: Promise<void>;
+
+  private ensureRouteColumn() {
+    this.routeColumnReady ??= this.prisma.$executeRawUnsafe(
+      'alter table "Shipment" add column if not exists "plannedRoutePolyline" text',
+    ).then(() => undefined).catch((error) => {
+      this.routeColumnReady = undefined;
+      throw error;
+    });
+    return this.routeColumnReady;
+  }
+
+  // The road route Google plans from pickup to destination, drawn on trip maps beside the
+  // route actually driven. Fetched from Google once per shipment, the first time anyone
+  // looks, then stored - so it covers shipments booked before this existed and costs one
+  // Routes call per shipment, not one per map refresh. It is a plan, not where the truck is.
+  async plannedRoute(shipmentId: string, user: AuthUser) {
+    shipmentId = await this.assertShipmentAccess(shipmentId, user);
+    let row: {
+      pickupLatitude: number | null; pickupLongitude: number | null;
+      destinationLatitude: number | null; destinationLongitude: number | null;
+      plannedRoutePolyline: string | null;
+    } | undefined;
+    try {
+      await this.ensureRouteColumn();
+      [row] = await this.prisma.$queryRawUnsafe<NonNullable<typeof row>[]>(
+        `select "pickupLatitude", "pickupLongitude", "destinationLatitude", "destinationLongitude", "plannedRoutePolyline"
+         from "Shipment" where "id" = $1`,
+        shipmentId,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(`Could not load the planned route: ${this.errorMessage(error)}`);
+    }
+    if (!row) throw new NotFoundException('Shipment was not found.');
+    if (row.plannedRoutePolyline) return { encodedPolyline: row.plannedRoutePolyline };
+
+    const { pickupLatitude, pickupLongitude, destinationLatitude, destinationLongitude } = row;
+    if (pickupLatitude == null || pickupLongitude == null || destinationLatitude == null || destinationLongitude == null) {
+      return { encodedPolyline: null };
+    }
+    const route = await this.maps.roadRoute(
+      { latitude: pickupLatitude, longitude: pickupLongitude },
+      { latitude: destinationLatitude, longitude: destinationLongitude },
+    );
+    if (!route) return { encodedPolyline: null };
+    await this.prisma.$executeRawUnsafe(
+      'update "Shipment" set "plannedRoutePolyline" = $2 where "id" = $1 and "plannedRoutePolyline" is null',
+      shipmentId,
+      route.encodedPolyline,
+    ).catch((error) => this.logger.warn(`Could not store the planned route for ${shipmentId}: ${this.errorMessage(error)}`));
+    return { encodedPolyline: route.encodedPolyline };
   }
 
   // Authentication alone isn't enough here - a logged-in customer must not be able to

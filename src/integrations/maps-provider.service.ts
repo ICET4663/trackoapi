@@ -453,7 +453,7 @@ export class MapsProviderService {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration',
+        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
       },
       body: JSON.stringify({
         origin: { location: { latLng: { latitude: originLatitude, longitude: originLongitude } } },
@@ -468,7 +468,7 @@ export class MapsProviderService {
     });
     if (!response.ok) return null;
     const payload = (await response.json()) as {
-      routes?: Array<{ distanceMeters?: number; duration?: string }>;
+      routes?: Array<{ distanceMeters?: number; duration?: string; polyline?: { encodedPolyline?: string } }>;
     };
     const route = payload.routes?.[0];
     const distanceMeters = Number(route?.distanceMeters);
@@ -479,7 +479,19 @@ export class MapsProviderService {
     return {
       distanceKm: Number((distanceMeters / 1000).toFixed(1)),
       durationMinutes: Math.max(1, Math.round(durationSeconds / 60)),
+      encodedPolyline: route?.polyline?.encodedPolyline || null,
     };
+  }
+
+  // The road route between two points as a Google encoded polyline, for drawing the
+  // planned route on trip maps. Null when Maps is not configured or Google has no route.
+  async roadRoute(origin: { latitude: number; longitude: number }, destination: { latitude: number; longitude: number }) {
+    const key = this.config.get<string>('GOOGLE_MAPS_API_KEY');
+    if (!key) return null;
+    const route = await this.googleRoute(origin.latitude, origin.longitude, destination.latitude, destination.longitude, key)
+      .catch(() => null);
+    if (!route?.encodedPolyline) return null;
+    return { encodedPolyline: route.encodedPolyline, distanceKm: route.distanceKm, durationMinutes: route.durationMinutes };
   }
 
   private truckProfile(truckType: string | undefined, adjustments: Record<string, number>) {

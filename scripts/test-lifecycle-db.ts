@@ -109,7 +109,7 @@ async function main() {
     const rateLimit = new RateLimitService(config, prisma);
     const maps = new MapsProviderService(config, prisma, rateLimit);
     const shipments = new ShipmentsService(prisma, notifications, maps);
-    const tracking = new TrackingService(prisma, notifications);
+    const tracking = new TrackingService(prisma, notifications, {} as never);
     const payments = new PaymentProviderService(config, prisma, notifications);
     const settings = new SettingsService(prisma, notifications, config, {} as AuthService);
 

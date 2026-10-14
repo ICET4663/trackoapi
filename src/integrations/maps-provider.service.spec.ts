@@ -34,6 +34,29 @@ describe('MapsProviderService route pricing', () => {
     weightTons: 15,
   };
 
+  it('roadRoute() asks Google for the route geometry and returns it', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ routes: [{ distanceMeters: 120400, duration: '6900s', polyline: { encodedPolyline: '_p~iF~ps|U' } }] }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = createService({ googleKey: 'test-key' });
+
+    const route = await service.roadRoute({ latitude: 6.6, longitude: 3.35 }, { latitude: 7.38, longitude: 3.95 });
+
+    expect(route).toEqual({ encodedPolyline: '_p~iF~ps|U', distanceKm: 120.4, durationMinutes: 115 });
+    const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
+    expect(headers['X-Goog-FieldMask']).toContain('routes.polyline.encodedPolyline');
+  });
+
+  it('roadRoute() returns null without a Maps key, and without calling Google', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(createService().roadRoute({ latitude: 6.6, longitude: 3.35 }, { latitude: 7.38, longitude: 3.95 })).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([0.01, 800])('itemises the minimum fare without changing the quote for distance %s', async distance => {
     const service = createService();
     const quote = await service.routeEstimate({ ...routeInput, destinationLatitude: routeInput.originLatitude + distance / 111, destinationLongitude: routeInput.originLongitude });

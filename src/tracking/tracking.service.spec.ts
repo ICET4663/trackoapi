@@ -29,7 +29,7 @@ function buildPrisma(overrides: Record<string, unknown> = {}) {
 describe('TrackingService read paths never fabricate a location or a delivery proof', () => {
   it('currentLocation returns null, not a fake Lagos ping, when there is no ping yet', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.currentLocation('shp-1', adminUser);
 
@@ -38,7 +38,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('currentLocation reports a database failure instead of pretending there is no ping', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.currentLocation('shp-1', adminUser))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -46,7 +46,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('locationHistory returns an empty list, not a fake single-point route, when there is no history', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.locationHistory('shp-1', adminUser);
 
@@ -55,7 +55,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('locationHistory reports a database failure instead of an empty route', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.locationHistory('shp-1', adminUser))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -63,7 +63,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('deliveryProofs returns an empty list, not a fake "SUBMITTED" proof, for an undelivered shipment', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.deliveryProofs('shp-1', adminUser);
 
@@ -72,7 +72,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('deliveryProofs reports a database failure instead of an empty proof list', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.deliveryProofs('shp-1', adminUser))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -80,7 +80,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('does not report a shipment lookup outage as a missing shipment', async () => {
     const prisma = buildPrisma({ shipment: { findFirst: jest.fn().mockRejectedValue(new Error('connection reset')) } });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.currentLocation('shp-1', adminUser))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -88,7 +88,7 @@ describe('TrackingService read paths never fabricate a location or a delivery pr
 
   it('does not report a driver-assignment lookup outage as forbidden access', async () => {
     const prisma = buildPrisma({ driverAssignment: { findFirst: jest.fn().mockRejectedValue(new Error('connection reset')) } });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.currentLocation('shp-1', driverUser))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -103,7 +103,7 @@ describe('TrackingService.shipmentEvidence', () => {
       .mockResolvedValueOnce([{ id: 'proof-1', photoUrl: 'https://files.example/delivery.jpg', signatureUrl: null, recipientName: 'Ada', note: 'Sealed', status: 'SUBMITTED', submittedAt: now }])
       .mockResolvedValueOnce([{ note: 'Loaded without damage.', createdAt: now }]);
     const prisma = buildPrisma({ $queryRawUnsafe: queryRawUnsafe });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.shipmentEvidence('shp-1', adminUser);
 
@@ -114,7 +114,7 @@ describe('TrackingService.shipmentEvidence', () => {
 
   it('surfaces evidence query failures instead of reporting an empty evidence set', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.shipmentEvidence('shp-1', adminUser)).rejects.toBeInstanceOf(InternalServerErrorException);
   });
@@ -126,7 +126,7 @@ describe('TrackingService.shipmentEvidence', () => {
 describe('TrackingService.recordLocation never fakes a saved ping on failure', () => {
   it('throws instead of echoing back a fake saved ping when the insert fails', async () => {
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockRejectedValue(new Error('connection reset')) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5, longitude: 3.3 }))
       .rejects.toBeInstanceOf(InternalServerErrorException);
@@ -138,7 +138,7 @@ describe('TrackingService.recordLocation never fakes a saved ping on failure', (
       heading: null, speedKph: null, note: null, createdAt: new Date(),
     };
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([savedRow]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.recordLocation('shp-1', adminUser, { latitude: 6.5, longitude: 3.3 });
 
@@ -148,7 +148,7 @@ describe('TrackingService.recordLocation never fakes a saved ping on failure', (
   it('does not save a ping after a shipment leaves the active delivery stages', async () => {
     const insert = jest.fn().mockResolvedValue([]);
     const prisma = buildPrisma({ $queryRawUnsafe: insert });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5, longitude: 3.3 }))
       .rejects.toBeInstanceOf(ConflictException);
@@ -181,7 +181,7 @@ describe('TrackingService live tracking alerts', () => {
       },
     });
     const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
-    const service = new TrackingService(prisma, notifications);
+    const service = new TrackingService(prisma, notifications, {} as never);
 
     await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0, speedKph: 35 });
 
@@ -220,7 +220,7 @@ describe('TrackingService live tracking alerts', () => {
       },
     });
     const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
-    const service = new TrackingService(prisma, notifications);
+    const service = new TrackingService(prisma, notifications, {} as never);
 
     await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0, speedKph: 35 });
 
@@ -250,7 +250,7 @@ describe('TrackingService live tracking alerts', () => {
       },
     });
     const notifications = { create: jest.fn() } as unknown as NotificationsService;
-    const service = new TrackingService(prisma, notifications);
+    const service = new TrackingService(prisma, notifications, {} as never);
 
     await service.recordLocation('shp-1', adminUser, { latitude: 0.3, longitude: 0 });
 
@@ -264,7 +264,7 @@ describe('TrackingService live tracking alerts', () => {
 describe('TrackingService.recordLocation rejects a ping with no real coordinates', () => {
   it('throws BadRequestException when latitude is missing', async () => {
     const prisma = buildPrisma();
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { longitude: 3.3 } as never))
       .rejects.toBeInstanceOf(BadRequestException);
@@ -273,7 +273,7 @@ describe('TrackingService.recordLocation rejects a ping with no real coordinates
 
   it('throws BadRequestException when longitude is missing', async () => {
     const prisma = buildPrisma();
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { latitude: 6.5 } as never))
       .rejects.toBeInstanceOf(BadRequestException);
@@ -287,7 +287,7 @@ describe('TrackingService.recordLocation rejects a ping with no real coordinates
     { latitude: Number.NaN, longitude: 3.3 },
   ])('rejects an out-of-range GPS point before saving it: %j', async (input) => {
     const prisma = buildPrisma();
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, input))
       .rejects.toBeInstanceOf(BadRequestException);
@@ -300,7 +300,7 @@ describe('TrackingService.recordLocation rejects a ping with no real coordinates
       heading: null, speedKph: null, note: null, createdAt: new Date(),
     };
     const prisma = buildPrisma({ $queryRawUnsafe: jest.fn().mockResolvedValue([savedRow]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     const result = await service.recordLocation('shp-1', adminUser, { latitude: 0, longitude: 0 });
 
@@ -317,7 +317,7 @@ describe('TrackingService.submitDeliveryProof never fakes a recorded delivery', 
   function buildService(overrides: Record<string, unknown> = {}) {
     const prisma = buildPrisma(overrides);
     const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
-    return { service: new TrackingService(prisma, notifications), notifications, prisma };
+    return { service: new TrackingService(prisma, notifications, {} as never), notifications, prisma };
   }
 
   it('throws instead of a fake proof when the insert itself fails', async () => {
@@ -388,7 +388,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
     const capturedAt = new Date(Date.now() - 5 * 60_000);
     const received = new Date();
     const insert = jest.fn().mockResolvedValue([{ ...baseRow, createdAt: received, recordedAt: capturedAt, accuracyM: 12 }]);
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService, {} as never);
 
     const result = await service.recordLocation('shp-1', adminUser, {
       ...ping, recordedAt: capturedAt.toISOString(), accuracyM: 12, clientPingId: 'ping-abcdef12',
@@ -402,7 +402,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
 
   it('still accepts an older app version that sends no capture metadata', async () => {
     const insert = jest.fn().mockResolvedValue([baseRow]);
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService, {} as never);
 
     const result = await service.recordLocation('shp-1', adminUser, ping);
 
@@ -420,7 +420,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
     ['a too-short clientPingId', { clientPingId: 'abc' }],
   ])('rejects %s without touching the database', async (_label, extra) => {
     const insert = jest.fn().mockResolvedValue([baseRow]);
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { ...ping, ...extra })).rejects.toBeInstanceOf(BadRequestException);
     expect(insert).not.toHaveBeenCalled();
@@ -428,7 +428,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
 
   it('tolerates a few seconds of device clock skew ahead of the server', async () => {
     const insert = jest.fn().mockResolvedValue([baseRow]);
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: insert }), {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { ...ping, recordedAt: new Date(Date.now() + 30_000).toISOString() }))
       .resolves.toBeDefined();
@@ -439,7 +439,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
     const query = jest.fn()
       .mockResolvedValueOnce([])        // insert hit the unique (shipmentId, clientPingId) index
       .mockResolvedValueOnce([stored]); // lookup of the original
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService, {} as never);
 
     const result = await service.recordLocation('shp-1', adminUser, { ...ping, clientPingId: 'ping-abcdef12' });
 
@@ -449,7 +449,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
 
   it('still ends location sharing with a 409 for a queued fix sent after the trip finished', async () => {
     const query = jest.fn().mockResolvedValue([]); // nothing inserted, no earlier duplicate either
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, { ...ping, clientPingId: 'ping-abcdef12' }))
       .rejects.toBeInstanceOf(ConflictException);
@@ -457,7 +457,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
 
   it('orders the latest position and the trail by capture time, so a late fix cannot replace a newer one', async () => {
     const query = jest.fn().mockResolvedValue([]);
-    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService);
+    const service = new TrackingService(buildPrisma({ $queryRawUnsafe: query }), {} as NotificationsService, {} as never);
 
     await service.currentLocation('shp-1', adminUser);
     await service.locationHistory('shp-1', adminUser);
@@ -475,7 +475,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
         .mockResolvedValueOnce([{ ...baseRow, recordedAt: new Date(Date.now() - 20 * 60_000) }])
         .mockResolvedValueOnce([{ ...baseRow, recordedAt: new Date(Date.now() - 5_000) }]),
     });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await service.recordLocation('shp-1', adminUser, { ...ping, recordedAt: new Date(Date.now() - 20 * 60_000).toISOString() });
     expect(findUnique).not.toHaveBeenCalled();
@@ -487,7 +487,7 @@ describe('TrackingService.recordLocation capture time, accuracy and idempotency'
   it('creates the additive columns once per process, and retries after a failed attempt', async () => {
     const execute = jest.fn().mockRejectedValueOnce(new Error('ddl lock timeout')).mockResolvedValue(undefined);
     const prisma = buildPrisma({ $executeRawUnsafe: execute, $queryRawUnsafe: jest.fn().mockResolvedValue([baseRow]) });
-    const service = new TrackingService(prisma, {} as NotificationsService);
+    const service = new TrackingService(prisma, {} as NotificationsService, {} as never);
 
     await expect(service.recordLocation('shp-1', adminUser, ping)).rejects.toBeInstanceOf(InternalServerErrorException);
     await service.recordLocation('shp-1', adminUser, ping);
@@ -507,7 +507,7 @@ describe('TrackingService location history retention', () => {
       platformSetting: { findUnique: jest.fn().mockResolvedValue(setting) },
       $queryRawUnsafe: query,
     });
-    return new TrackingService(prisma, {} as NotificationsService);
+    return new TrackingService(prisma, {} as NotificationsService, {} as never);
   }
 
   it.each([
