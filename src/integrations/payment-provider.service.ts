@@ -323,6 +323,45 @@ export class PaymentProviderService {
     }
   }
 
+  // Sends a shipment's payment back to the customer through Paystack (owner rule, 14
+  // October: full refund when a paid shipment is cancelled before pickup). Before this,
+  // a refund only changed Trako's ledger and finance had to refund in the Paystack
+  // dashboard by hand. The charge's reference is kept in its BillingCharge id
+  // ("bill-<reference>", see recordSuccessfulPayment).
+  async refundShipmentPayment(shipmentId: string): Promise<{ status: 'refunded' | 'pending' | 'not_applicable' | 'failed'; detail: string }> {
+    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    if (this.status().provider !== 'paystack' || !secretKey) {
+      return { status: 'not_applicable', detail: 'Payments are not processed through Paystack here; refund recorded in Trako only.' };
+    }
+    try {
+      const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId }, select: { reference: true } });
+      if (!shipment) return { status: 'failed', detail: 'Shipment not found.' };
+      const charges = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
+        `select "id" from "BillingCharge" where "ref" = $1 and "id" like 'bill-%' order by "createdAt" asc limit 1`,
+        shipment.reference,
+      );
+      const reference = charges[0]?.id.slice('bill-'.length);
+      if (!reference) return { status: 'failed', detail: 'No Paystack payment was found for this shipment; refund it in the Paystack dashboard.' };
+
+      const response = await fetch('https://api.paystack.co/refund', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction: reference }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { status?: boolean; message?: string; data?: { status?: string } };
+      if (!response.ok || payload.status === false) {
+        // A second request for the same charge is refused by Paystack; the first one stands.
+        if (/already|fully reversed|refunded/i.test(payload.message ?? '')) return { status: 'refunded', detail: payload.message ?? 'Already refunded.' };
+        return { status: 'failed', detail: payload.message ?? `Paystack refund failed (${response.status}).` };
+      }
+      return payload.data?.status === 'processed'
+        ? { status: 'refunded', detail: 'Paystack refund processed.' }
+        : { status: 'pending', detail: `Paystack refund ${payload.data?.status ?? 'queued'}; the bank may take a few days.` };
+    } catch (error) {
+      return { status: 'failed', detail: `Could not reach Paystack for the refund: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
   async verifyPaystackPayment(reference: string, actor?: PaymentActor) {
     const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
     if (!secretKey) {

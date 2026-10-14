@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { ShipmentsService } from './shipments.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -63,10 +63,41 @@ describe('ShipmentsService when a driver drops off a shipment', () => {
     expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', title: 'Removed from shipment' }));
   });
 
-  it.each(['PICKED_UP', 'IN_TRANSIT', 'DELIVERED'])('an accepted driver cannot be taken off once the cargo is on board (%s)', async (shipmentStatus) => {
+  // Owner rule (14 October): after pickup only an admin can hand the cargo over, with a reason.
+  it.each(['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'])('a dispatcher cannot hand over cargo already on board (%s)', async (shipmentStatus) => {
     const { service, updateMany } = build({ assignmentStatus: 'ACCEPTED', shipmentStatus });
 
-    await expect(service.cancelAssignment('asg-1', 'disp-1', 'DISPATCHER')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.cancelAssignment('asg-1', 'disp-1', 'DISPATCHER', 'Truck broke down on the expressway')).rejects.toBeInstanceOf(ForbiddenException);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('an admin must give a reason to hand over cargo already on board', async () => {
+    const { service, updateMany } = build({ assignmentStatus: 'ACCEPTED', shipmentStatus: 'IN_TRANSIT' });
+
+    await expect(service.cancelAssignment('asg-1', 'admin-1', 'ADMIN')).rejects.toBeInstanceOf(BadRequestException);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('an admin hands over cargo with a reason; the trip keeps its status and everyone is told why', async () => {
+    const { service, statusSetTo, notificationsCreate } = build({ assignmentStatus: 'ACCEPTED', shipmentStatus: 'IN_TRANSIT' });
+
+    await service.cancelAssignment('asg-1', 'admin-1', 'ADMIN', 'Truck broke down near Ogere');
+    expect(statusSetTo()).toBe('IN_TRANSIT');
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1', body: expect.stringContaining('Truck broke down near Ogere') }));
+    expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cust-1', title: 'Your cargo is moving to a new driver' }));
+  });
+
+  it('a new driver accepting a handover does not rewind the trip', async () => {
+    const { service, statusSetTo } = build({ assignmentStatus: 'OFFERED', shipmentStatus: 'IN_TRANSIT' });
+
+    await service.respondToAssignment('asg-1', 'driver-1', 'ACCEPT').catch(() => undefined);
+    expect(statusSetTo()).toBe('IN_TRANSIT');
+  });
+
+  it('a delivered trip cannot have its driver replaced', async () => {
+    const { service, updateMany } = build({ assignmentStatus: 'ACCEPTED', shipmentStatus: 'DELIVERED' });
+
+    await expect(service.cancelAssignment('asg-1', 'admin-1', 'ADMIN', 'Truck broke down near Ogere')).rejects.toBeInstanceOf(BadRequestException);
     expect(updateMany).not.toHaveBeenCalled();
   });
 

@@ -1,7 +1,8 @@
-import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
+import { PaymentProviderService } from '../integrations/payment-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
@@ -98,6 +99,10 @@ type ShipmentPartyAlert = {
 
 // Trip steps before the cargo is on the truck: an accepted driver can still be replaced.
 const RELEASABLE_BEFORE_PICKUP: ShipmentStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP'];
+// Trip steps with the cargo on the truck. An admin can hand the cargo over to another
+// driver (owner rule, 14 October); offering, accepting, declining or expiring that
+// handover never rewinds the trip's status.
+const CARGO_ON_BOARD: ShipmentStatus[] = ['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'];
 
 @Injectable()
 export class ShipmentsService {
@@ -108,6 +113,8 @@ export class ShipmentsService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly mapsProvider: MapsProviderService,
+    // Optional so specs and scripts that build the service by hand keep working.
+    @Optional() private readonly paymentProvider?: PaymentProviderService,
   ) {}
 
   async create(customerId: string, dto: CreateShipmentDto) {
@@ -429,6 +436,21 @@ export class ShipmentsService {
       if (shipment.status !== dto.status && (!isOwner || isOperations)) {
         await this.notifyCustomerOfStatus(shipment.customerId, shipment.id, shipment.reference, dto.status).catch(() => null);
       }
+      // Owner rule (14 October): a paid shipment cancelled before pickup is refunded in
+      // full, with no fee. The refund also tells the driver, so it replaces the alert below.
+      const refundOnCancel = shipment.status !== dto.status && dto.status === 'CANCELLED'
+        && (shipment.status === 'ESCROW_FUNDED' || RELEASABLE_BEFORE_PICKUP.includes(shipment.status));
+      if (refundOnCancel) {
+        const escrow = await this.findEscrowOrThrow(shipment.id).catch(() => null);
+        if (escrow && ['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
+          await this.refundEscrow(
+            shipment.id,
+            'ADMIN',
+            isOwner ? 'Customer cancelled before pickup: full refund, no fee.' : 'Cancelled by Trako operations before pickup: full refund.',
+          ).catch((error) => this.logger.error(`Cancelled ${shipment.id} but could not refund it: ${this.errorMessage(error)}`));
+          return this.toShipmentRecord(updated);
+        }
+      }
       // A driver whose trip is cancelled under them would otherwise keep driving.
       if (shipment.status !== dto.status && dto.status === 'CANCELLED') {
         await this.notifyShipmentParties(shipment.id, {
@@ -517,7 +539,9 @@ export class ShipmentsService {
     }
 
     if (next === 'CANCELLED') {
-      if (!relationship.isOwner && !relationship.isAssignedDriver) throw new ForbiddenException('You cannot cancel this shipment.');
+      // Cancelling refunds the customer, so it is the customer's (or operations') call.
+      // A driver who cannot do the job asks operations to take them off it.
+      if (!relationship.isOwner) throw new ForbiddenException('Only the customer or Trako operations can cancel this shipment. Contact operations to be taken off the job.');
       return;
     }
 
@@ -744,14 +768,16 @@ export class ShipmentsService {
       },
     });
 
+    const handover = CARGO_ON_BOARD.includes(shipment.status);
+    const offeredStatus: ShipmentStatus = handover ? shipment.status : 'DRIVER_ASSIGNED';
     await this.prisma.shipment.update({
       where: { id: shipmentId },
       data: {
-        status: 'DRIVER_ASSIGNED',
+        status: offeredStatus,
         timeline: {
           create: {
-            status: 'DRIVER_ASSIGNED',
-            note: 'Driver assignment offer sent.',
+            status: offeredStatus,
+            note: handover ? 'Handover offer sent to a new driver.' : 'Driver assignment offer sent.',
           },
         },
       },
@@ -814,6 +840,9 @@ export class ShipmentsService {
       if (assignment.driverId !== driverId) throw new ForbiddenException('This assignment belongs to another driver.');
       if (assignment.status !== 'OFFERED') throw new BadRequestException('This assignment has already been handled.');
       if (action === 'REJECT') shipmentStatus = await this.awaitingDriverStatus(assignment.shipmentId);
+      // A handover of cargo already on board keeps the trip where it is.
+      const handover = CARGO_ON_BOARD.includes(assignment.shipment.status);
+      if (handover) shipmentStatus = assignment.shipment.status;
 
       if (action === 'ACCEPT') {
         const activeTrip = await this.prisma.driverAssignment.findFirst({
@@ -856,7 +885,9 @@ export class ShipmentsService {
           timeline: {
             create: {
               status: shipmentStatus,
-              note: action === 'ACCEPT' ? 'Driver accepted the shipment.' : 'Driver rejected the shipment.',
+              note: handover
+                ? (action === 'ACCEPT' ? 'New driver accepted the cargo handover.' : 'Driver declined the cargo handover.')
+                : action === 'ACCEPT' ? 'Driver accepted the shipment.' : 'Driver rejected the shipment.',
             },
           },
         },
@@ -1024,7 +1055,7 @@ export class ShipmentsService {
     }
   }
 
-  async cancelAssignment(assignmentId: string, actorId: string, actorRole: UserRole) {
+  async cancelAssignment(assignmentId: string, actorId: string, actorRole: UserRole, note?: string) {
     if (!['ADMIN', 'DISPATCHER'].includes(actorRole)) {
       throw new ForbiddenException('Only platform operations can cancel a driver offer.');
     }
@@ -1038,8 +1069,18 @@ export class ShipmentsService {
     // until the cargo is picked up (breakdown, driver unreachable). After pickup the cargo
     // is on that truck, so a handover is an operational decision outside this action.
     const releasingAcceptedJob = assignment.status === 'ACCEPTED';
-    if (releasingAcceptedJob && !RELEASABLE_BEFORE_PICKUP.includes(assignment.shipment.status)) {
-      throw new BadRequestException('The driver has already picked up the cargo, so this job cannot be reassigned here. Contact the driver and customer to arrange a handover.');
+    const handover = releasingAcceptedJob && CARGO_ON_BOARD.includes(assignment.shipment.status);
+    const reason = (note ?? '').trim();
+    if (releasingAcceptedJob && !RELEASABLE_BEFORE_PICKUP.includes(assignment.shipment.status) && !handover) {
+      throw new BadRequestException('This trip has already been delivered, so the driver cannot be replaced.');
+    }
+    if (handover) {
+      if (actorRole !== 'ADMIN') {
+        throw new ForbiddenException('The cargo is already on the truck. Only an admin can hand it over to another driver.');
+      }
+      if (reason.length < 10) {
+        throw new BadRequestException('Write the reason for handing the cargo over to another driver.');
+      }
     }
     if (assignment.status !== 'OFFERED' && !releasingAcceptedJob) {
       throw new BadRequestException('Only a pending offer, or a job whose cargo has not been picked up, can be withdrawn.');
@@ -1054,7 +1095,7 @@ export class ShipmentsService {
     });
     if (!claimed.count) throw new BadRequestException('This assignment was already handled by another action.');
 
-    const awaitingDriver = await this.awaitingDriverStatus(assignment.shipmentId);
+    const awaitingDriver = handover ? assignment.shipment.status : await this.awaitingDriverStatus(assignment.shipmentId);
     await this.prisma.shipment.update({
       where: { id: assignment.shipmentId },
       data: {
@@ -1062,7 +1103,9 @@ export class ShipmentsService {
         timeline: {
           create: {
             status: awaitingDriver,
-            note: releasingAcceptedJob
+            note: handover
+              ? `Cargo handover started by admin: ${reason}`
+              : releasingAcceptedJob
               ? `Driver taken off the job before pickup by ${actorRole.toLowerCase()} operations. Reassignment started.`
               : `Driver offer withdrawn by ${actorRole.toLowerCase()} operations. Reassignment started.`,
           },
@@ -1084,7 +1127,9 @@ export class ShipmentsService {
         userId: updated.driverId,
         role: 'DRIVER',
         title: releasingAcceptedJob ? 'Removed from shipment' : 'Shipment offer withdrawn',
-        body: releasingAcceptedJob
+        body: handover
+          ? `Trako operations is handing this cargo over to another driver: ${reason}. Operations will contact you about the handover. Location sharing for this shipment has stopped.`
+          : releasingAcceptedJob
           ? 'Trako operations reassigned this shipment before pickup. You no longer need to collect it, and location sharing for it has stopped.'
           : 'Trako operations withdrew this offer. It is no longer available to accept.',
         tone: 'WARNING',
@@ -1095,8 +1140,10 @@ export class ShipmentsService {
       }).catch(() => null),
       this.notifications.create({
         userId: updated.shipment.customerId,
-        title: 'Driver reassignment started',
-        body: releasingAcceptedJob
+        title: handover ? 'Your cargo is moving to a new driver' : 'Driver reassignment started',
+        body: handover
+          ? `Operations is handing your cargo over to another driver: ${reason}. Your payment stays held, and you can follow the new truck once the handover is done.`
+          : releasingAcceptedJob
           ? 'Operations is assigning a new driver to your shipment. Your payment stays held.'
           : 'Operations withdrew the previous offer and is selecting another eligible driver.',
         tone: 'INFO',
@@ -1111,7 +1158,7 @@ export class ShipmentsService {
           action: 'DRIVER_ASSIGNMENT_CANCELLED',
           entity: 'DriverAssignment',
           entityId: updated.id,
-          metadata: { shipmentId: updated.shipmentId, driverId: updated.driverId },
+          metadata: { shipmentId: updated.shipmentId, driverId: updated.driverId, handover, reason: reason || null },
         },
       }).catch(() => null),
     ]);
@@ -1174,7 +1221,13 @@ export class ShipmentsService {
       where: { shipmentId, status: { in: ['OFFERED', 'ACCEPTED'] } },
       select: { id: true },
     });
-    if (!activeAssignment) {
+    const current = await this.prisma.shipment.findUnique({ where: { id: shipmentId }, select: { status: true } }).catch(() => null);
+    if (!activeAssignment && current && CARGO_ON_BOARD.includes(current.status)) {
+      await this.prisma.shipment.update({
+        where: { id: shipmentId },
+        data: { timeline: { create: { status: current.status, note: 'Handover offer expired. Operations must choose another driver.' } } },
+      });
+    } else if (!activeAssignment) {
       const awaitingDriver = await this.awaitingDriverStatus(shipmentId);
       await this.prisma.shipment.update({
         where: { id: shipmentId },
@@ -1527,6 +1580,27 @@ export class ShipmentsService {
     if (escrow.status === 'REFUNDED') throw new BadRequestException('Escrow has already been refunded.');
     if (escrow.status === 'RELEASED') return this.toEscrowRecord(escrow);
 
+    // Owner rules (14 October): payment is never released before proof of delivery. Without
+    // the customer's confirmation (or a resolved dispute), only an admin may release, with a
+    // written reason - the 3-day auto-release job releases as admin with its own reason.
+    if (!escrow.proofOfDeliveryUploaded) {
+      throw new BadRequestException('Proof of delivery has not been uploaded yet, so this payment cannot be released.');
+    }
+    if (!escrow.customerDeliveryConfirmed) {
+      const resolvedDisputes = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
+        `select "id" from "Dispute" where "shipmentId" = $1 and "status" = 'RESOLVED'::"DisputeStatus" limit 1`,
+        shipmentId,
+      ).catch(() => []);
+      if (!resolvedDisputes?.length) {
+        if (actorRole !== 'ADMIN') {
+          throw new ForbiddenException('The customer has not confirmed delivery yet. Only an admin can release this payment now, with a reason.');
+        }
+        if ((note ?? '').trim().length < 10) {
+          throw new BadRequestException('Write the reason for releasing this payment before the customer has confirmed delivery.');
+        }
+      }
+    }
+
     // The status update is the actual point of this call - money moving from held to
     // released. This used to swallow ANY failure here (a real DB error, a connection
     // drop) into a fabricated "released" response that was never actually persisted -
@@ -1740,12 +1814,23 @@ export class ShipmentsService {
     // Released or refunded by someone else in the meantime.
     if (!rows[0]) return this.getEscrow(shipmentId);
 
-    await this.updateShipmentTimeline(shipmentId, 'CANCELLED', note ?? 'Escrow refunded by platform operations.');
+    // Return the money through Paystack. A failure here does not undo the ledger refund:
+    // it is written into the timeline so finance can finish it in the Paystack dashboard.
+    const providerRefund = this.paymentProvider
+      ? await this.paymentProvider.refundShipmentPayment(shipmentId)
+      : { status: 'not_applicable' as const, detail: 'Refund recorded in Trako only.' };
+    const refundNote = `${note ?? 'Escrow refunded by platform operations.'} Paystack: ${providerRefund.detail}`;
+    await this.updateShipmentTimeline(shipmentId, 'CANCELLED', refundNote);
+    if (providerRefund.status === 'failed') {
+      this.logger.error(`refundEscrow(${shipmentId}): ledger refunded but Paystack refund failed: ${providerRefund.detail}`);
+    }
     const amount = this.formatMoney(rows[0].amount, rows[0].currency);
     await this.notifyShipmentParties(shipmentId, {
       customer: {
         title: 'Refund approved',
-        body: `Trako approved a refund of ${amount} for {reference}. Contact support with this reference if it has not reached you.`,
+        body: ['refunded', 'pending'].includes(providerRefund.status)
+          ? `Your refund of ${amount} for {reference} has been sent back to your card or bank. Banks can take up to 10 working days to show it.`
+          : `Trako approved a refund of ${amount} for {reference}. Our finance team is completing it; contact support with this reference if it has not reached you within 10 working days.`,
         tone: 'INFO',
         entity: 'Escrow',
         preferenceKey: 'escrowPayments',
@@ -1758,7 +1843,7 @@ export class ShipmentsService {
         preferenceKey: 'driverOffers',
       },
     });
-    return this.toEscrowRecord(rows[0]);
+    return { ...this.toEscrowRecord(rows[0]), providerRefund };
   }
 
   async confirmEscrowCheck(shipmentId: string, check: string, actorRole: UserRole, actorId: string) {

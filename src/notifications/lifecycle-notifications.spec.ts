@@ -172,7 +172,8 @@ describe('Escrow refund, release and release checks notify the right people', ()
   });
 
   it('releasing escrow tells the customer the shipment is complete', async () => {
-    const { service, notificationCreate } = buildService(escrowRow({ status: 'RELEASE_READY' }), escrowRow({ status: 'RELEASED' }));
+    const ready = { status: 'RELEASE_READY', proofOfDeliveryUploaded: true, customerDeliveryConfirmed: true };
+    const { service, notificationCreate } = buildService(escrowRow(ready), escrowRow({ ...ready, status: 'RELEASED' }));
 
     await service.releaseEscrow('shp-1', 'ADMIN');
 
@@ -248,12 +249,14 @@ describe('Cancelling a trip tells the assigned driver', () => {
     expect(notificationCreate).not.toHaveBeenCalledWith(expect.objectContaining({ userId: 'cust-1' }));
   });
 
-  it('but not when the driver cancels it themselves', async () => {
+  // Owner rule, 14 October: cancelling refunds the customer, so drivers cannot cancel;
+  // they ask operations to take them off the job. Nobody is alerted about a refused attempt.
+  it('but a driver cannot cancel the shipment of a customer, and nobody is alerted', async () => {
     const { service, notificationCreate } = buildService();
 
-    await service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'CANCELLED' } as never);
+    await expect(service.updateStatus('shp-1', 'driver-1', 'DRIVER', { status: 'CANCELLED' } as never)).rejects.toThrow('Only the customer or Trako operations');
 
-    expect(notificationCreate).not.toHaveBeenCalledWith(expect.objectContaining({ userId: 'driver-1' }));
+    expect(notificationCreate).not.toHaveBeenCalled();
   });
 });
 

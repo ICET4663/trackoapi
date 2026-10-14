@@ -19,8 +19,9 @@ const verifiedDocuments = [
 // been released when the database was never actually touched.
 describe('ShipmentsService.releaseEscrow never fakes success on failure', () => {
   const escrowRow = {
+    // Delivered with proof and confirmed by the customer, so release is allowed.
     id: 'escrow-1', shipmentId: 'shp-1', amount: 10_000_000, currency: 'NGN', status: 'FUNDED',
-    arrivalConfirmed: false, proofOfDeliveryUploaded: false, customerDeliveryConfirmed: false,
+    arrivalConfirmed: true, proofOfDeliveryUploaded: true, customerDeliveryConfirmed: true,
     disputeWindowClear: false, platformApproved: false,
   };
 
