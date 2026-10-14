@@ -240,6 +240,12 @@ async function main() {
     return [denied(result.status), message(result)];
   });
 
+  // --- Messaging --------------------------------------------------------------------
+  await check('C1', 'a customer cannot open or create a conversation from a made-up id', async () => {
+    const result = await request(`/v1/conversations/acceptance-unused-${Date.now()}/messages`, { token: token('CUSTOMER') });
+    return [result.status === 404 || denied(result.status), message(result)];
+  });
+
   // --- Notifications, legal --------------------------------------------------------
   for (const role of Object.keys(ACCOUNTS)) {
     await check('N1', `${role.toLowerCase()} can open their notification inbox`, async () => {
