@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
@@ -111,6 +111,22 @@ export class ShipmentsService {
     await this.assertNotInMaintenanceMode();
     await this.assertCustomerCanCreateShipment(customerId);
 
+    const hasText = (...values: Array<string | undefined>) => values.some((value) => typeof value === 'string' && value.trim().length > 0);
+    if (!hasText(dto.pickupAddress, dto.pickupLabel, dto.origin) || !hasText(dto.destinationAddress, dto.destinationLabel, dto.destination)) {
+      throw new BadRequestException('A pickup and a destination address are required.');
+    }
+
+    const clientRequestId = dto.clientRequestId?.trim() || undefined;
+    if (clientRequestId) {
+      const claim = await this.claimBookingKey(customerId, clientRequestId).catch(() => {
+        throw new InternalServerErrorException('Could not create this shipment. Please try again.');
+      });
+      if (!claim.claimed) {
+        if (claim.shipmentId) return this.get(claim.shipmentId, customerId, 'CUSTOMER');
+        throw new ConflictException('This booking is still being created. Check your shipments in a moment before trying again.');
+      }
+    }
+
     const normalized = this.normalizeShipmentDto(dto);
     // Price, distance, and duration are always recomputed server-side from the
     // same formula the client previewed with — a client can never dictate what
@@ -165,6 +181,15 @@ export class ShipmentsService {
         include: { timeline: true },
       });
 
+      if (clientRequestId) {
+        await this.prisma.$executeRawUnsafe(
+          'update "ShipmentBookingKey" set "shipmentId" = $3 where "customerId" = $1 and "clientRequestId" = $2',
+          customerId,
+          clientRequestId,
+          shipment.id,
+        ).catch((error) => this.logger.warn(`Could not link booking key to ${shipment.id}: ${this.errorMessage(error)}`));
+      }
+
       await this.recordQuoteSnapshot(customerId, shipment.id, quote);
 
       const escrow = await this.createEscrowRecord(
@@ -198,9 +223,60 @@ export class ShipmentsService {
         pricingBreakdown: quote.pricingBreakdown,
       });
     } catch (error) {
+      // Free the booking key so the customer's retry can book again.
+      if (clientRequestId) {
+        await this.prisma.$executeRawUnsafe(
+          'delete from "ShipmentBookingKey" where "customerId" = $1 and "clientRequestId" = $2 and "shipmentId" is null',
+          customerId,
+          clientRequestId,
+        ).catch(() => undefined);
+      }
       this.logger.error(`create() failed to save shipment for customer ${customerId}: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException(`Could not create this shipment. Please try again: ${this.errorMessage(error)}`);
     }
+  }
+
+  private bookingKeysReady?: Promise<void>;
+
+  // Booking retry keys live in their own small table (created lazily, like the other
+  // additive tracking columns) so the unique key can be claimed before the shipment exists.
+  private ensureBookingKeys() {
+    this.bookingKeysReady ??= this.prisma.$executeRawUnsafe(
+      `create table if not exists "ShipmentBookingKey" (
+         "customerId" text not null,
+         "clientRequestId" text not null,
+         "shipmentId" text,
+         "createdAt" timestamp(3) not null default current_timestamp,
+         primary key ("customerId", "clientRequestId")
+       )`,
+    ).then(() => undefined).catch((error) => {
+      this.bookingKeysReady = undefined;
+      throw error;
+    });
+    return this.bookingKeysReady;
+  }
+
+  // Claims a booking attempt's key. A key already linked to a shipment gives that shipment
+  // back; a key still being booked is reported as in progress, unless its attempt died more
+  // than two minutes ago without a shipment, in which case it is claimed again.
+  private async claimBookingKey(customerId: string, clientRequestId: string): Promise<{ claimed: true } | { claimed: false; shipmentId: string | null }> {
+    await this.ensureBookingKeys();
+    const claimed = await this.prisma.$queryRawUnsafe<Array<{ customerId: string }>>(
+      `insert into "ShipmentBookingKey" ("customerId", "clientRequestId") values ($1, $2)
+       on conflict ("customerId", "clientRequestId") do update set "createdAt" = current_timestamp
+         where "ShipmentBookingKey"."shipmentId" is null
+           and "ShipmentBookingKey"."createdAt" < current_timestamp - interval '2 minutes'
+       returning "customerId"`,
+      customerId,
+      clientRequestId,
+    );
+    if (claimed.length) return { claimed: true };
+    const [existing] = await this.prisma.$queryRawUnsafe<Array<{ shipmentId: string | null }>>(
+      'select "shipmentId" from "ShipmentBookingKey" where "customerId" = $1 and "clientRequestId" = $2',
+      customerId,
+      clientRequestId,
+    );
+    return { claimed: false, shipmentId: existing?.shipmentId ?? null };
   }
 
   private async assertCustomerCanCreateShipment(customerId: string) {

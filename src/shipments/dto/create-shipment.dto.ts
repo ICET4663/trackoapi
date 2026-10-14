@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class CreateShipmentDto {
   @IsOptional()
@@ -102,4 +102,11 @@ export class CreateShipmentDto {
   @IsOptional()
   @IsString()
   pickupContactPhone?: string;
+
+  // The same value on every retry of one booking attempt, so a retry after a lost
+  // response returns the shipment already created instead of booking a second one.
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  clientRequestId?: string;
 }
