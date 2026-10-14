@@ -19,14 +19,21 @@ const customer: AuthUser = {
 function buildPrisma(overrides: Record<string, unknown> = {}) {
   return {
     conversation: {
-      upsert: jest
-        .fn()
-        .mockResolvedValue({
+      findUnique: jest.fn().mockResolvedValue({
           id: "conv-1",
           customerId: "customer-1",
           driverId: "driver-1",
         }),
-      update: jest.fn().mockResolvedValue(undefined),
+      upsert: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
+      update: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
     },
     message: {
       create: jest.fn().mockResolvedValue({
@@ -132,7 +139,7 @@ describe("CommunicationService never fakes success on failure", () => {
     const prisma = buildPrisma({
       shipment: { findUnique: jest.fn().mockResolvedValue({ id: "shipment-1", reference: "TRK-1", customerId: "customer-1" }) },
       driverAssignment: { findFirst: assignmentFindFirst },
-      conversation: { upsert: conversationUpsert, update: jest.fn() },
+      conversation: { findUnique: conversationUpsert, upsert: conversationUpsert, update: conversationUpsert },
     });
     const service = buildService(prisma);
     const driver = { sub: "driver-1", email: "driver@x.com", role: "DRIVER" } as AuthUser;
@@ -146,13 +153,24 @@ describe("CommunicationService never fakes success on failure", () => {
   it("allows the owner of the assigned truck to read the shipment conversation", async () => {
     const prisma = buildPrisma({
       conversation: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          shipmentId: "shipment-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
         upsert: jest.fn().mockResolvedValue({
           id: "conv-1",
           shipmentId: "shipment-1",
           customerId: "customer-1",
           driverId: "driver-1",
         }),
-        update: jest.fn(),
+        update: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          shipmentId: "shipment-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
       },
       driverAssignment: {
         findFirst: jest.fn().mockResolvedValue({ id: "assignment-1" }),
@@ -173,13 +191,24 @@ describe("CommunicationService never fakes success on failure", () => {
   it("rejects a truck owner whose vehicle is not assigned to the shipment", async () => {
     const prisma = buildPrisma({
       conversation: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          shipmentId: "shipment-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
         upsert: jest.fn().mockResolvedValue({
           id: "conv-1",
           shipmentId: "shipment-1",
           customerId: "customer-1",
           driverId: "driver-1",
         }),
-        update: jest.fn(),
+        update: jest.fn().mockResolvedValue({
+          id: "conv-1",
+          shipmentId: "shipment-1",
+          customerId: "customer-1",
+          driverId: "driver-1",
+        }),
       },
       driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
     });

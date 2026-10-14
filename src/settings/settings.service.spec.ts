@@ -495,17 +495,17 @@ describe('SettingsService driver document review is a real workflow, not a fake 
     const { service } = buildService(queryRawUnsafe);
 
     await expect(
-      service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'https://example.com/license.jpg' }),
+      service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'data:image/jpeg;base64,license' }),
     ).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
   it('a genuinely successful upload lands the document on PENDING_REVIEW, not a fake verified/expiring state', async () => {
     const queryRawUnsafe = jest.fn().mockResolvedValue([
-      { id: 'license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'https://example.com/license.jpg' },
+      { id: 'license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'data:image/jpeg;base64,license' },
     ]);
     const { service } = buildService(queryRawUnsafe);
 
-    const result = await service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'https://example.com/license.jpg' });
+    const result = await service.uploadDriverDocument('driver-1', 'license', { fileUrl: 'data:image/jpeg;base64,license' });
 
     expect(result.document.state).toBe('pending_review');
   });
@@ -584,10 +584,10 @@ describe('SettingsService vehicle document review', () => {
   it('uploads a supported document into pending review and alerts operations', async () => {
     const { service, queryRawUnsafe, notificationsCreate } = buildService({ rows: [{ id: 'doc-1', state: 'pending_review' }] });
 
-    const result = await service.uploadVehicleDocument('vehicle-1', 'owner-1', 'insurance', { fileUrl: 'https://example.com/insurance.jpg' });
+    const result = await service.uploadVehicleDocument('vehicle-1', 'owner-1', 'insurance', { fileUrl: 'data:image/jpeg;base64,insurance' });
 
     expect(result).toMatchObject({ uploaded: true, document: { state: 'pending_review' } });
-    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('PENDING_REVIEW'), expect.any(String), 'vehicle-1', 'INSURANCE', expect.any(String), null, null, 'https://example.com/insurance.jpg');
+    expect(queryRawUnsafe).toHaveBeenCalledWith(expect.stringContaining('PENDING_REVIEW'), expect.any(String), 'vehicle-1', 'INSURANCE', expect.any(String), null, null, 'data:image/jpeg;base64,insurance');
     expect(notificationsCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'ADMIN', entity: 'VehicleDocument' }));
   });
 
@@ -903,8 +903,8 @@ describe('SettingsService driver document uploads are correctly scoped per drive
       noopAuthService,
     );
 
-    await service.uploadDriverDocument('driver-A', 'license', { fileUrl: 'https://example.com/a.jpg' });
-    await service.uploadDriverDocument('driver-B', 'license', { fileUrl: 'https://example.com/b.jpg' });
+    await service.uploadDriverDocument('driver-A', 'license', { fileUrl: 'data:image/jpeg;base64,a' });
+    await service.uploadDriverDocument('driver-B', 'license', { fileUrl: 'data:image/jpeg;base64,b' });
 
     const idsUsed = queryRawUnsafe.mock.calls.map((call) => call[1]);
     expect(idsUsed).toEqual(['driver-A_license', 'driver-B_license']);
@@ -926,14 +926,14 @@ describe('SettingsService driver document uploads are correctly scoped per drive
 
   it('driverDocuments() maps a real row back to its bare type slug, scoped to the correct driver only', async () => {
     const queryRawUnsafe = jest.fn().mockResolvedValue([
-      { id: 'driver-A_license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'https://example.com/a.jpg' },
+      { id: 'driver-A_license', title: 'License', meta: 'Uploaded - pending review', state: 'pending_review', fileUrl: 'data:image/jpeg;base64,a' },
     ]);
     const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
     const service = new SettingsService(prisma, {} as NotificationsService, { get: jest.fn() } as unknown as ConfigService, noopAuthService);
 
     const result = await service.driverDocuments('driver-A');
 
-    expect(result[0]).toMatchObject({ id: 'license', state: 'pending_review', fileUrl: 'https://example.com/a.jpg' });
+    expect(result[0]).toMatchObject({ id: 'license', state: 'pending_review', fileUrl: 'data:image/jpeg;base64,a' });
     expect(result[1]).toMatchObject({ id: 'insurance', state: 'missing' });
   });
 });
@@ -1257,5 +1257,51 @@ describe('SettingsService admin/dashboard/preference reads and writes never fake
     const service = buildService({ auditLog: { findUnique: jest.fn().mockRejectedValue(new Error('connection reset')) } });
 
     await expect(service.auditLog('audit-1')).rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+});
+
+// Driver and vehicle document files used to accept any URL a client sent, so a document
+// under review could point at an outside site (security audit 13 October, open risk).
+describe('SettingsService document files must be Trako uploads', () => {
+  const storage: Record<string, string> = { SUPABASE_URL: 'https://proj.supabase.co/', SUPABASE_SERVICE_ROLE_KEY: 'service-role', SUPABASE_STORAGE_BUCKET: 'tracko-media' };
+
+  function buildService(env: Record<string, string> = storage) {
+    const queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'license' }]);
+    const prisma = {
+      $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: jest.fn().mockResolvedValue(1),
+      auditLog: { create: jest.fn().mockResolvedValue(undefined) },
+      vehicle: { findFirst: jest.fn().mockResolvedValue({ id: 'vehicle-1', ownerId: 'owner-1' }) },
+    } as unknown as PrismaService;
+    const notifications = { create: jest.fn().mockResolvedValue({ id: 'notif-1' }) } as unknown as NotificationsService;
+    const config = { get: jest.fn((key: string) => env[key]) } as unknown as ConfigService;
+    return { service: new SettingsService(prisma, notifications, config, noopAuthService), queryRawUnsafe };
+  }
+
+  it.each([
+    'https://example.com/license.jpg',
+    'https://proj.supabase.co/storage/v1/object/public/other-bucket/license.jpg',
+    'https://proj.supabase.co/storage/v1/object/public/tracko-media/../secret.jpg',
+    'data:image/jpeg;base64,AAAA',
+  ])('refuses a driver document file that is not a Trako upload: %s', async (fileUrl) => {
+    const { service, queryRawUnsafe } = buildService();
+
+    await expect(service.uploadDriverDocument('driver-1', 'license', { fileUrl })).rejects.toBeInstanceOf(BadRequestException);
+    expect(queryRawUnsafe).not.toHaveBeenCalledWith(expect.stringContaining('insert into "DriverDocument"'), expect.anything());
+  });
+
+  it('accepts a file stored by Trako', async () => {
+    const { service } = buildService();
+
+    await expect(service.uploadDriverDocument('driver-1', 'license', {
+      fileUrl: 'https://proj.supabase.co/storage/v1/object/public/tracko-media/documents/driver-1/license.jpg',
+    })).resolves.toBeDefined();
+  });
+
+  it('refuses an outside link for a vehicle document', async () => {
+    const { service } = buildService();
+
+    await expect(service.uploadVehicleDocument('vehicle-1', 'owner-1', 'insurance', { fileUrl: 'https://example.com/insurance.jpg' }))
+      .rejects.toBeInstanceOf(BadRequestException);
   });
 });

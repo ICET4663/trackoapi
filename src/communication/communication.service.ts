@@ -27,10 +27,9 @@ export class CommunicationService {
     private readonly translationProvider: TranslationProviderService,
   ) {}
 
-  // A conversation created with a customerId/driverId is scoped: those participants,
-  // the assigned truck owner, and operations staff may read/write it. A conversation with both null is a
-  // legacy/admin-mock thread from before scoping existed - left open rather than
-  // locking existing admin/dispatcher screens out of threads they already use.
+  // A conversation is readable by its customer and driver, the assigned truck owner, and
+  // operations staff. A thread with neither a customer nor a driver (old admin threads)
+  // used to be open to every signed-in account; it is now staff-only.
   private async assertConversationAccess(
     conversation: {
       shipmentId: string | null;
@@ -40,7 +39,6 @@ export class CommunicationService {
     user: AuthUser,
   ) {
     if (user.role === "ADMIN" || user.role === "DISPATCHER") return;
-    if (!conversation.customerId && !conversation.driverId) return;
     if (
       conversation.customerId === user.sub ||
       conversation.driverId === user.sub
@@ -60,6 +58,40 @@ export class CommunicationService {
     throw new ForbiddenException(
       "You do not have access to this conversation.",
     );
+  }
+
+  // Opens the thread a screen asks for. Only operations staff may start one from an id:
+  // their "Message driver" / "Message user" buttons use the person's user id as the
+  // thread id, so such a thread is addressed to that customer or driver and shows in
+  // their inbox (it used to be created with no participants, so they never saw it, and
+  // any signed-in account could read it). Everyone else can only open existing threads.
+  private async openConversation(conversationId: string, user: AuthUser, touch = false) {
+    const staff = user.role === "ADMIN" || user.role === "DISPATCHER";
+    try {
+      const existing = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
+      if (!existing && !staff) throw new NotFoundException("Conversation was not found.");
+      if (staff && (!existing || (!existing.customerId && !existing.driverId))) {
+        const recipient = await this.prisma.user.findUnique({ where: { id: conversationId }, select: { role: true } });
+        const addressedTo =
+          recipient?.role === "CUSTOMER" ? { customerId: conversationId }
+            : recipient?.role === "DRIVER" ? { driverId: conversationId }
+              : {};
+        return await this.prisma.conversation.upsert({
+          where: { id: conversationId },
+          update: { ...addressedTo, ...(touch ? { updatedAt: new Date() } : {}) },
+          create: { id: conversationId, subject: "Trako conversation", ...addressedTo },
+        });
+      }
+      if (touch && existing) {
+        return await this.prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+      }
+      return existing!;
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      throw new InternalServerErrorException(
+        `Could not open this conversation. Please try again: ${this.errorMessage(error)}`,
+      );
+    }
   }
 
   // Finds (or lazily creates) the single conversation thread scoped to a shipment,
@@ -186,18 +218,7 @@ export class CommunicationService {
   // the two participants could believe they were looking at their real conversation when
   // they were not. A read failure now surfaces as a real error instead.
   async listMessages(conversationId: string, user: AuthUser) {
-    let conversation;
-    try {
-      conversation = await this.prisma.conversation.upsert({
-        where: { id: conversationId },
-        update: {},
-        create: { id: conversationId, subject: "Trako conversation" },
-      });
-    } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not load this conversation. Please try again: ${this.errorMessage(error)}`,
-      );
-    }
+    const conversation = await this.openConversation(conversationId, user);
     await this.assertConversationAccess(conversation, user);
 
     let messages;
@@ -231,17 +252,7 @@ export class CommunicationService {
     dto: SendMessageDto,
     user: AuthUser,
   ) {
-    const conversation = await this.prisma.conversation
-      .upsert({
-        where: { id: conversationId },
-        update: { updatedAt: new Date() },
-        create: { id: conversationId, subject: "Trako conversation" },
-      })
-      .catch((error) => {
-        throw new InternalServerErrorException(
-          `Could not open this conversation. Please try again: ${this.errorMessage(error)}`,
-        );
-      });
+    const conversation = await this.openConversation(conversationId, user, true);
     await this.assertConversationAccess(conversation, user);
 
     const suppliedEnglishTranscript = dto.englishTranscript?.trim();

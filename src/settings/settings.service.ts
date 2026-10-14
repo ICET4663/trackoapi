@@ -98,6 +98,25 @@ const notificationPreferences: Record<PreferenceKey, boolean> = {
 
 @Injectable()
 export class SettingsService {
+  // Driver and vehicle document files must be Trako's own uploads (the media upload
+  // endpoint), not any link a client sends: an outside URL could show reviewers a
+  // lookalike page or tell a third party who opened it. Mirrors the storage location
+  // used by CommunicationService when it stores an upload.
+  private assertTrakoUpload(fileUrl: string) {
+    const storageUrl = (
+      this.config.get<string>('SUPABASE_URL') ??
+      this.config.get<string>('EXPO_PUBLIC_SUPABASE_URL') ??
+      this.config.get<string>('NEXT_PUBLIC_SUPABASE_URL') ??
+      ''
+    ).replace(/\/$/, '');
+    const bucket = this.config.get<string>('SUPABASE_STORAGE_BUCKET') ?? 'tracko-media';
+    const trakoUpload = storageUrl && this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY')
+      ? fileUrl.startsWith(`${storageUrl}/storage/v1/object/public/${bucket}/`) && !fileUrl.includes('..')
+      // Without object storage, uploads are stored inline as data URIs.
+      : fileUrl.startsWith('data:');
+    if (!trakoUpload) throw new BadRequestException('Upload the document file in Trako, then submit it.');
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -1732,6 +1751,7 @@ export class SettingsService {
   ) {
     const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
     if (!fileUrl) throw new BadRequestException('Document file URL is required.');
+    this.assertTrakoUpload(fileUrl);
 
     const expires = input.expires ? new Date(input.expires) : null;
     const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
@@ -1940,6 +1960,7 @@ export class SettingsService {
     if (!required) throw new BadRequestException('Unsupported vehicle document type.');
     const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
     if (!fileUrl) throw new BadRequestException('Document file URL is required.');
+    this.assertTrakoUpload(fileUrl);
     const expires = input.expires ? new Date(input.expires) : null;
     const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
     const id = `${vehicleId}-${type.toLowerCase()}`;

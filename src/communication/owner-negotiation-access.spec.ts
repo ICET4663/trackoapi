@@ -19,7 +19,7 @@ describe('truck owner shipment negotiation access', () => {
     });
     const findMany = jest.fn().mockResolvedValue([]);
     const prisma = {
-      conversation: { upsert: jest.fn().mockResolvedValue(conversation), update: jest.fn().mockResolvedValue(conversation) },
+      conversation: { findUnique: jest.fn().mockResolvedValue(conversation), upsert: jest.fn().mockResolvedValue(conversation), update: jest.fn().mockResolvedValue(conversation) },
       driverAssignment: { findFirst },
       message: { create, findMany },
       user: { findUnique: jest.fn().mockResolvedValue({ preferredLanguage: 'en' }) },
