@@ -9,7 +9,8 @@
 // requirement, since drivers share live location during active deliveries.
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
-export const LEGAL_SUPPORT_EMAIL = 'support@trako.com.ng';
+// Owner's choice (15 October): the one monitored support inbox.
+export const LEGAL_SUPPORT_EMAIL = 'adetolaelemide517@gmail.com';
 export const LEGAL_LAST_UPDATED = 'October 12, 2026';
 
 export type LegalSection = { heading: string; body: string };
