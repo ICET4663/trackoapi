@@ -417,12 +417,11 @@ describe('AuthService.requestRegistrationCode never claims success when the OTP 
   });
 });
 
-// When the OTP email can't actually be delivered (provider unconfigured, Resend still
-// in sandbox mode, or a real send failure) a new user would otherwise have no way to
-// get their code and could never finish signing up. The code is returned in the
-// response as a fallback - registration only, never password reset - and stops being
-// returned the moment real delivery works.
-describe('AuthService.requestRegistrationCode OTP fallback when email delivery fails', () => {
+// The sign-up code used to be returned in the response whenever the email failed to
+// send. A failure can be provoked (e.g. by exhausting the email provider's rate limit),
+// which let anyone register an address they do not own (found 14 October). The code is
+// now returned only with EXPOSE_DEV_OTP=true (local development).
+describe('AuthService.requestRegistrationCode never leaks the code outside development', () => {
   function buildService(configValues: Record<string, string | undefined>) {
     const config = { get: (key: string) => configValues[key] } as unknown as ConfigService;
     const prisma = {
@@ -436,20 +435,25 @@ describe('AuthService.requestRegistrationCode OTP fallback when email delivery f
 
   const request = { email: 'new@tracko.ng', phone: '+2348030000001', role: 'CUSTOMER' as never } as never;
 
-  it('returns devCode when the provider is unconfigured (mock mode)', async () => {
+  it('does not return the code when no email provider is configured', async () => {
     const result = await buildService({}).requestRegistrationCode(request);
-    expect(result.devCode).toMatch(/^\d{6}$/);
+    expect(result).not.toHaveProperty('devCode');
     expect(result.delivery.sent).toBe(false);
   });
 
-  it('returns devCode when Resend is configured but the send fails', async () => {
+  it('returns the code only with EXPOSE_DEV_OTP=true (local development)', async () => {
+    const result = await buildService({ EXPOSE_DEV_OTP: 'true' }).requestRegistrationCode(request);
+    expect(result.devCode).toMatch(/^\d{6}$/);
+  });
+
+  it('does not return the code when Resend is configured but the send fails', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: false,
       json: async () => ({ message: 'You can only send testing emails to your own email address.' }),
     } as Response);
     try {
       const result = await buildService({ EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'test_key' }).requestRegistrationCode(request);
-      expect(result.devCode).toMatch(/^\d{6}$/);
+      expect(result).not.toHaveProperty('devCode');
       expect(result.delivery.sent).toBe(false);
     } finally {
       fetchSpy.mockRestore();

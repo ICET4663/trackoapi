@@ -76,13 +76,13 @@ export class AuthService {
       expiresAt,
     });
 
-    // If the OTP email did not actually go out (provider unconfigured, Resend still
-    // in sandbox mode, a genuine send failure), fall back to returning the code in
-    // this response so a new user can still complete signup. Scoped to REGISTRATION
-    // only - never password reset - and to the caller who just entered this email
-    // for a brand-new account, so the exposure is minimal. Self-disables the moment
-    // real email delivery starts working (delivery.sent === true).
-    const includeCode = this.exposeDevOtp() || !delivery.sent;
+    // The code is returned only when EXPOSE_DEV_OTP is on (local development). It used
+    // to be returned whenever the email failed to send, a stop-gap from before the
+    // email domain was verified - but a send failure can be provoked (for example by
+    // exhausting the provider's rate limit), which let anyone register an address they
+    // do not own. Delivery works in production since 14 October; a failed send now
+    // reports `delivery.sent: false` and the app asks the user to try again.
+    const includeCode = this.exposeDevOtp();
 
     return {
       sent: true,
