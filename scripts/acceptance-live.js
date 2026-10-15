@@ -95,7 +95,16 @@ async function main() {
     const unknown = await request('/v1/auth/password-reset/request', { method: 'POST', body: { identifier: `nobody-${Date.now()}@example.com` } });
     return [unknown.status < 500 && !/not found|no account|does not exist/i.test(JSON.stringify(unknown.payload)), message(unknown)];
   });
-  await check('A6', 'refresh issues a new session; logout revokes it', async () => {
+  await check('A11', 'sign-up never returns the email code, even when the email cannot be sent', async () => {
+    const stamp = Date.now();
+    // example.com is refused by the email provider, so this always exercises a failed send.
+    const result = await request('/v1/auth/register/request', {
+      method: 'POST',
+      body: { email: `acceptance-${stamp}@example.com`, phone: `+234803${String(stamp).slice(-7)}`, role: 'CUSTOMER', fullName: 'Acceptance Check' },
+    });
+    return [result.status < 500 && !('devCode' in (result.payload ?? {})), `${result.status}, email sent: ${result.payload?.delivery?.sent}, code in response: ${'devCode' in (result.payload ?? {})}`];
+  });
+  await check('A6','refresh issues a new session; logout revokes it', async () => {
     const login = await request('/v1/auth/login', { method: 'POST', body: { identifier: ACCOUNTS.CUSTOMER, password: PASSWORD, role: 'CUSTOMER' } });
     const refreshToken = login.payload?.refreshToken;
     if (!refreshToken) return [false, 'no refresh token returned'];
