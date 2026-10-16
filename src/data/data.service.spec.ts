@@ -303,6 +303,18 @@ describe('DataService route ends for trip maps', () => {
     });
   });
 
+  it('tells the customer whether each shipment was paid, refunded or never paid', async () => {
+    const prisma = { shipment: { findMany: jest.fn().mockResolvedValue([
+      { ...shipment, id: 'paid', escrow: { status: 'FUNDED' } },
+      { ...shipment, id: 'refunded', status: 'CANCELLED', escrow: { status: 'REFUNDED' } },
+      { ...shipment, id: 'unpaid', status: 'CANCELLED', escrow: null },
+    ]) } } as unknown as PrismaService;
+    const result = await new DataService(prisma).list('customer-shipments', 'cust-1', 'CUSTOMER') as Array<Record<string, unknown>>;
+
+    expect(result.map((item) => item.paymentStatus)).toEqual(['FUNDED', 'REFUNDED', null]);
+    expect((prisma.shipment.findMany as jest.Mock).mock.calls[0][0].include.escrow).toEqual({ select: { status: true } });
+  });
+
   it('gives the driver the map point of each end of an active trip', async () => {
     const assignment = { id: 'assign-1', status: 'ACCEPTED', offeredAt: new Date(), shipment, vehicle: null, proposedPriceKobo: null, proposedNote: null, proposedAt: null };
     const prisma = { driverAssignment: { findMany: jest.fn().mockResolvedValue([assignment]) } } as unknown as PrismaService;

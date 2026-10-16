@@ -69,6 +69,7 @@ export class DataService {
           return (await this.prisma.shipment.findMany({
             where: { customerId: userId },
             include: {
+              escrow: { select: { status: true } },
               mediaAssets: {
                 where: { kind: 'CARGO_PHOTO' },
                 orderBy: { createdAt: 'desc' },
@@ -94,6 +95,9 @@ export class DataService {
             volumeM3: shipment.cargoVolumeM3 ?? 0,
             truckType: shipment.truckType ?? 'Truck',
             cargoPhotoUrl: shipment.mediaAssets[0]?.url ?? null,
+            // The customer's timeline needs to know whether money was ever taken: a cancelled
+            // booking may be unpaid (no escrow, or PENDING) or paid and REFUNDED.
+            paymentStatus: shipment.escrow?.status ?? null,
             amount: this.formatMoney(shipment.quotedPriceKobo),
             meta: [
               shipment.quantity,
