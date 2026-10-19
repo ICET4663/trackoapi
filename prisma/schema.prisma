@@ -187,6 +187,7 @@ model User {
   locationPings ShipmentLocationPing[]
   deliveryProofs DeliveryProof[]
   notifications Notification[]
+  internalShipmentNotes ShipmentInternalNote[]
   payouts Payout[] @relation("DriverPayouts")
   customerReviews Review[] @relation("CustomerReviews")
   driverReviews   Review[] @relation("DriverReviews")
@@ -324,6 +325,21 @@ model Shipment {
   deliveryProofs DeliveryProof[]
   review        Review?
   conversation  Conversation?
+  internalNotes ShipmentInternalNote[]
+}
+
+model ShipmentInternalNote {
+  id         String   @id @default(uuid())
+  shipmentId String
+  authorId   String
+  authorRole String
+  body       String
+  createdAt  DateTime @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  author   User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([shipmentId, createdAt, id])
 }
 
 model Review {
@@ -804,3 +820,4 @@ model PlatformSetting {
 
   @@index([updatedById])
 }
+
