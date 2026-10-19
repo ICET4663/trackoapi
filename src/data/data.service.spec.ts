@@ -123,6 +123,25 @@ describe('DataService authorization gates', () => {
 // trucks, wallet, dispatcher queues, platform users...) would silently render fake
 // content instead of surfacing the outage, and owner-trucks' create() would tell an
 // owner their truck was saved when the Vehicle row was never written.
+describe('DataService dispatcher-shipments status', () => {
+  it('counts only paid or offered shipments as Posted (unassigned)', async () => {
+    const statuses = ['DRAFT', 'QUOTED', 'PENDING_PAYMENT', 'ESCROW_FUNDED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED', 'CANCELLED', 'DISPUTED'];
+    const prisma = {
+      shipment: { findMany: jest.fn().mockResolvedValue(statuses.map((status, index) => ({ id: `s${index}`, reference: status, customerId: 'cust-1', status, pickupLabel: 'Ikeja', destinationLabel: 'Kano' }))) },
+      user: { findMany: jest.fn().mockResolvedValue([]) },
+      driverAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const service = new DataService(prisma as unknown as PrismaService);
+    const rows = (await service.list('dispatcher-shipments', 'disp-1', 'DISPATCHER')) as { id: string; status: string }[];
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.status]))).toEqual({
+      DRAFT: 'Awaiting payment', QUOTED: 'Awaiting payment', PENDING_PAYMENT: 'Awaiting payment',
+      ESCROW_FUNDED: 'Posted', DRIVER_ASSIGNED: 'Posted',
+      DRIVER_EN_ROUTE: 'In transit', IN_TRANSIT: 'In transit',
+      DELIVERED: 'Delivered', COMPLETED: 'Delivered', CANCELLED: 'Cancelled', DISPUTED: 'Delayed',
+    });
+  });
+});
+
 describe('DataService never fakes success on a real failure', () => {
   it('list() throws instead of returning a fabricated preview row when the read fails', async () => {
     const prisma = {

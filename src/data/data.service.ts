@@ -651,9 +651,14 @@ export class DataService {
     }
   }
 
+  // 'Posted' is what the dispatcher screens count as Unassigned, so it must only cover
+  // shipments that are paid and waiting for a driver (or an offer is out).
   private dispatcherStatus(status: string) {
     if (['IN_TRANSIT', 'PICKED_UP', 'DRIVER_EN_ROUTE', 'ARRIVED_PICKUP', 'ARRIVED_DESTINATION'].includes(status)) return 'In transit';
     if (status === 'DISPUTED') return 'Delayed';
+    if (['DELIVERED', 'COMPLETED'].includes(status)) return 'Delivered';
+    if (status === 'CANCELLED') return 'Cancelled';
+    if (['DRAFT', 'QUOTED', 'PENDING_PAYMENT'].includes(status)) return 'Awaiting payment';
     return 'Posted';
   }
 
