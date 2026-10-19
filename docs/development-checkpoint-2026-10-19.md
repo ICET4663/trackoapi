@@ -12,17 +12,21 @@ Shipment notes API foundation (local, not deployed):
 - POST to the same URL accepts { "body": "Internal operational context" }.
 - ADMIN and DISPATCHER only; authenticated author and role are recorded.
 - Notes are append-only through this API. Correct a mistake with another note.
-- Migration 20261019000100_shipment_internal_notes creates a private, RLS-enabled
-  table with foreign keys and body/role constraints. There are no public policies.
+- prisma/manual-sql/20261019_add_shipment_internal_notes.sql creates a private table
+  with foreign keys and body/role checks, enables RLS with no policies and revokes all
+  rights from Supabase's anon and authenticated roles. Safe to re-run.
 - Database errors must remain errors, not a fabricated empty inbox or saved note.
 - No trip, payment, release-check or dispute state is changed.
 
-Before deployment: review/apply the migration using the existing controlled
-database deployment procedure, generate Prisma, run database integration checks
-for backend-role access and anonymous denial, then deploy the API. No production
-database was changed during this implementation.
-Do not run migration deployment against an existing unbaselined database: this
-checkout did not previously contain a tracked Prisma migration history.
+Before deployment: apply the SQL file to the production database, then deploy the API.
+The database has no `_prisma_migrations` table (checked 19 October), so like the earlier
+files in prisma/manual-sql it is applied by hand, not with `prisma migrate deploy`.
+From this repo, with the production DATABASE_URL in .env:
+
+    npx prisma db execute --file prisma/manual-sql/20261019_add_shipment_internal_notes.sql --schema prisma/schema.prisma
+
+Until the table exists the endpoints fail with a server error, which the app shows as
+"Could not load internal notes", never as an empty list.
 
 Validation completed: 17 focused controller/service tests passed, backend
 TypeScript passed, and Prisma schema validation passed. The migration itself,
