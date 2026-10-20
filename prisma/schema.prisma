@@ -188,6 +188,8 @@ model User {
   deliveryProofs DeliveryProof[]
   notifications Notification[]
   internalShipmentNotes ShipmentInternalNote[]
+  escalationsRaised ShipmentEscalation[] @relation("EscalationRaisedBy")
+  escalationsResolved ShipmentEscalation[] @relation("EscalationResolvedBy")
   payouts Payout[] @relation("DriverPayouts")
   customerReviews Review[] @relation("CustomerReviews")
   driverReviews   Review[] @relation("DriverReviews")
@@ -326,6 +328,7 @@ model Shipment {
   review        Review?
   conversation  Conversation?
   internalNotes ShipmentInternalNote[]
+  escalations   ShipmentEscalation[]
 }
 
 model ShipmentInternalNote {
@@ -340,6 +343,28 @@ model ShipmentInternalNote {
   author   User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
 
   @@index([shipmentId, createdAt, id])
+}
+
+// Created by prisma/manual-sql/20261020_add_shipment_escalations.sql, which also adds the
+// "one open escalation per shipment" partial unique index and the check constraints.
+model ShipmentEscalation {
+  id             String    @id @default(uuid())
+  shipmentId     String
+  raisedById     String
+  raisedByRole   String
+  reason         String
+  status         String    @default("OPEN")
+  resolutionNote String?
+  resolvedById   String?
+  resolvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  shipment   Shipment @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  raisedBy   User     @relation("EscalationRaisedBy", fields: [raisedById], references: [id], onDelete: Restrict)
+  resolvedBy User?    @relation("EscalationResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([shipmentId, createdAt])
 }
 
 model Review {
