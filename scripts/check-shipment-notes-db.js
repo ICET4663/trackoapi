@@ -53,7 +53,7 @@ async function main() {
       check('blank note refused', await denied(tx, null, `insert into "ShipmentInternalNote" ("id","shipmentId","authorId","authorRole","body") values ('probe2','${shipment.id}','${staff.id}','ADMIN','   ')`));
     }
     throw ROLLBACK;
-  }).catch((error) => { if (error !== ROLLBACK) throw error; });
+  }, { timeout: 60000, maxWait: 15000 }).catch((error) => { if (error !== ROLLBACK) throw error; });
 }
 
 main()
