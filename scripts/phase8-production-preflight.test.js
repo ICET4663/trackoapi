@@ -26,7 +26,7 @@ async function run(env = {}, options = {}) {
     let data;
     if (pathname === '/v1/health') data = { ok: true, deployable: true, service: 'tracko-api', integrations: [{ name: 'kyc', productionReady: true }, { name: 'fatalErrorAlerts', mode: 'configured' }] };
     else if (pathname === '/v1/demo/readiness') data = { ok: true, escrowPayment: { paystackReady: true }, mapsAddressing: { provider: 'configured' }, kyc: { provider: 'configured' }, database: { connected: true }, email: { status: 'domain_verified' }, fileUploads: { status: 'ready', bucket: 'media' } };
-    else if (pathname === '/v1/integrations/status') data = { payments: { mode: 'configured', provider: 'paystack' }, kyc: { realVerificationEnabled: true, productionReady: true, provider: 'smile_id' }, maps: { realRoutingEnabled: true, provider: 'google' }, translation: { multilingualTranscriptionEnabled: true, provider: 'google' } };
+    else if (pathname === '/v1/integrations/status') data = { payments: { mode: 'configured', provider: 'paystack', environment: 'live', realChargeEnabled: true }, kyc: { realVerificationEnabled: true, productionReady: true, provider: 'smile_id' }, maps: { realRoutingEnabled: true, provider: 'google' }, translation: { multilingualTranscriptionEnabled: true, provider: 'google' } };
     else if (pathname.endsWith('/apple-app-site-association')) data = apple;
     else if (pathname.endsWith('/assetlinks.json')) data = android;
     else if (pathname.endsWith('.js')) { data = 'x'.repeat(100001); headers['content-type'] = 'application/javascript'; }
@@ -42,7 +42,13 @@ async function run(env = {}, options = {}) {
     console: { log: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')) },
     require: (name) => {
       if (name === './lib/native-release-gates') return gates;
-      if (name === 'node:fs') return { readFileSync: () => { if (options.invalidEvidence) return '{'; return JSON.stringify(options.evidence || evidence()); } };
+      // Pure validation helpers: load the real ones so the gates they enforce are tested too.
+      if (name === './lib/backup-recovery-gates' || name === './lib/payment-release-gates') return require(name);
+      if (name === 'node:fs') return { readFileSync: (file) => {
+        if (file === 'recovery-evidence.json') return JSON.stringify(recoveryEvidence());
+        if (options.invalidEvidence) return '{';
+        return JSON.stringify(options.evidence || evidence());
+      } };
       throw new Error(`Unexpected require ${name}`);
     },
   });
@@ -50,7 +56,14 @@ async function run(env = {}, options = {}) {
   await moduleStub.exports.main();
   return { logs: logs.join('\n'), requests, exitCode: processStub.exitCode };
 }
-const nativeEnv = (platform) => ({ RELEASE_PLATFORM: platform, PREFLIGHT_ACCESS_TOKEN: 'test-only-token', STRICT_PRODUCTION: 'true', APPLE_TEAM_ID: 'ABCDE12345', ANDROID_SHA256_CERT_FINGERPRINT: certificate, DEVICE_TEST_EVIDENCE_FILE: 'test-evidence.json', ANDROID_RELEASE_BUILD_ID: 'android-build', IOS_RELEASE_BUILD_ID: 'ios-build' });
+// Strict production also requires a recent isolated restore drill (backup-recovery-gates.js).
+const recoveryEvidence = () => ({
+  sourceProjectId: 'source-project', targetProjectId: 'restore-test', targetIsProduction: false, testedBy: 'QA',
+  testedAt: new Date(Date.now() - 86400000).toISOString(), backupAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+  reconciliationDeltaKobo: 0, blockers: [],
+  checks: { databaseRestore: 'passed', storageRestore: 'passed', applicationRead: 'passed', outboundProvidersDisabled: 'passed' },
+});
+const nativeEnv = (platform) => ({ RELEASE_PLATFORM: platform, PREFLIGHT_ACCESS_TOKEN: 'test-only-token', STRICT_PRODUCTION: 'true', APPLE_TEAM_ID: 'ABCDE12345', ANDROID_SHA256_CERT_FINGERPRINT: certificate, DEVICE_TEST_EVIDENCE_FILE: 'test-evidence.json', ANDROID_RELEASE_BUILD_ID: 'android-build', IOS_RELEASE_BUILD_ID: 'ios-build', BACKUP_RECOVERY_EVIDENCE_FILE: 'recovery-evidence.json', BACKUP_SOURCE_PROJECT_ID: 'source-project' });
 
 test('web mode does not require physical-device evidence', async () => {
   const result = await run();
@@ -64,6 +77,12 @@ test('Android gate requires exact certificate and device record, not Apple membe
   assert.match(result.logs, /OK   android installed-device evidence/);
   assert.ok(!result.requests.some((request) => request.url.endsWith('apple-app-site-association')));
   assert.ok(result.requests.every((request) => request.input.signal instanceof AbortSignal));
+});
+test('strict production is blocked without a backup restore drill record', async () => {
+  const env = nativeEnv('android'); delete env.BACKUP_RECOVERY_EVIDENCE_FILE;
+  const result = await run(env);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.logs, /backup recovery evidence/);
 });
 test('native mode blocks missing evidence even outside strict provider mode', async () => {
   const env = nativeEnv('android'); delete env.DEVICE_TEST_EVIDENCE_FILE; delete env.STRICT_PRODUCTION;
