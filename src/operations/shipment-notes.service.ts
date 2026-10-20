@@ -14,12 +14,17 @@ export class ShipmentNotesService {
     if (actor.role !== 'ADMIN' && actor.role !== 'DISPATCHER') {
       throw new ForbiddenException('Shipment notes are private to operations staff.');
     }
-    const shipment = await this.prisma.shipment.findUnique({ where: { id: shipmentId }, select: { id: true } });
+    // The apps address shipments by reference (TRK-...); accept the internal id too.
+    const shipment = await this.prisma.shipment.findFirst({
+      where: { OR: [{ id: shipmentId }, { reference: shipmentId }] },
+      select: { id: true },
+    });
     if (!shipment) throw new NotFoundException('Shipment not found.');
+    return shipment.id;
   }
 
-  async list(shipmentId: string, actor: StaffActor) {
-    await this.assertAccess(shipmentId, actor);
+  async list(shipmentRef: string, actor: StaffActor) {
+    const shipmentId = await this.assertAccess(shipmentRef, actor);
     return this.prisma.$queryRawUnsafe<ShipmentNote[]>(`
       SELECT "id", "shipmentId", "authorId", "authorRole", "body", "createdAt"
       FROM "ShipmentInternalNote" WHERE "shipmentId" = $1
@@ -27,8 +32,8 @@ export class ShipmentNotesService {
     `, shipmentId);
   }
 
-  async append(shipmentId: string, body: unknown, actor: StaffActor) {
-    await this.assertAccess(shipmentId, actor);
+  async append(shipmentRef: string, body: unknown, actor: StaffActor) {
+    const shipmentId = await this.assertAccess(shipmentRef, actor);
     if (typeof body !== 'string' || body.trim().length < 1 || body.trim().length > 4000) {
       throw new BadRequestException('Write a note between 1 and 4,000 characters.');
     }

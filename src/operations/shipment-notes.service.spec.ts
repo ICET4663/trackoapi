@@ -5,10 +5,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 describe('ShipmentNotesService', () => {
   const admin = { sub: 'admin-1', role: UserRole.ADMIN };
-  let prisma: { shipment: { findUnique: jest.Mock }; $queryRawUnsafe: jest.Mock };
+  let prisma: { shipment: { findFirst: jest.Mock }; $queryRawUnsafe: jest.Mock };
   let service: ShipmentNotesService;
   beforeEach(() => {
-    prisma = { shipment: { findUnique: jest.fn().mockResolvedValue({ id: 'shipment-1' }) }, $queryRawUnsafe: jest.fn().mockResolvedValue([]) };
+    prisma = { shipment: { findFirst: jest.fn().mockResolvedValue({ id: 'shipment-1' }) }, $queryRawUnsafe: jest.fn().mockResolvedValue([]) };
     service = new ShipmentNotesService(prisma as unknown as PrismaService);
   });
 
@@ -16,7 +16,7 @@ describe('ShipmentNotesService', () => {
     const actor = { sub: 'other', role };
     await expect(service.list('shipment-1', actor)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(service.append('shipment-1', 'Private note', actor)).rejects.toBeInstanceOf(ForbiddenException);
-    expect(prisma.shipment.findUnique).not.toHaveBeenCalled();
+    expect(prisma.shipment.findFirst).not.toHaveBeenCalled();
     expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
 
@@ -28,8 +28,15 @@ describe('ShipmentNotesService', () => {
     expect(shipment).toBe('shipment-1');
   });
 
+  it('finds the shipment by its TRK reference, as the apps send it, and stores the internal id', async () => {
+    prisma.$queryRawUnsafe.mockResolvedValue([{ id: 'note-1' }]);
+    await service.append('TRK-1', 'Driver called about the gate', admin);
+    expect(prisma.shipment.findFirst).toHaveBeenCalledWith({ where: { OR: [{ id: 'TRK-1' }, { reference: 'TRK-1' }] }, select: { id: true } });
+    expect(prisma.$queryRawUnsafe.mock.calls[0][2]).toBe('shipment-1');
+  });
+
   it('refuses unknown shipments', async () => {
-    prisma.shipment.findUnique.mockResolvedValue(null);
+    prisma.shipment.findFirst.mockResolvedValue(null);
     await expect(service.append('missing', 'Note', admin)).rejects.toBeInstanceOf(NotFoundException);
     expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
