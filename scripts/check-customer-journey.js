@@ -9,6 +9,8 @@
 //
 //   SIM_SHIPMENT_ID=<funded shipment id> npm run check:journey
 
+const { assertTestPayments } = require('./lib/test-payments-guard');
+
 const API_BASE_URL = (process.env.API_BASE_URL || 'http://localhost:4000').replace(/\/$/, '');
 const SHIPMENT_ID = process.env.SIM_SHIPMENT_ID?.trim();
 const DEFAULT_PASSWORD = process.env.SIM_PASSWORD || 'password123';
@@ -88,6 +90,8 @@ async function main() {
     login('DRIVER', 'driver@tracko.ng'),
   ]);
   check('customer, admin, dispatcher and driver can log in', true);
+  const payments = assertTestPayments(await expectOk('/v1/integrations/status', { accessToken: admin.accessToken }));
+  check('payments are in test mode, so no real money moves', true, payments);
 
   // 1. Booked and paid, no driver yet.
   console.log('\nBooked and paid');
