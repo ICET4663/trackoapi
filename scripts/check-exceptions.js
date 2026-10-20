@@ -9,6 +9,8 @@
 //
 //   API_BASE_URL=https://trackoapi.vercel.app SIM_SHIPMENT_ID=<funded demo shipment id> node scripts/check-exceptions.js
 
+const { assertTestPayments } = require('./lib/test-payments-guard');
+
 const API_BASE_URL = (process.env.API_BASE_URL || 'http://localhost:4000').replace(/\/$/, '');
 const SHIPMENT_ID = process.env.SIM_SHIPMENT_ID?.trim();
 const PASSWORD = process.env.SIM_PASSWORD || 'password123';
@@ -51,6 +53,8 @@ async function main() {
   const customer = await login(process.env.SIM_CUSTOMER_EMAIL || 'customer@tracko.ng', 'CUSTOMER');
   const dispatcher = await login(process.env.SIM_DISPATCHER_EMAIL || 'dispatcher@tracko.ng', 'DISPATCHER');
   const admin = await login(process.env.SIM_ADMIN_EMAIL || 'admin@tracko.ng', 'ADMIN');
+  console.log(`      payments: ${assertTestPayments(await expectOk('/v1/integrations/status', { token: admin.accessToken }))} mode
+`);
   const driverEmails = [process.env.SIM_DRIVER_EMAIL || 'driver@tracko.ng', process.env.SIM_DRIVER2_EMAIL || 'driver2@tracko.ng'];
 
   const escrow = await expectOk(shipmentPath('/escrow'), { token: customer.accessToken });
