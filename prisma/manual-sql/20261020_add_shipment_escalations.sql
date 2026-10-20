@@ -20,14 +20,19 @@ create table if not exists "ShipmentEscalation" (
   constraint "ShipmentEscalation_staff_role" check ("raisedByRole" in ('ADMIN', 'DISPATCHER')),
   constraint "ShipmentEscalation_reason_length" check (char_length(btrim("reason")) between 10 and 2000),
   constraint "ShipmentEscalation_status" check ("status" in ('OPEN', 'RESOLVED')),
-  constraint "ShipmentEscalation_resolution" check (
-    ("status" = 'OPEN' and "resolutionNote" is null and "resolvedById" is null and "resolvedAt" is null)
-    or ("status" = 'RESOLVED' and "resolvedById" is not null and "resolvedAt" is not null
-        and char_length(btrim("resolutionNote")) between 10 and 2000)
-  ),
   constraint "ShipmentEscalation_shipmentId_fkey" foreign key ("shipmentId") references "Shipment"("id") on delete restrict on update cascade,
   constraint "ShipmentEscalation_raisedById_fkey" foreign key ("raisedById") references "User"("id") on delete restrict on update cascade,
   constraint "ShipmentEscalation_resolvedById_fkey" foreign key ("resolvedById") references "User"("id") on delete restrict on update cascade
+);
+
+-- Defined outside create table so a re-run replaces an older version of the rule. The
+-- "resolutionNote is not null" matters: char_length(null) is null, and a CHECK that
+-- evaluates to null passes, so without it a RESOLVED row with no note was accepted.
+alter table "ShipmentEscalation" drop constraint if exists "ShipmentEscalation_resolution";
+alter table "ShipmentEscalation" add constraint "ShipmentEscalation_resolution" check (
+  ("status" = 'OPEN' and "resolutionNote" is null and "resolvedById" is null and "resolvedAt" is null)
+  or ("status" = 'RESOLVED' and "resolvedById" is not null and "resolvedAt" is not null
+      and "resolutionNote" is not null and char_length(btrim("resolutionNote")) between 10 and 2000)
 );
 
 -- At most one open escalation per shipment; a second one adds to the first instead.
