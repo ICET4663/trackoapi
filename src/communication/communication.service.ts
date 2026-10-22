@@ -16,6 +16,24 @@ import { SendMessageDto } from "./dto/send-message.dto";
 import { TranscribeVoiceDto } from "./dto/transcribe-voice.dto";
 import { TypingStatusDto } from "./dto/typing-status.dto";
 
+// App area each recipient role opens a conversation in (app routes /<area>/messages/<id>).
+const MESSAGE_AREA = {
+  CUSTOMER: "/customer",
+  DRIVER: "/driver",
+  TRUCK_OWNER: "/owner",
+  DISPATCHER: "/dispatcher",
+  ADMIN: "/admin",
+} as const;
+
+// Lock-screen text for a message; long text is cut so a push stays a preview.
+function messagePreview(kind: string, body: string | null): string {
+  if (kind === "VOICE") return "Voice note";
+  if (kind === "ATTACHMENT") return "Sent an attachment";
+  if (kind === "LOCATION") return "Shared a location";
+  const text = body?.trim() || "New message";
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
 @Injectable()
 export class CommunicationService {
   private readonly logger = new Logger(CommunicationService.name);
@@ -302,7 +320,56 @@ export class CommunicationService {
         );
       });
 
+    await this.pushNewMessage(conversation, message).catch((error) => {
+      this.logger.error(
+        `Could not push message ${message.id} in conversation ${conversationId}: ${this.errorMessage(error)}`,
+      );
+    });
+
     return this.toMessageRecord(message);
+  }
+
+  // Tells the other participants about a new message while the app is in the background
+  // or closed. Push only: the conversation list is the inbox for messages.
+  private async pushNewMessage(
+    conversation: { id: string; customerId: string | null; driverId: string | null },
+    message: {
+      senderId: string;
+      kind: string;
+      body: string | null;
+      sender?: { role?: string | null; profile?: { fullName?: string | null } | null } | null;
+    },
+  ) {
+    if (message.kind === "SYSTEM") return;
+    const recipientIds = [conversation.customerId, conversation.driverId].filter(
+      (id): id is string => Boolean(id) && id !== message.senderId,
+    );
+    if (!recipientIds.length) return;
+
+    const recipients = await this.prisma.user.findMany({
+      where: { id: { in: recipientIds } },
+      select: { id: true, role: true },
+    });
+    const senderRole = message.sender?.role;
+    const title =
+      senderRole === "DISPATCHER" || senderRole === "ADMIN"
+        ? "Trako operations"
+        : message.sender?.profile?.fullName?.trim() || "New message";
+    const body = messagePreview(message.kind, message.body);
+
+    for (const recipient of recipients) {
+      const area = MESSAGE_AREA[recipient.role as keyof typeof MESSAGE_AREA];
+      if (!area) continue;
+      await this.notifications.pushOnly({
+        userId: recipient.id,
+        title,
+        body,
+        entity: "Conversation",
+        entityId: conversation.id,
+        actionUrl: `${area}/messages/${conversation.id}`,
+        channelId: "messages",
+      });
+    }
   }
 
   // Translates dto.body (TEXT) or dto.transcript (VOICE) into whichever language the

@@ -41,6 +41,35 @@ describe('NotificationsService push delivery', () => {
     expect(sentBody[0]).toMatchObject({ to: 'ExponentPushToken[aaa]', title: 'Hi', body: 'Body' });
   });
 
+  it('files pushes on the heads-up trip channel at high priority, so a closed app still shows them', async () => {
+    queryRawUnsafe
+      .mockResolvedValueOnce([notificationRow])
+      .mockResolvedValueOnce([{ token: 'ExponentPushToken[aaa]' }]);
+
+    await service.create({ userId: 'user-1', title: 'Driver assigned', body: 'Musa is on the way' });
+
+    const [sent] = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(sent).toMatchObject({ channelId: 'default', priority: 'high', sound: 'default' });
+  });
+
+  it('pushOnly sends on the requested channel without writing an in-app notification', async () => {
+    queryRawUnsafe.mockResolvedValueOnce([{ token: 'ExponentPushToken[aaa]' }]); // resolvePushTokens only
+
+    await service.pushOnly({ userId: 'user-1', title: 'Ada', body: 'hello', channelId: 'messages', actionUrl: '/driver/messages/c1' });
+
+    expect(queryRawUnsafe).toHaveBeenCalledTimes(1);
+    expect(queryRawUnsafe.mock.calls[0][0]).not.toContain('insert into "Notification"');
+    const [sent] = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(sent).toMatchObject({ channelId: 'messages', data: { route: '/driver/messages/c1' } });
+  });
+
+  it('pushOnly never throws when Expo is unreachable', async () => {
+    queryRawUnsafe.mockResolvedValueOnce([{ token: 'ExponentPushToken[aaa]' }]);
+    fetchMock.mockRejectedValue(new Error('network down'));
+
+    await expect(service.pushOnly({ userId: 'user-1', title: 'Ada', body: 'hello' })).resolves.toBeUndefined();
+  });
+
   it('sends to every token belonging to a role when broadcasting by role instead of userId', async () => {
     queryRawUnsafe
       .mockResolvedValueOnce([{ ...notificationRow, userId: null, role: 'DISPATCHER' }])

@@ -25,6 +25,10 @@ type NotificationInput = {
   // Send at most once per recipient, entity, entityId and title. For events that can be
   // reported repeatedly (a customer re-checking a failed payment, a webhook replayed).
   onceOnly?: boolean;
+  // Android channel the push is filed under. The app creates 'default' (trip and payment
+  // updates) and 'messages', both heads-up. Without one, a push that arrives while the
+  // app is closed lands in Android's low-importance "Miscellaneous" channel.
+  channelId?: 'default' | 'messages';
 };
 
 type NotificationRow = {
@@ -115,6 +119,14 @@ export class NotificationsService {
     return record;
   }
 
+  // Push without an in-app notification row, for events that already have their own
+  // inbox (chat messages). Never throws: a failed push must not fail the caller.
+  async pushOnly(input: NotificationInput) {
+    await this.sendPushNotifications(input).catch((error) => {
+      this.logger.error(`Push delivery failed for "${input.title}": ${this.errorMessage(error)}`);
+    });
+  }
+
   private async alreadySent(input: NotificationInput) {
     try {
       const rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
@@ -149,6 +161,10 @@ export class NotificationsService {
       to: token,
       title: input.title,
       body: input.body,
+      channelId: input.channelId ?? 'default',
+      // Normal priority can be held back for minutes by Android battery saving.
+      priority: 'high',
+      sound: 'default',
       data: { entity: input.entity, entityId: input.entityId, actionUrl: input.actionUrl, route: input.actionUrl },
     }));
 
