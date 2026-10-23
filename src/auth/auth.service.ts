@@ -589,10 +589,34 @@ export class AuthService {
     const provider = this.config.get<string>('EMAIL_PROVIDER') ?? 'mock';
     const resendKey = this.config.get<string>('RESEND_API_KEY');
     const from = this.config.get<string>('EMAIL_FROM') ?? 'Trako <onboarding@resend.dev>';
-    const subject = `Your Trako ${input.purpose} code`;
-    const roleLine = input.role ? `Role: ${input.role.replace('_', ' ')}` : 'Security verification';
-    const text = `Your Trako ${input.purpose} OTP is ${input.code}. ${roleLine}. It expires at ${input.expiresAt.toISOString()}.`;
-    const html = `<p>Your Trako ${input.purpose} OTP is:</p><h2>${input.code}</h2><p>${roleLine}</p><p>This code expires at ${input.expiresAt.toISOString()}.</p>`;
+    // Gmail and Outlook score a bare "code + ISO timestamp" body as likely spam, so the
+    // message reads like a normal transactional email: a code-first subject, a readable
+    // expiry, a line on why it was sent, and a matching plain-text part.
+    const minutes = Math.max(1, Math.round((input.expiresAt.getTime() - Date.now()) / 60_000));
+    const roleLine = input.role ? ` as a ${input.role.replace('_', ' ').toLowerCase()}` : '';
+    const subject = `${input.code} is your Trako ${input.purpose} code`;
+    const text = [
+      'Hello,',
+      '',
+      `Your Trako ${input.purpose} code is ${input.code}. It expires in ${minutes} minutes.`,
+      '',
+      `You are getting this email because this address was used for ${input.purpose} on Trako${roleLine}. If that wasn't you, you can ignore it; nothing changes without the code.`,
+      '',
+      'Never share this code. Trako staff will never ask for it.',
+      '',
+      'Trako - freight transport across Nigeria',
+      'https://www.trako.com.ng',
+    ].join('\n');
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#111827">
+<p style="font-size:18px;font-weight:bold;color:#6D28D9;margin:0 0 16px">Trako</p>
+<p>Hello,</p>
+<p>Your Trako ${input.purpose} code is:</p>
+<p style="font-size:32px;font-weight:bold;letter-spacing:6px;margin:8px 0">${input.code}</p>
+<p>It expires in ${minutes} minutes.</p>
+<p style="color:#4B5563;font-size:14px">You are getting this email because this address was used for ${input.purpose} on Trako${roleLine}. If that wasn't you, you can ignore it; nothing changes without the code.</p>
+<p style="color:#4B5563;font-size:14px">Never share this code. Trako staff will never ask for it.</p>
+<p style="color:#6B7280;font-size:12px;margin-top:24px">Trako - freight transport across Nigeria<br><a href="https://www.trako.com.ng" style="color:#6D28D9">www.trako.com.ng</a></p>
+</div>`;
 
     if (provider !== 'resend' || !resendKey) {
       return {
