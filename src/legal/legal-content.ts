@@ -9,9 +9,12 @@
 // requirement, since drivers share live location during active deliveries.
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
+// Owner's choice (26 October): Trako is published from personal store accounts, so the
+// policy names the individual operator. There is no registered company behind it yet.
+export const LEGAL_OPERATOR_NAME = 'Elemide Adetola Miracle';
 // Owner's choice (15 October): the one monitored support inbox.
 export const LEGAL_SUPPORT_EMAIL = 'adetolaelemide517@gmail.com';
-export const LEGAL_LAST_UPDATED = 'October 12, 2026';
+export const LEGAL_LAST_UPDATED = 'October 26, 2026';
 
 export type LegalSection = { heading: string; body: string };
 
@@ -33,6 +36,10 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     updated: LEGAL_LAST_UPDATED,
     summary: 'What Trako collects, why, how long it is kept, and your rights.',
     sections: [
+      {
+        heading: 'Who runs Trako',
+        body: `Trako is owned and operated by ${LEGAL_OPERATOR_NAME}, an individual based in Nigeria, and not by a registered company. ${LEGAL_OPERATOR_NAME} decides why and how personal data in Trako is processed and is the data controller for the purposes of the Nigeria Data Protection Act, 2023. In this policy, "Trako", "we" and "us" mean ${LEGAL_OPERATOR_NAME} operating the Trako app and website. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
+      },
       {
         heading: 'Overview',
         body: `${LEGAL_COMPANY_NAME} collects only the data needed to create accounts, price and manage shipments, match drivers and trucks, hold and release escrow, support communication between parties, prevent fraud, and provide customer support. We do not sell personal data.`,
@@ -67,7 +74,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Contact',
-        body: `Questions or requests: ${LEGAL_SUPPORT_EMAIL}.`,
+        body: `Questions or requests about your data: ${LEGAL_OPERATOR_NAME}, ${LEGAL_SUPPORT_EMAIL}. We aim to reply within 7 days and to complete rights requests within 30 days.`,
       },
     ],
   },

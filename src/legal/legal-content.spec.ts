@@ -16,6 +16,12 @@ describe('privacy processor and media disclosures', () => {
     expect(text).toContain('Transcription and translation can be inaccurate');
     expect(text).toContain('confirm important addresses, prices and delivery instructions in writing');
   });
+  it('names the individual operator as data controller', () => {
+    expect(privacy.sections[0].heading).toBe('Who runs Trako');
+    expect(text).toContain('owned and operated by Elemide Adetola Miracle, an individual');
+    expect(text).toContain('data controller');
+    expect(text).not.toMatch(/Zango/);
+  });
   it('preserves public legal route identifiers', () => {
     expect(LEGAL_DOCUMENTS.map(document => document.slug)).toEqual(['privacy', 'terms', 'account-deletion']);
     expect(findLegalDocument('privacy-policy')).toBe(privacy);
