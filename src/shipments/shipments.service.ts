@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
+import { AssignmentStatus, Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { PaymentProviderService } from '../integrations/payment-provider.service';
@@ -769,6 +769,13 @@ export class ShipmentsService {
         vehicle: true,
         shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
       },
+    }).catch((error: unknown) => {
+      // Another matching run offered this shipment first (one-open-offer index,
+      // prisma/manual-sql/20261026_one_open_offer_per_shipment.sql).
+      if (this.isUniqueViolation(error)) {
+        throw new BadRequestException('This shipment already has a driver offer awaiting response.');
+      }
+      throw error;
     });
 
     const handover = CARGO_ON_BOARD.includes(shipment.status);
@@ -1627,6 +1634,12 @@ export class ShipmentsService {
     if (Date.now() - this.lastWaitingSweepAt < 30_000) return null;
     this.lastWaitingSweepAt = Date.now();
     return this.matchWaitingShipments();
+  }
+
+  private isUniqueViolation(error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+    const meta = error.meta as { code?: string } | undefined;
+    return error.code === 'P2002' || (error.code === 'P2010' && meta?.code === '23505');
   }
 
   // Never throws: a driver's decline or an admin's approval must not fail because of this alert.

@@ -1,4 +1,5 @@
 import { InternalServerErrorException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ShipmentsService } from './shipments.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -374,6 +375,22 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
       'driver is offline',
     );
     expect(driverAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it('reports a clear conflict when another matching run offered the shipment at the same moment', async () => {
+    const { service, driverAssignment } = buildService(null, null);
+    (service as unknown as { prisma: { user: { findUnique: jest.Mock } } }).prisma.user.findUnique.mockResolvedValue({
+      id: 'driver-1', role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED', profile: { fullName: 'Driver One' },
+      driverVehicles: [{ id: 'vehicle-1', capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
+    });
+    driverAssignment.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError(
+      'Unique constraint failed on the fields: (`shipmentId`)',
+      { code: 'P2002', clientVersion: 'test' },
+    ));
+
+    await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
+      'This shipment already has a driver offer awaiting response.',
+    );
   });
 });
 
