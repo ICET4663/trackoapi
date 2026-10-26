@@ -1,4 +1,5 @@
 import { InternalServerErrorException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ShipmentsService } from './shipments.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -227,7 +228,7 @@ describe('ShipmentsService driver assignment offer expiry', () => {
       'DISPATCHER',
     );
     expect(prisma.driverAssignment.findMany).toHaveBeenNthCalledWith(2, {
-      where: { shipmentId: 'shipment-1', status: 'REJECTED' },
+      where: { shipmentId: 'shipment-1', status: { in: ['REJECTED', 'EXPIRED'] } },
       select: { driverId: true },
     });
   });
@@ -374,6 +375,22 @@ describe('ShipmentsService.offerAssignment conflict protection', () => {
       'driver is offline',
     );
     expect(driverAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it('reports a clear conflict when another matching run offered the shipment at the same moment', async () => {
+    const { service, driverAssignment } = buildService(null, null);
+    (service as unknown as { prisma: { user: { findUnique: jest.Mock } } }).prisma.user.findUnique.mockResolvedValue({
+      id: 'driver-1', role: 'DRIVER', isActive: true, verificationStatus: 'VERIFIED', profile: { fullName: 'Driver One' },
+      driverVehicles: [{ id: 'vehicle-1', capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
+    });
+    driverAssignment.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError(
+      'Unique constraint failed on the fields: (`shipmentId`)',
+      { code: 'P2002', clientVersion: 'test' },
+    ));
+
+    await expect(service.offerAssignment('shipment-1', { driverId: 'driver-1' }, 'DISPATCHER')).rejects.toThrow(
+      'This shipment already has a driver offer awaiting response.',
+    );
   });
 });
 
@@ -1112,5 +1129,160 @@ describe('ShipmentsService escrow actions are limited to the shipment\'s own par
     const { service } = buildService('RELEASED');
 
     await expect(service.disputeEscrow('shp-1', 'CUSTOMER', 'cust-1')).rejects.toThrow('Escrow is already released and cannot be disputed.');
+  });
+});
+
+describe('ShipmentsService automatic dispatch', () => {
+  const approvable = {
+    id: 'shipment-1', customerId: 'customer-1', reference: 'TRK-1', status: 'ESCROW_FUNDED',
+    pickupLabel: 'Lagos', destinationLabel: 'Abuja', cargoDescription: 'Food',
+    adminApproved: false, escrow: { id: 'escrow-1', amount: 500000, currency: 'NGN', status: 'FUNDED' }, timeline: [],
+  };
+
+  function approvalService() {
+    const prisma = {
+      shipment: {
+        findUnique: jest.fn().mockResolvedValue(approvable),
+        update: jest.fn().mockResolvedValue({ ...approvable, adminApproved: true }),
+      },
+    } as unknown as PrismaService;
+    const create = jest.fn().mockResolvedValue({ id: 'notification-1' });
+    const service = new ShipmentsService(prisma, { create } as unknown as NotificationsService, {} as MapsProviderService);
+    return { service, create };
+  }
+
+  it('offers the shipment to the best driver as soon as an admin approves it', async () => {
+    const { service } = approvalService();
+    const offer = jest.spyOn(service as never, 'offerNextEligibleDriver' as never)
+      .mockResolvedValue({ id: 'assignment-1', status: 'OFFERED' } as never);
+
+    await expect(service.approveShipment('shipment-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'shipment-1' });
+
+    expect(offer).toHaveBeenCalledWith('shipment-1');
+  });
+
+  it('still approves when no driver is free, and tells dispatch once', async () => {
+    const { service, create } = approvalService();
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
+
+    await expect(service.approveShipment('shipment-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'shipment-1' });
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'DISPATCHER', title: 'No driver available', entityId: 'shipment-1', onceOnly: true,
+      actionUrl: '/dispatcher/assignment',
+    }));
+  });
+
+  it('still approves when matching throws', async () => {
+    const { service } = approvalService();
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockRejectedValue(new Error('db busy') as never);
+
+    await expect(service.approveShipment('shipment-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'shipment-1' });
+  });
+
+  it('does not tell dispatch when a driver was offered the load', async () => {
+    const { service, create } = approvalService();
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue({ id: 'assignment-1' } as never);
+
+    await service.autoDispatch('shipment-1');
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('tells dispatch when the last eligible driver declines', async () => {
+    const assignment = {
+      id: 'assignment-1', driverId: 'driver-1', shipmentId: 'shipment-1', status: 'OFFERED', offeredAt: new Date(),
+      shipment: { id: 'shipment-1', customerId: 'customer-1', status: 'DRIVER_ASSIGNED' },
+    };
+    const prisma = {
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      driverAssignment: {
+        findUnique: jest.fn()
+          .mockResolvedValueOnce(assignment)
+          .mockResolvedValueOnce({
+            ...assignment, status: 'REJECTED', driver: { profile: null }, vehicle: null,
+            shipment: { ...assignment.shipment, reference: 'TRK-1', timeline: [] },
+          }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      shipment: {
+        update: jest.fn().mockResolvedValue(undefined),
+        findUnique: jest.fn().mockResolvedValue({ reference: 'TRK-1' }),
+      },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ status: 'FUNDED' }]),
+    } as unknown as PrismaService;
+    const create = jest.fn().mockResolvedValue(undefined);
+    const service = new ShipmentsService(prisma, { create } as unknown as NotificationsService, {} as MapsProviderService);
+    jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
+
+    await expect(service.respondToAssignment('assignment-1', 'driver-1', 'REJECT')).resolves.toMatchObject({ nextAssignment: null });
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ title: 'No driver available', entityId: 'shipment-1' }));
+  });
+
+  it('offers each waiting approved shipment in turn', async () => {
+    const findMany = jest.fn().mockResolvedValue([{ id: 'shipment-a' }, { id: 'shipment-b' }]);
+    const service = new ShipmentsService({ shipment: { findMany } } as unknown as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    const offer = jest.spyOn(service as never, 'offerNextEligibleDriver' as never)
+      .mockResolvedValueOnce({ id: 'assignment-a' } as never)
+      .mockResolvedValueOnce(null as never);
+
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 2, offered: 1 });
+
+    expect(offer.mock.calls).toEqual([['shipment-a'], ['shipment-b']]);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        adminApproved: true,
+        status: 'ESCROW_FUNDED',
+        assignments: { none: { status: { in: ['OFFERED', 'ACCEPTED'] } } },
+      }),
+    }));
+  });
+
+  it('reports nothing waiting rather than failing when the lookup fails', async () => {
+    const findMany = jest.fn().mockRejectedValue(new Error('db busy'));
+    const service = new ShipmentsService({ shipment: { findMany } } as unknown as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 0, offered: 0 });
+  });
+
+  it('runs the driver-online sweep at most once every 30 seconds', async () => {
+    const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
+    const sweep = jest.spyOn(service, 'matchWaitingShipments').mockResolvedValue({ waiting: 0, offered: 0 });
+
+    await service.matchWaitingShipmentsSoon();
+    await service.matchWaitingShipmentsSoon();
+
+    expect(sweep).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the load to a free driver near the pickup before a better-rated driver far away', async () => {
+    const now = new Date();
+    const driver = (id: string, completedTrips: number, rating: number) => ({
+      id,
+      driverVehicles: [{ id: `vehicle-${id}`, capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
+      driverAssignments: Array.from({ length: completedTrips }, () => ({ status: 'ACCEPTED', shipment: { status: 'COMPLETED' } })),
+      driverReviews: [{ rating }],
+    });
+    const prisma = {
+      shipment: { findUnique: jest.fn().mockResolvedValue({ cargoWeightKg: 8000, pickupLatitude: 6.5244, pickupLongitude: 3.3792 }) },
+      driverAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+      user: { findMany: jest.fn().mockResolvedValue([driver('driver-veteran-far', 10, 5), driver('driver-new-near', 0, 3)]) },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([
+        // Abuja (about 520 km from the pickup) and Ikeja (about 9 km).
+        { userId: 'driver-veteran-far', availableForAssignments: true, lastKnownLatitude: 9.0765, lastKnownLongitude: 7.3986, locationUpdatedAt: now },
+        { userId: 'driver-new-near', availableForAssignments: true, lastKnownLatitude: 6.6018, lastKnownLongitude: 3.3515, locationUpdatedAt: now },
+      ]),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    service.offerAssignment = jest.fn().mockResolvedValue({ id: 'assignment-1' }) as never;
+
+    await service.autoDispatch('shipment-1');
+
+    expect(service.offerAssignment).toHaveBeenCalledWith(
+      'shipment-1',
+      { driverId: 'driver-new-near', vehicleId: 'vehicle-driver-new-near' },
+      'DISPATCHER',
+    );
   });
 });

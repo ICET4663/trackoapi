@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { AssignmentStatus, ShipmentStatus, UserRole } from '@prisma/client';
+import { AssignmentStatus, Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { PaymentProviderService } from '../integrations/payment-provider.service';
@@ -103,11 +103,14 @@ const RELEASABLE_BEFORE_PICKUP: ShipmentStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_E
 // driver (owner rule, 14 October); offering, accepting, declining or expiring that
 // handover never rewinds the trip's status.
 const CARGO_ON_BOARD: ShipmentStatus[] = ['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'];
+// Drivers with a fresh position this close to the pickup are offered a load before anyone further away.
+const NEARBY_PICKUP_KM = 50;
 
 @Injectable()
 export class ShipmentsService {
   private readonly logger = new Logger(ShipmentsService.name);
   private readonly defaultAssignmentOfferMinutes = 15;
+  private lastWaitingSweepAt = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -766,6 +769,13 @@ export class ShipmentsService {
         vehicle: true,
         shipment: { include: { timeline: { orderBy: { createdAt: 'asc' } } } },
       },
+    }).catch((error: unknown) => {
+      // Another matching run offered this shipment first (one-open-offer index,
+      // prisma/manual-sql/20261026_one_open_offer_per_shipment.sql).
+      if (this.isUniqueViolation(error)) {
+        throw new BadRequestException('This shipment already has a driver offer awaiting response.');
+      }
+      throw error;
     });
 
     const handover = CARGO_ON_BOARD.includes(shipment.status);
@@ -921,6 +931,7 @@ export class ShipmentsService {
       const nextAssignment = action === 'REJECT'
         ? await this.offerNextEligibleDriver(updated.shipmentId, [updated.driverId])
         : null;
+      if (action === 'REJECT' && !nextAssignment) await this.notifyNoDriverAvailable(updated.shipmentId);
       return {
         ...this.toAssignmentRecord(updated, validityMinutes),
         nextAssignment,
@@ -1253,7 +1264,8 @@ export class ShipmentsService {
       actionUrl: `/customer/shipment/${shipmentId}`,
       preferenceKey: 'driverOffers',
     }).catch(() => null);
-    await this.offerNextEligibleDriver(shipmentId, [driverId]);
+    const next = await this.offerNextEligibleDriver(shipmentId, [driverId]);
+    if (!next && !activeAssignment) await this.notifyNoDriverAvailable(shipmentId);
     return true;
   }
 
@@ -1264,8 +1276,10 @@ export class ShipmentsService {
           where: { id: shipmentId },
           select: { cargoWeightKg: true, cargoVolumeM3: true, pickupLatitude: true, pickupLongitude: true },
         }),
+        // A driver who declined or let the offer lapse is not asked again for this load,
+        // so the offer works through the list and reaches operations instead of looping.
         this.prisma.driverAssignment.findMany({
-          where: { shipmentId, status: 'REJECTED' },
+          where: { shipmentId, status: { in: ['REJECTED', 'EXPIRED'] } },
           select: { driverId: true },
         }),
         this.prisma.user.findMany({
@@ -1358,6 +1372,11 @@ export class ShipmentsService {
         .filter((candidate) => Boolean(candidate.vehicle) && candidate.pendingOffers === 0)
         .sort((left, right) => {
           if (left.acceptedTrips !== right.acceptedTrips) return left.acceptedTrips - right.acceptedTrips;
+          // Like ride-hailing: a free driver near the pickup goes first, however strong a
+          // distant driver's rating or experience; the score orders drivers within each group.
+          const leftNearby = left.pickupDistanceKm !== null && left.pickupDistanceKm <= NEARBY_PICKUP_KM;
+          const rightNearby = right.pickupDistanceKm !== null && right.pickupDistanceKm <= NEARBY_PICKUP_KM;
+          if (leftNearby !== rightNearby) return leftNearby ? -1 : 1;
           if (left.score !== right.score) return right.score - left.score;
           const leftDistance = left.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
           const rightDistance = right.pickupDistanceKm ?? Number.POSITIVE_INFINITY;
@@ -1567,7 +1586,84 @@ export class ShipmentsService {
       preferenceKey: 'driverOffers',
     });
 
+    // Matching starts the moment the shipment is cleared; approval never fails because of it.
+    await this.autoDispatch(shipmentId).catch((error: unknown) => {
+      this.logger.error(`autoDispatch(${shipmentId}) after approval failed: ${this.errorMessage(error)}`);
+    });
+
     return this.toShipmentRecord(updated, { escrow: shipment.escrow });
+  }
+
+  // Offers an approved, paid shipment to the best eligible driver without waiting for a
+  // dispatcher. Declines and expiries carry on down the list (respondToAssignment,
+  // expireAssignment); operations are told only when nobody is left to offer it to.
+  async autoDispatch(shipmentId: string) {
+    const assignment = await this.offerNextEligibleDriver(shipmentId);
+    if (!assignment) await this.notifyNoDriverAvailable(shipmentId);
+    return assignment;
+  }
+
+  // Approved, paid shipments that have no live offer, e.g. because no driver was free at
+  // approval time. Called by the dispatch sweep and when a driver comes online.
+  async matchWaitingShipments(limit = 20) {
+    const waiting = await this.prisma.shipment.findMany({
+      where: {
+        adminApproved: true,
+        status: 'ESCROW_FUNDED',
+        escrow: { is: { status: { in: ['FUNDED', 'HELD', 'RELEASE_READY'] } } },
+        assignments: { none: { status: { in: ['OFFERED', 'ACCEPTED'] } } },
+      },
+      select: { id: true },
+      orderBy: { adminApprovedAt: 'asc' },
+      take: limit,
+    }).catch((error: unknown) => {
+      this.logger.error(`matchWaitingShipments() failed: ${this.errorMessage(error)}`);
+      return [];
+    });
+
+    // One at a time: a driver with an open offer is skipped, so each driver gets one load.
+    let offered = 0;
+    for (const shipment of waiting) {
+      if (await this.offerNextEligibleDriver(shipment.id)) offered += 1;
+    }
+    return { waiting: waiting.length, offered };
+  }
+
+  // Driver availability pings arrive often; one sweep per instance every 30 seconds is enough.
+  async matchWaitingShipmentsSoon() {
+    if (Date.now() - this.lastWaitingSweepAt < 30_000) return null;
+    this.lastWaitingSweepAt = Date.now();
+    return this.matchWaitingShipments();
+  }
+
+  private isUniqueViolation(error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+    const meta = error.meta as { code?: string } | undefined;
+    return error.code === 'P2002' || (error.code === 'P2010' && meta?.code === '23505');
+  }
+
+  // Never throws: a driver's decline or an admin's approval must not fail because of this alert.
+  private async notifyNoDriverAvailable(shipmentId: string) {
+    try {
+      const shipment = await this.prisma.shipment.findUnique({
+        where: { id: shipmentId },
+        select: { reference: true },
+      });
+      if (!shipment) return;
+      await this.notifications.create({
+        role: 'DISPATCHER',
+        title: 'No driver available',
+        body: `${shipment.reference} could not be matched automatically: no online driver with a verified truck is free. Assign a driver manually; Trako keeps retrying as drivers come online.`,
+        tone: 'WARNING',
+        entity: 'Shipment',
+        entityId: shipmentId,
+        actionUrl: '/dispatcher/assignment',
+        preferenceKey: 'driverOffers',
+        onceOnly: true,
+      });
+    } catch (error) {
+      this.logger.warn(`notifyNoDriverAvailable(${shipmentId}) failed: ${this.errorMessage(error)}`);
+    }
   }
 
   async releaseEscrow(shipmentId: string, actorRole: UserRole, note?: string) {
