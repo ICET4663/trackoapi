@@ -105,6 +105,8 @@ const RELEASABLE_BEFORE_PICKUP: ShipmentStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_E
 const CARGO_ON_BOARD: ShipmentStatus[] = ['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'];
 // Drivers with a fresh position this close to the pickup are offered a load before anyone further away.
 const NEARBY_PICKUP_KM = 50;
+// App Store and Play review accounts (scripts/create-review-accounts.js).
+const isStoreReviewerAccount = (email?: string | null) => /^(apple|google)\.review\./i.test(email ?? '');
 
 @Injectable()
 export class ShipmentsService {
@@ -1274,7 +1276,10 @@ export class ShipmentsService {
       const [shipment, previousAssignments, candidates, unavailableDrivers] = await Promise.all([
         this.prisma.shipment.findUnique({
           where: { id: shipmentId },
-          select: { cargoWeightKg: true, cargoVolumeM3: true, pickupLatitude: true, pickupLongitude: true },
+          select: {
+            cargoWeightKg: true, cargoVolumeM3: true, pickupLatitude: true, pickupLongitude: true,
+            customer: { select: { email: true } },
+          },
         }),
         // A driver who declined or let the offer lapse is not asked again for this load,
         // so the offer works through the list and reaches operations instead of looping.
@@ -1316,10 +1321,14 @@ export class ShipmentsService {
         ...excludedDriverIds,
       ]);
       const availabilityByDriver = new Map(unavailableDrivers.map((driver) => [driver.userId, driver]));
+      const reviewerLoad = isStoreReviewerAccount(shipment.customer?.email);
       const cargoWeightKg = Math.max(0, Number(shipment.cargoWeightKg ?? 0));
       const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
       const ranked = candidates
         .filter((driver) => !excluded.has(driver.id) && availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
+        // Store reviewer drivers only get loads booked by store reviewer customers, so a real
+        // customer's load never waits on an account nobody drives.
+        .filter((driver) => reviewerLoad || !isStoreReviewerAccount(driver.email))
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
             .filter((candidate) => this.isVehicleAssignmentReady(candidate))
