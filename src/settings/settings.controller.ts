@@ -1,6 +1,7 @@
-import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Optional, Param, Patch, Post, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { RequestUserService } from '../common/request-user.service';
+import { ShipmentsService } from '../shipments/shipments.service';
 import { SettingsService } from './settings.service';
 
 @Controller()
@@ -8,6 +9,8 @@ export class SettingsController {
   constructor(
     private readonly settingsService: SettingsService,
     private readonly requestUser: RequestUserService,
+    // Optional so specs that build the controller by hand keep working.
+    @Optional() private readonly shipments?: ShipmentsService,
   ) {}
 
   @Get('account/overview')
@@ -456,7 +459,9 @@ export class SettingsController {
   @Patch('driver/safety-settings')
   async updateSafetySettings(@Body() body: { key?: string; value?: boolean | string }, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
-    return this.settingsService.updateSafetySetting(body, user.sub);
+    const saved = await this.settingsService.updateSafetySetting(body, user.sub);
+    if (body.key === 'availableForAssignments' && saved.availableForAssignments) await this.matchWaitingShipments();
+    return saved;
   }
 
   @Post('driver/availability/location')
@@ -465,7 +470,15 @@ export class SettingsController {
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
-    return this.settingsService.updateDriverAvailabilityLocation(user.sub, body);
+    const saved = await this.settingsService.updateDriverAvailabilityLocation(user.sub, body);
+    if (saved?.availableForAssignments !== false) await this.matchWaitingShipments();
+    return saved;
+  }
+
+  // An online driver with a fresh position may be the match a waiting shipment needs.
+  // Matching problems are logged by ShipmentsService and never fail the driver's request.
+  private async matchWaitingShipments() {
+    await this.shipments?.matchWaitingShipmentsSoon().catch(() => null);
   }
 
   @Post('driver/safety-incidents')

@@ -1,0 +1,32 @@
+name: Dispatch sweep
+
+# Passes unanswered driver offers to the next driver and offers waiting shipments.
+# Vercel Hobby cron runs once a day, so this calls the API every 5 minutes instead.
+# Needs the repository secret CRON_SECRET (the same value as the API's CRON_SECRET on Vercel).
+# GitHub may start scheduled runs a few minutes late.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: dispatch-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Run the dispatch sweep
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          API_BASE_URL: https://trackoapi.vercel.app
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::warning::CRON_SECRET is not set; add it under Settings > Secrets and variables > Actions."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error --max-time 60 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$API_BASE_URL/v1/cron/dispatch-sweep"
