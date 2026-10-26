@@ -1286,3 +1286,48 @@ describe('ShipmentsService automatic dispatch', () => {
     );
   });
 });
+
+describe('ShipmentsService keeps store reviewer drivers off real loads', () => {
+  function buildService(customerEmail: string) {
+    const now = new Date();
+    const driver = (id: string, email: string) => ({
+      id, email,
+      driverVehicles: [{ id: `vehicle-${id}`, capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
+      driverAssignments: [],
+      driverReviews: [],
+    });
+    const prisma = {
+      shipment: { findUnique: jest.fn().mockResolvedValue({
+        cargoWeightKg: 500, pickupLatitude: 6.4541, pickupLongitude: 3.3947, customer: { email: customerEmail },
+      }) },
+      driverAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+      user: { findMany: jest.fn().mockResolvedValue([
+        driver('reviewer-near', 'apple.review.driver@trako.com.ng'),
+        driver('driver-far', 'driver@tracko.ng'),
+      ]) },
+      $queryRawUnsafe: jest.fn().mockResolvedValue([
+        { userId: 'reviewer-near', availableForAssignments: true, lastKnownLatitude: 6.455, lastKnownLongitude: 3.395, locationUpdatedAt: now },
+        { userId: 'driver-far', availableForAssignments: true, lastKnownLatitude: 6.6, lastKnownLongitude: 3.35, locationUpdatedAt: now },
+      ]),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    service.offerAssignment = jest.fn().mockResolvedValue({ id: 'assignment-1' }) as never;
+    return service;
+  }
+
+  it('skips a reviewer driver for a real customer, even when the reviewer is nearest', async () => {
+    const service = buildService('customer@tracko.ng');
+
+    await service.autoDispatch('shipment-1');
+
+    expect(service.offerAssignment).toHaveBeenCalledWith('shipment-1', { driverId: 'driver-far', vehicleId: 'vehicle-driver-far' }, 'DISPATCHER');
+  });
+
+  it('still offers a reviewer customer\'s load to the reviewer driver', async () => {
+    const service = buildService('apple.review.customer@trako.com.ng');
+
+    await service.autoDispatch('shipment-1');
+
+    expect(service.offerAssignment).toHaveBeenCalledWith('shipment-1', { driverId: 'reviewer-near', vehicleId: 'vehicle-reviewer-near' }, 'DISPATCHER');
+  });
+});
