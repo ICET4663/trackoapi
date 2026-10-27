@@ -9,9 +9,12 @@
 // requirement, since drivers share live location during active deliveries.
 
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
-// Owner's choice (26 October): Trako is published from personal store accounts, so the
-// policy names the individual operator. There is no registered company behind it yet.
-export const LEGAL_OPERATOR_NAME = 'Elemide Adetola Miracle';
+// Trako is published from the owner's personal store accounts (26 October), so the
+// documents name the owner as the individual operator and data controller. There is no
+// registered company behind it yet. The developer is described by role only (27 October).
+// Must match the legal name on the owner's Apple and Google developer accounts.
+export const LEGAL_OWNER_PLACEHOLDER = '[OWNER FULL LEGAL NAME]';
+export const LEGAL_OWNER_NAME = LEGAL_OWNER_PLACEHOLDER;
 // Owner's choice (15 October): the one monitored support inbox.
 export const LEGAL_SUPPORT_EMAIL = 'adetolaelemide517@gmail.com';
 export const LEGAL_LAST_UPDATED = 'October 26, 2026';
@@ -38,7 +41,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     sections: [
       {
         heading: 'Who runs Trako',
-        body: `Trako is owned and operated by ${LEGAL_OPERATOR_NAME}, an individual based in Nigeria, and not by a registered company. ${LEGAL_OPERATOR_NAME} decides why and how personal data in Trako is processed and is the data controller for the purposes of the Nigeria Data Protection Act, 2023. In this policy, "Trako", "we" and "us" mean ${LEGAL_OPERATOR_NAME} operating the Trako app and website. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
+        body: `Trako is owned and operated by ${LEGAL_OWNER_NAME}, an individual based in Nigeria; it is not run by a registered company. ${LEGAL_OWNER_NAME} decides why and how personal data in Trako is processed and is the data controller for the purposes of the Nigeria Data Protection Act, 2023. In this policy, "Trako", "we" and "us" mean ${LEGAL_OWNER_NAME} operating the Trako app and website. An independent developer builds and maintains Trako on the owner's instructions. The developer may access personal data only as needed to run, secure, fix and support the service, must keep it confidential, and may not use it for any other purpose. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
       },
       {
         heading: 'Overview',
@@ -74,7 +77,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Contact',
-        body: `Questions or requests about your data: ${LEGAL_OPERATOR_NAME}, ${LEGAL_SUPPORT_EMAIL}. We aim to reply within 7 days and to complete rights requests within 30 days.`,
+        body: `Questions or requests about your data: ${LEGAL_OWNER_NAME}, ${LEGAL_SUPPORT_EMAIL}. We aim to reply within 7 days and to complete rights requests within 30 days.`,
       },
     ],
   },
@@ -87,7 +90,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     sections: [
       {
         heading: 'The service',
-        body: 'Trako is a logistics coordination platform connecting customers, drivers, truck owners, dispatchers and administrators. Trako facilitates matching, tracking, communication and escrow; the transport itself is performed by independent drivers and truck owners.',
+        body: `Trako is a logistics coordination platform connecting customers, drivers, truck owners, dispatchers and administrators. Trako is owned and operated by ${LEGAL_OWNER_NAME}, an individual based in Nigeria (not a registered company), who is the other party to these terms; "Trako", "we" and "us" mean ${LEGAL_OWNER_NAME}. An independent developer builds and maintains the platform on the owner's behalf and is not a party to these terms. Trako facilitates matching, tracking, communication and escrow; the transport itself is performed by independent drivers and truck owners.`,
       },
       {
         heading: 'Eligibility and accounts',
