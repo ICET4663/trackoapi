@@ -21,6 +21,7 @@ describe('privacy processor and media disclosures', () => {
     expect(text).toContain(`owned and operated by ${LEGAL_OWNER_NAME}, an individual`);
     expect(text).toContain('data controller');
     expect(text).toContain("An independent developer builds and maintains Trako on the owner's instructions");
+    expect(text).toContain("also handles platform administration and customer support on the owner's behalf");
     expect(text).not.toMatch(/Zango|Elemide/);
   });
   it('names the owner as the party to the terms', () => {

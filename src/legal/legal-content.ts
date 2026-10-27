@@ -11,7 +11,8 @@
 export const LEGAL_COMPANY_NAME = 'Trako Logistics';
 // Trako is published from the owner's personal store accounts (26 October), so the
 // documents name the owner as the individual operator and data controller. There is no
-// registered company behind it yet. The developer is described by role only (27 October).
+// registered company behind it yet. The developer, who for now also runs admin and support
+// (the support inbox below), is described by role only (27 October).
 // Must match the legal name on the owner's Apple and Google developer accounts.
 export const LEGAL_OWNER_PLACEHOLDER = '[OWNER FULL LEGAL NAME]';
 export const LEGAL_OWNER_NAME = LEGAL_OWNER_PLACEHOLDER;
@@ -41,7 +42,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
     sections: [
       {
         heading: 'Who runs Trako',
-        body: `Trako is owned and operated by ${LEGAL_OWNER_NAME}, an individual based in Nigeria; it is not run by a registered company. ${LEGAL_OWNER_NAME} decides why and how personal data in Trako is processed and is the data controller for the purposes of the Nigeria Data Protection Act, 2023. In this policy, "Trako", "we" and "us" mean ${LEGAL_OWNER_NAME} operating the Trako app and website. An independent developer builds and maintains Trako on the owner's instructions. The developer may access personal data only as needed to run, secure, fix and support the service, must keep it confidential, and may not use it for any other purpose. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
+        body: `Trako is owned and operated by ${LEGAL_OWNER_NAME}, an individual based in Nigeria; it is not run by a registered company. ${LEGAL_OWNER_NAME} decides why and how personal data in Trako is processed and is the data controller for the purposes of the Nigeria Data Protection Act, 2023. In this policy, "Trako", "we" and "us" mean ${LEGAL_OWNER_NAME} operating the Trako app and website. An independent developer builds and maintains Trako on the owner's instructions and, for now, also handles platform administration and customer support on the owner's behalf. The developer may access personal data only as needed to run, secure, fix and support the service, verify accounts and resolve support requests, must keep it confidential, and may not use it for any other purpose. Contact: ${LEGAL_SUPPORT_EMAIL}.`,
       },
       {
         heading: 'Overview',
@@ -77,7 +78,7 @@ export const LEGAL_DOCUMENTS: LegalDocument[] = [
       },
       {
         heading: 'Contact',
-        body: `Questions or requests about your data: ${LEGAL_OWNER_NAME}, ${LEGAL_SUPPORT_EMAIL}. We aim to reply within 7 days and to complete rights requests within 30 days.`,
+        body: `Questions or requests about your data: email Trako support at ${LEGAL_SUPPORT_EMAIL}. Support handles requests on behalf of ${LEGAL_OWNER_NAME}, the data controller. We aim to reply within 7 days and to complete rights requests within 30 days.`,
       },
     ],
   },
