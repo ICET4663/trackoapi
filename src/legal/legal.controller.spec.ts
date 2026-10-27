@@ -5,20 +5,24 @@ import { LEGAL_DOCUMENTS } from './legal-content';
 describe('LegalController', () => {
   const controller = new LegalController();
 
-  // The policy must match what the apps actually do. Android keeps sharing during an active
-  // trip when the driver allows "all the time" access; iOS is foreground only. If a build
-  // ever collects location outside an active trip, or iOS gains background tracking, this
-  // wording (and the store privacy declarations) must change first.
-  it('serves an HTML privacy policy that discloses background location on Android, foreground-only on iOS, and the retention period', () => {
+  // The policy must match what the apps actually do. Both ask only for "while using the app"
+  // access and keep sharing in the background during an active delivery (Android through a
+  // foreground-service notification, iOS with the blue indicator). If a build ever asks for
+  // "all the time" access or collects location outside an active trip, this wording (and the
+  // store privacy declarations) must change first.
+  it('serves an HTML privacy policy that discloses in-use permission, background sharing during a delivery on both platforms, and the retention period', () => {
     const html = controller.privacy();
     expect(html).toContain('<!doctype html>');
     expect(html).toContain('<h1>Privacy Policy</h1>');
     const text = html.toLowerCase();
     expect(text).toContain('only during an active accepted trip');
-    expect(text).toContain('on android');
-    expect(text).toContain('allow all the time');
-    expect(text).toContain('persistent notification');
-    expect(text).toContain('on ios, location is shared only while the app is open');
+    expect(text).toContain('asks only for permission to use location while the app is in use');
+    expect(text).toContain('persistent notification (android)');
+    expect(text).toContain('blue location indicator (iphone)');
+    expect(text).toContain('stops when the delivery ends');
+    // Android blocks ACCESS_BACKGROUND_LOCATION (app.json), so the policy must not offer it.
+    expect(text).not.toContain('allow all the time');
+    expect(text).not.toContain('only while the app is open');
     expect(text).toContain('deleted automatically after the retention period');
     expect(text).toContain('open dispute');
     expect(text).not.toContain('does not collect background location');

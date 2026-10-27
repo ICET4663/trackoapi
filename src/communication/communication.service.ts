@@ -34,6 +34,9 @@ function messagePreview(kind: string, body: string | null): string {
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
+// Same codes as TranslationProviderService and the app's i18n.
+const SUPPORTED_MESSAGE_LANGUAGES = ["en", "ha", "yo", "ig"];
+
 @Injectable()
 export class CommunicationService {
   private readonly logger = new Logger(CommunicationService.name);
@@ -274,13 +277,11 @@ export class CommunicationService {
     await this.assertConversationAccess(conversation, user);
 
     const suppliedEnglishTranscript = dto.englishTranscript?.trim();
-    const translation = suppliedEnglishTranscript
-      ? null
-      : await this.translateForRecipient(
-          conversation,
-          senderId,
-          dto,
-        ).catch(() => null);
+    const translation = await this.translateForRecipient(
+      conversation,
+      senderId,
+      dto,
+    ).catch(() => null);
 
     let message;
     try {
@@ -295,10 +296,10 @@ export class CommunicationService {
           transcript: dto.sourceTranscript?.trim() || dto.transcript,
           durationSeconds: dto.durationSeconds,
           translatedText:
-            suppliedEnglishTranscript || translation?.translatedText,
-          translatedLanguage: suppliedEnglishTranscript
-            ? "en"
-            : translation?.translatedLanguage,
+            translation?.translatedText ?? suppliedEnglishTranscript,
+          translatedLanguage:
+            translation?.translatedLanguage ??
+            (suppliedEnglishTranscript ? "en" : undefined),
           sourceLanguage: dto.sourceLanguage ?? translation?.sourceLanguage,
         },
         include: { sender: { include: { profile: true } } },
@@ -372,9 +373,9 @@ export class CommunicationService {
     }
   }
 
-  // Translates dto.body (TEXT) or dto.transcript (VOICE) into whichever language the
-  // *other* participant has set as their preferred app language, when that's known and
-  // actually differs from the sender's. Never throws - a translation failure (unconfigured
+  // Translates dto.body (TEXT) or the original transcript (VOICE) into whichever language
+  // the *other* participant has set as their preferred app language, when that's known and
+  // actually differs from the message's language. Never throws - a translation failure (unconfigured
   // provider, API error, unsupported language pair) must never block the message itself;
   // callers already wrap this in .catch(() => null).
   private async translateForRecipient(
@@ -386,7 +387,10 @@ export class CommunicationService {
     translatedLanguage: string;
     sourceLanguage?: string;
   } | null> {
-    const text = (dto.kind === "VOICE" ? dto.transcript : dto.body)?.trim();
+    const voice = dto.kind === "VOICE";
+    const text = (
+      voice ? dto.sourceTranscript?.trim() || dto.transcript : dto.body
+    )?.trim();
     if (!text) return null;
 
     const recipientId =
@@ -406,22 +410,28 @@ export class CommunicationService {
       }),
     ]);
     const recipientLanguage = recipient?.preferredLanguage ?? "en";
-    // Same-language heuristic to skip a pointless API call in the common case - if the
-    // sender's own language happens to differ from what they actually typed/spoke, the
-    // real translate() call below still runs whenever the languages differ, and its
-    // detectedSourceLanguage (not this assumption) is what actually gets stored.
-    if (recipientLanguage === (sender?.preferredLanguage ?? "en")) return null;
+    // A voice note's language is detected from the recording, so trust it over the
+    // sender's app setting: a Yoruba-setting customer speaking English to a Yoruba-setting
+    // driver is still English. Typed text has no detected language, so it keeps the
+    // same-language heuristic that skips a pointless API call in the common case.
+    const spokenLanguage =
+      voice && dto.sourceLanguage && SUPPORTED_MESSAGE_LANGUAGES.includes(dto.sourceLanguage)
+        ? dto.sourceLanguage
+        : undefined;
+    if (recipientLanguage === (spokenLanguage ?? sender?.preferredLanguage ?? "en")) return null;
+    // The app already sends an English translation of non-English voice notes; translate
+    // again only when the reader wants a language other than English.
+    if (recipientLanguage === "en" && dto.englishTranscript?.trim()) return null;
 
-    const result = await this.translationProvider.translate(
-      text,
-      recipientLanguage,
-    );
+    const result = spokenLanguage
+      ? await this.translationProvider.translate(text, recipientLanguage, spokenLanguage)
+      : await this.translationProvider.translate(text, recipientLanguage);
     if (!result) return null;
     return {
       translatedText: result.translatedText,
       translatedLanguage: recipientLanguage,
       sourceLanguage:
-        result.detectedSourceLanguage ?? sender?.preferredLanguage,
+        spokenLanguage ?? result.detectedSourceLanguage ?? sender?.preferredLanguage,
     };
   }
 

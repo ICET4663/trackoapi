@@ -382,6 +382,109 @@ describe("CommunicationService.sendMessage translation for the recipient", () =>
       }),
     );
   });
+
+  it("translates an English voice note even when both people's app language is Yoruba", async () => {
+    const translate = jest
+      .fn()
+      .mockResolvedValue({ translatedText: "Mo ti de", detectedSourceLanguage: "en" });
+    const userFindUnique = jest
+      .fn()
+      .mockResolvedValueOnce({ preferredLanguage: "yo" }) // sender
+      .mockResolvedValueOnce({ preferredLanguage: "yo" }); // recipient
+    const messageCreate = jest.fn().mockResolvedValue({ id: "msg-voice-en", createdAt: new Date() });
+    const prisma = buildPrisma({
+      user: { findUnique: userFindUnique },
+      message: { create: messageCreate, findMany: jest.fn() },
+    });
+    const service = buildService(prisma, translate);
+
+    await service.sendMessage(
+      "conv-1",
+      "customer-1",
+      {
+        kind: "VOICE",
+        body: "Voice note sent",
+        transcript: "I have arrived",
+        sourceTranscript: "I have arrived",
+        sourceLanguage: "en",
+      } as never,
+      customer,
+    );
+
+    expect(translate).toHaveBeenCalledWith("I have arrived", "yo", "en");
+    expect(messageCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ translatedText: "Mo ti de", translatedLanguage: "yo", sourceLanguage: "en" }),
+      }),
+    );
+  });
+
+  it("gives a Yoruba reader a Hausa voice note in Yoruba, not only the supplied English", async () => {
+    const translate = jest
+      .fn()
+      .mockResolvedValue({ translatedText: "Mo ti de ibi gbigbe eru", detectedSourceLanguage: "ha" });
+    const userFindUnique = jest
+      .fn()
+      .mockResolvedValueOnce({ preferredLanguage: "ha" }) // sender
+      .mockResolvedValueOnce({ preferredLanguage: "yo" }); // recipient
+    const messageCreate = jest.fn().mockResolvedValue({ id: "msg-voice-ha", createdAt: new Date() });
+    const prisma = buildPrisma({
+      user: { findUnique: userFindUnique },
+      message: { create: messageCreate, findMany: jest.fn() },
+    });
+    const service = buildService(prisma, translate);
+
+    await service.sendMessage(
+      "conv-1",
+      "driver-1",
+      {
+        kind: "VOICE",
+        body: "Voice note sent",
+        transcript: "Na isa wurin daukar kaya",
+        sourceTranscript: "Na isa wurin daukar kaya",
+        englishTranscript: "I have arrived at the loading point",
+        sourceLanguage: "ha",
+      } as never,
+      customer,
+    );
+
+    expect(translate).toHaveBeenCalledWith("Na isa wurin daukar kaya", "yo", "ha");
+    expect(messageCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          transcript: "Na isa wurin daukar kaya",
+          translatedText: "Mo ti de ibi gbigbe eru",
+          translatedLanguage: "yo",
+          sourceLanguage: "ha",
+        }),
+      }),
+    );
+  });
+
+  it("skips translation when the voice note is already in the reader's language", async () => {
+    const translate = jest.fn();
+    const userFindUnique = jest
+      .fn()
+      .mockResolvedValueOnce({ preferredLanguage: "en" }) // sender
+      .mockResolvedValueOnce({ preferredLanguage: "ig" }); // recipient
+    const prisma = buildPrisma({ user: { findUnique: userFindUnique } });
+    const service = buildService(prisma, translate);
+
+    await service.sendMessage(
+      "conv-1",
+      "customer-1",
+      {
+        kind: "VOICE",
+        body: "Voice note sent",
+        sourceTranscript: "Ututu oma",
+        englishTranscript: "Good morning",
+        sourceLanguage: "ig",
+      } as never,
+      customer,
+    );
+
+    expect(translate).not.toHaveBeenCalled();
+  });
 });
 
 // transcribeVoiceNote() used to be an unconditional stub that never called anything real.
