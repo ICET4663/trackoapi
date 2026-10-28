@@ -142,6 +142,44 @@ describe('DataService dispatcher-shipments status', () => {
   });
 });
 
+describe('DataService staff shipment rows', () => {
+  const shipment = { id: 'cuid-1', reference: 'TRK-1', customerId: 'cust-1', status: 'COMPLETED', pickupLabel: 'Ikeja', destinationLabel: 'Kano', pickupAddress: 'Ikeja', destinationAddress: 'Kano', cargoDescription: 'Rice', quotedPriceKobo: 100, adminApproved: true, updatedAt: new Date('2026-10-27T10:00:00Z') };
+  const driver = (name: string) => ({ email: `${name}@x`, profile: { fullName: name } });
+  // Newest first, as the query orders them: the driver who did the job accepted the
+  // third offer; the two before it expired or were declined.
+  const assignments = [
+    { shipmentId: 'cuid-1', driverId: 'd-3', status: 'ACCEPTED', driver: driver('Driver Three') },
+    { shipmentId: 'cuid-1', driverId: 'd-2', status: 'REJECTED', driver: driver('Driver Two') },
+    { shipmentId: 'cuid-1', driverId: 'd-1', status: 'EXPIRED', driver: driver('Reviewer') },
+  ];
+  const makeService = (rows = assignments) => new DataService({
+    shipment: { findMany: jest.fn().mockResolvedValue([shipment]), findUnique: jest.fn().mockResolvedValue({ reference: 'TRK-1' }) },
+    user: { findMany: jest.fn().mockResolvedValue([]) },
+    driverAssignment: { findMany: jest.fn().mockResolvedValue(rows) },
+  } as unknown as PrismaService);
+
+  it('opens a dispatcher or admin row by the Shipment.id that notifications link to', async () => {
+    const service = makeService();
+    await expect(service.item('dispatcher-shipments', 'cuid-1', 'disp-1', 'DISPATCHER')).resolves.toMatchObject({ id: 'TRK-1', state: 'COMPLETED' });
+    await expect(service.item('operation-shipments', 'cuid-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'TRK-1', customerId: 'cust-1' });
+    await expect(service.item('dispatcher-shipments', 'TRK-1', 'disp-1', 'DISPATCHER')).resolves.toMatchObject({ id: 'TRK-1' });
+  });
+
+  it('names the driver who accepted, not the first driver offered', async () => {
+    const service = makeService();
+    const [row] = (await service.list('dispatcher-shipments', 'disp-1', 'DISPATCHER')) as { driver?: string }[];
+    expect(row.driver).toBe('Driver Three');
+    const [operation] = (await service.list('operation-shipments', 'admin-1', 'ADMIN')) as { driverId: string }[];
+    expect(operation.driverId).toBe('d-3');
+  });
+
+  it('names nobody when every offer was declined or expired', async () => {
+    const service = makeService(assignments.slice(1));
+    const [row] = (await service.list('dispatcher-shipments', 'disp-1', 'DISPATCHER')) as { driver?: string }[];
+    expect(row.driver).toBeUndefined();
+  });
+});
+
 describe('DataService never fakes success on a real failure', () => {
   it('list() throws instead of returning a fabricated preview row when the read fails', async () => {
     const prisma = {
