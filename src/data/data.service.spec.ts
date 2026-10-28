@@ -152,17 +152,36 @@ describe('DataService staff shipment rows', () => {
     { shipmentId: 'cuid-1', driverId: 'd-2', status: 'REJECTED', driver: driver('Driver Two') },
     { shipmentId: 'cuid-1', driverId: 'd-1', status: 'EXPIRED', driver: driver('Reviewer') },
   ];
-  const makeService = (rows = assignments) => new DataService({
-    shipment: { findMany: jest.fn().mockResolvedValue([shipment]), findUnique: jest.fn().mockResolvedValue({ reference: 'TRK-1' }) },
-    user: { findMany: jest.fn().mockResolvedValue([]) },
-    driverAssignment: { findMany: jest.fn().mockResolvedValue(rows) },
-  } as unknown as PrismaService);
+  const shipmentFindMany = jest.fn();
+  const makeService = (rows = assignments) => {
+    // Answers like the database: a lookup by reference or id finds only a matching shipment.
+    shipmentFindMany.mockReset().mockImplementation(({ where }: { where?: { OR: { reference?: string; id?: string }[] } } = {}) =>
+      Promise.resolve(!where || where.OR.some((match) => match.reference === shipment.reference || match.id === shipment.id) ? [shipment] : []));
+    return new DataService({
+      shipment: { findMany: shipmentFindMany },
+      user: { findMany: jest.fn().mockResolvedValue([]) },
+      driverAssignment: { findMany: jest.fn().mockResolvedValue(rows) },
+    } as unknown as PrismaService);
+  };
 
   it('opens a dispatcher or admin row by the Shipment.id that notifications link to', async () => {
     const service = makeService();
     await expect(service.item('dispatcher-shipments', 'cuid-1', 'disp-1', 'DISPATCHER')).resolves.toMatchObject({ id: 'TRK-1', state: 'COMPLETED' });
     await expect(service.item('operation-shipments', 'cuid-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'TRK-1', customerId: 'cust-1' });
     await expect(service.item('dispatcher-shipments', 'TRK-1', 'disp-1', 'DISPATCHER')).resolves.toMatchObject({ id: 'TRK-1' });
+    await expect(service.item('dispatcher-shipments', 'TRK-missing', 'disp-1', 'DISPATCHER')).resolves.toEqual({ id: 'TRK-missing' });
+  });
+
+  it('looks the one shipment up instead of searching the 100 most recent', async () => {
+    const service = makeService();
+    await service.item('dispatcher-shipments', 'cuid-1', 'disp-1', 'DISPATCHER');
+    expect(shipmentFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { OR: [{ reference: 'cuid-1' }, { id: 'cuid-1' }] } }));
+  });
+
+  it('still keeps a shipment row from anyone outside operations', async () => {
+    const service = makeService();
+    await expect(service.item('dispatcher-shipments', 'cuid-1', 'cust-1', 'CUSTOMER')).rejects.toThrow('Only platform operations');
+    expect(shipmentFindMany).not.toHaveBeenCalled();
   });
 
   it('names the driver who accepted, not the first driver offered', async () => {

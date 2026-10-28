@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
 
@@ -50,16 +50,20 @@ export class DataService {
 
   constructor(private readonly prisma: PrismaService, private readonly shipments?: ShipmentsService) {}
 
-  async list(collection: DataCollection, userId: string, role: UserRole) {
-    // Checked before the try block on purpose: a real infrastructure failure below must
-    // throw, not fall back to a silent "here's some data anyway" response - and that
-    // must never also apply to someone who isn't ops staff in the first place.
+  private assertCanRead(collection: DataCollection, role: UserRole) {
     if (OPS_ONLY_COLLECTIONS.has(collection) && role !== 'ADMIN' && role !== 'DISPATCHER') {
       throw new ForbiddenException('Only platform operations can view this data.');
     }
     if (OWNER_OR_OPS_COLLECTIONS.has(collection) && !['TRUCK_OWNER', 'ADMIN', 'DISPATCHER'].includes(role)) {
       throw new ForbiddenException('Only truck owners and platform operations can view this data.');
     }
+  }
+
+  async list(collection: DataCollection, userId: string, role: UserRole) {
+    // Checked before the try block on purpose: a real infrastructure failure below must
+    // throw, not fall back to a silent "here's some data anyway" response - and that
+    // must never also apply to someone who isn't ops staff in the first place.
+    this.assertCanRead(collection, role);
     try {
       switch (collection) {
         case 'customer-shipments':
@@ -247,11 +251,16 @@ export class DataService {
   }
 
   async item(collection: DataCollection, id: string, userId: string, role: UserRole) {
+    if (REFERENCE_KEYED_COLLECTIONS.has(collection)) {
+      // Look the one shipment up rather than searching the list, which only holds the
+      // 100 most recently updated - links to older shipments would come back empty.
+      this.assertCanRead(collection, role);
+      const where: Prisma.ShipmentWhereInput = { OR: [{ reference: id }, { id }] };
+      const [row] = collection === 'dispatcher-shipments' ? await this.dispatcherShipments(where) : await this.operationShipments(where);
+      return row ?? { id };
+    }
     const items = await this.list(collection, userId, role);
-    const found = items.find((item: { id: string }) => item.id === id);
-    if (found || !REFERENCE_KEYED_COLLECTIONS.has(collection)) return found ?? { id };
-    const shipment = await this.prisma.shipment.findUnique({ where: { id }, select: { reference: true } });
-    return (shipment && items.find((item: { id: string }) => item.id === shipment.reference)) ?? { id };
+    return items.find((item: { id: string }) => item.id === id) ?? { id };
   }
 
   async create(collection: DataCollection, item: Record<string, unknown>, userId: string, role?: UserRole) {
@@ -332,8 +341,9 @@ export class DataService {
     }
   }
 
-  private async dispatcherShipments() {
+  private async dispatcherShipments(where?: Prisma.ShipmentWhereInput) {
     const shipments = await this.prisma.shipment.findMany({
+      where,
       orderBy: { updatedAt: 'desc' },
       take: 100,
     });
@@ -498,8 +508,9 @@ export class DataService {
     });
   }
 
-  private async operationShipments() {
+  private async operationShipments(where?: Prisma.ShipmentWhereInput) {
     const shipments = await this.prisma.shipment.findMany({
+      where,
       orderBy: { updatedAt: 'desc' },
       take: 100,
     });
