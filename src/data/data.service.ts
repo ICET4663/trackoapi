@@ -40,6 +40,10 @@ const OPS_ONLY_COLLECTIONS = new Set<DataCollection>([
 // account to enumerate.
 const OWNER_OR_OPS_COLLECTIONS = new Set<DataCollection>(['seeking-drivers']);
 
+// Staff shipment rows use the TRK reference as their id, but notifications and the
+// /v1/shipments/:id endpoints use the Shipment.id - item() accepts either.
+const REFERENCE_KEYED_COLLECTIONS = new Set<DataCollection>(['dispatcher-shipments', 'operation-shipments']);
+
 @Injectable()
 export class DataService {
   private readonly logger = new Logger(DataService.name);
@@ -244,7 +248,10 @@ export class DataService {
 
   async item(collection: DataCollection, id: string, userId: string, role: UserRole) {
     const items = await this.list(collection, userId, role);
-    return items.find((item: { id: string }) => item.id === id) ?? { id };
+    const found = items.find((item: { id: string }) => item.id === id);
+    if (found || !REFERENCE_KEYED_COLLECTIONS.has(collection)) return found ?? { id };
+    const shipment = await this.prisma.shipment.findUnique({ where: { id }, select: { reference: true } });
+    return (shipment && items.find((item: { id: string }) => item.id === shipment.reference)) ?? { id };
   }
 
   async create(collection: DataCollection, item: Record<string, unknown>, userId: string, role?: UserRole) {
@@ -341,7 +348,7 @@ export class DataService {
       }),
     ]);
     const customersById = new Map(customers.map((customer) => [customer.id, customer]));
-    const assignmentsByShipment = new Map(assignments.map((assignment) => [assignment.shipmentId, assignment]));
+    const assignmentsByShipment = this.currentAssignments(assignments);
 
     return shipments.map((shipment) => {
       const assignment = assignmentsByShipment.get(shipment.id);
@@ -359,6 +366,19 @@ export class DataService {
         destination: shipment.destinationAddress,
       };
     });
+  }
+
+  // The driver on each shipment: the accepted one, else the open offer. Earlier offers
+  // were declined, expired or withdrawn and must not name the driver (a Map built
+  // straight from the newest-first list kept the oldest offer).
+  private currentAssignments<T extends { shipmentId: string; status: string }>(assignments: T[]) {
+    const byShipment = new Map<string, T>();
+    for (const assignment of assignments) {
+      if (assignment.status !== 'ACCEPTED' && assignment.status !== 'OFFERED') continue;
+      const held = byShipment.get(assignment.shipmentId);
+      if (!held || (held.status !== 'ACCEPTED' && assignment.status === 'ACCEPTED')) byShipment.set(assignment.shipmentId, assignment);
+    }
+    return byShipment;
   }
 
   private async dispatcherDisputes() {
@@ -487,7 +507,7 @@ export class DataService {
       where: { shipmentId: { in: shipments.map((shipment) => shipment.id) } },
       orderBy: { offeredAt: 'desc' },
     });
-    const assignmentsByShipment = new Map(assignments.map((assignment) => [assignment.shipmentId, assignment]));
+    const assignmentsByShipment = this.currentAssignments(assignments);
 
     return shipments.map((shipment) => {
       const assignment = assignmentsByShipment.get(shipment.id);
