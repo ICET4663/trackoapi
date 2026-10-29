@@ -59,6 +59,18 @@ describe('DataService authorization gates', () => {
     expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
   });
 
+  it('labels each role in platform-users, truck owners included', async () => {
+    const user = (id: string, role: string) => ({
+      id, role, email: `${id}@tracko.ng`, phone: null, isActive: true, verificationStatus: 'VERIFIED',
+      createdAt: new Date('2026-10-01T00:00:00Z'), profile: { fullName: id },
+    });
+    prisma.user.findMany.mockResolvedValue([
+      user('c', 'CUSTOMER'), user('d', 'DRIVER'), user('o', 'TRUCK_OWNER'), user('x', 'DISPATCHER'), user('a', 'ADMIN'),
+    ]);
+    const rows = (await service.list('platform-users', 'admin-1', 'ADMIN')) as { id: string; role: string }[];
+    expect(rows.map((row) => row.role)).toEqual(['Customer', 'Driver', 'Truck owner', 'Dispatcher', 'Administrator']);
+  });
+
   it('allows DISPATCHER through the platform-users gate', async () => {
     await expect(service.list('platform-users', 'dispatch-1', 'DISPATCHER')).resolves.toBeDefined();
     expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
