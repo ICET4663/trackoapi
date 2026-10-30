@@ -673,6 +673,8 @@ export class DataService {
     switch (role) {
       case UserRole.DRIVER:
         return 'Driver';
+      case UserRole.TRUCK_OWNER:
+        return 'Truck owner';
       case UserRole.DISPATCHER:
         return 'Dispatcher';
       case UserRole.ADMIN:
