@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ensurePaymentModeColumns, paystackMode } from './paystack-mode';
 
 type InitializeEscrowInput = {
   shipmentId?: string;
@@ -55,7 +56,7 @@ export class PaymentProviderService {
       provider,
       mode: hasPaystackKey || hasStripeKey ? 'configured' : 'mock',
       environment: hasPaystackKey
-        ? this.config.get<string>('PAYSTACK_SECRET_KEY')?.startsWith('sk_live_') ? 'live' : 'test'
+        ? paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY'))
         : 'mock',
       escrowEnabled: true,
       realChargeEnabled: hasPaystackKey || hasStripeKey,
@@ -691,9 +692,13 @@ export class PaymentProviderService {
       // records the charge and notifies; the other would send every alert a second time.
       let claimed = false;
       if (wasPending) {
+        // Stamp live money as it is claimed, so payouts never count test-mode escrow.
+        const live = provider === 'paystack' && paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) === 'live';
+        if (live) await ensurePaymentModeColumns(this.prisma);
         const claimedRows = await this.prisma.$queryRawUnsafe<Array<{ shipmentId: string }>>(
           `update "Escrow"
-           set "status" = 'FUNDED'::"EscrowStatus",
+           set "status" = 'FUNDED'::"EscrowStatus",${live ? `
+               "paymentMode" = 'live',` : ''}
                "updatedAt" = current_timestamp
            where "shipmentId" = $1 and "status" = 'PENDING'::"EscrowStatus"
            returning "shipmentId"`,

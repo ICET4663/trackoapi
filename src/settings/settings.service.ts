@@ -7,6 +7,7 @@ import { findLegalDocument, LEGAL_DOCUMENTS } from '../legal/legal-content';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NOTIFICATION_TEMPLATES } from '../notifications/notification-templates';
 import { PrismaService } from '../prisma/prisma.service';
+import { ensurePaymentModeColumns, paystackMode } from '../integrations/paystack-mode';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
 type PreferenceKey =
@@ -989,8 +990,11 @@ export class SettingsService {
 
   async bankAccount(userId: string) {
     try {
+      // Once live, an account saved in test mode has a test-only Paystack recipient, so it
+      // reads as unverified and the app asks the driver or owner to add it again.
+      const verified = (await this.paystackLive()) ? `("verified" and "recipientMode" = 'live') as "verified"` : '"verified"';
       const rows = await this.prisma.$queryRawUnsafe<unknown[]>(
-        'select "id", "bankName", "maskedNumber", "holderName", "verified", "payoutSchedule", "pendingPayout" from "BankAccount" where "userId" = $1 limit 1',
+        `select "id", "bankName", "maskedNumber", "holderName", ${verified}, "payoutSchedule", "pendingPayout" from "BankAccount" where "userId" = $1 limit 1`,
         userId,
       );
       if (rows[0]) return rows[0];
@@ -1094,6 +1098,9 @@ export class SettingsService {
       nameMatches,
       recipientCode,
     );
+    if (await this.paystackLive()) {
+      await this.prisma.$executeRawUnsafe(`update "BankAccount" set "recipientMode" = 'live' where "userId" = $1`, userId);
+    }
 
     return this.bankAccount(userId);
   }
@@ -1122,8 +1129,9 @@ export class SettingsService {
   // profile (exactly the "payout to someone else's account" pattern the verified flag
   // exists to catch) would still receive a real transfer.
   private async payoutRecipientCode(userId: string): Promise<string | null> {
+    const liveOnly = (await this.paystackLive()) ? ` and "recipientMode" = 'live'` : '';
     const rows = await this.prisma.$queryRawUnsafe<Array<{ recipientCode: string | null; verified: boolean }>>(
-      'select "recipientCode", "verified" from "BankAccount" where "userId" = $1 limit 1',
+      `select "recipientCode", "verified" from "BankAccount" where "userId" = $1${liveOnly} limit 1`,
       userId,
     );
     const account = rows[0];
@@ -1220,6 +1228,8 @@ export class SettingsService {
       const beneficiaryFilter = beneficiary === 'DRIVER'
         ? `da."driverId" = $1`
         : `v."ownerId" = $1 and v."ownerId" <> da."driverId"`;
+      const live = await this.paystackLive();
+      const liveEscrow = live ? `and e."paymentMode" = 'live'` : '';
 
       const [releasedRows, pendingRows, bankAccount, withdrawalLogs] = await Promise.all([
         this.prisma.$queryRawUnsafe<DriverEscrowEarningRow[]>(
@@ -1233,6 +1243,7 @@ export class SettingsService {
            where ${beneficiaryFilter}
              and da."status" = 'ACCEPTED'
              and e."status" = 'RELEASED'
+             ${liveEscrow}
            order by e."updatedAt" desc
            limit 100`,
           userId,
@@ -1249,6 +1260,7 @@ export class SettingsService {
            where ${beneficiaryFilter}
              and da."status" = 'ACCEPTED'
              and e."status" in ('FUNDED', 'HELD', 'RELEASE_READY')
+             ${liveEscrow}
            order by e."updatedAt" desc
            limit 100`,
           userId,
@@ -1262,7 +1274,13 @@ export class SettingsService {
         }),
       ]);
 
-      const withdrawals = withdrawalLogs.map((payout) => ({
+      const livePayoutIds = live
+        ? new Set((await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
+            `select "id" from "Payout" where "driverId" = $1 and "paymentMode" = 'live'`,
+            userId,
+          )).map((row) => row.id))
+        : null;
+      const withdrawals = withdrawalLogs.filter((payout) => !livePayoutIds || livePayoutIds.has(payout.id)).map((payout) => ({
         id: payout.id,
         title: 'Withdrawal request',
         amount: -payout.amountKobo,
@@ -1495,6 +1513,15 @@ export class SettingsService {
         bankLabel: [bank?.bankName, bank?.maskedNumber].filter(Boolean).join(' '),
       },
     });
+    if (await this.paystackLive()) {
+      // An unstamped request would count as test money: unpayable and missing from the balance.
+      try {
+        await this.prisma.$executeRawUnsafe(`update "Payout" set "paymentMode" = 'live' where "id" = $1`, payout.id);
+      } catch (error) {
+        await this.prisma.payout.delete({ where: { id: payout.id } }).catch(() => null);
+        throw new InternalServerErrorException(`Could not record your withdrawal request. Please try again: ${this.errorMessage(error)}`);
+      }
+    }
 
     await this.prisma.auditLog.create({
       data: {
@@ -1609,6 +1636,15 @@ export class SettingsService {
       const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
       if (!secretKey) throw new BadRequestException('Paystack is not configured yet - cannot send a real payout.');
       await this.ensurePayoutTransferColumns();
+      if (await this.paystackLive()) {
+        const [row] = await this.prisma.$queryRawUnsafe<Array<{ paymentMode: string | null }>>(
+          'select "paymentMode" from "Payout" where "id" = $1 limit 1',
+          existing.id,
+        );
+        if (row?.paymentMode !== 'live') {
+          throw new BadRequestException('This request was made against test-mode earnings before Trako went live, so no real transfer can be sent. Reject it instead.');
+        }
+      }
       const recipientCode = await this.payoutRecipientCode(existing.driverId);
       if (!recipientCode) {
         throw new BadRequestException("This recipient hasn't set up a verified payout bank account yet, so no transfer can be sent.");
@@ -2048,6 +2084,13 @@ export class SettingsService {
     const vehicle = await this.prisma.vehicle.findFirst({ where: { id: vehicleId, ownerId }, select: { id: true, plateNumber: true } });
     if (!vehicle) throw new NotFoundException('Truck not found for this owner account.');
     return vehicle;
+  }
+
+  // True once a live Paystack key is configured; see paystack-mode.ts for why rows are stamped.
+  private async paystackLive() {
+    if (paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) !== 'live') return false;
+    await ensurePaymentModeColumns(this.prisma);
+    return true;
   }
 
   private async ensurePayoutTransferColumns() {
