@@ -74,7 +74,8 @@ async function main() {
     requireValue(response.ok, `login route returned HTTP ${response.status}`);
     const html = await response.text();
     requireValue(html.includes('id="root"'), 'Expo application root is missing');
-    const bundlePath = html.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
+    const scripts = [...html.matchAll(/<script[^>]+src="([^"]+\.js)"/g)].map((match) => match[1]);
+    const bundlePath = scripts.find((script) => /\/entry[-.][^/]*$/.test(script)) ?? scripts[0];
     requireValue(bundlePath, 'JavaScript application bundle is missing');
     const bundleResponse = await request(new URL(bundlePath, canonicalAppUrl).toString());
     requireValue(bundleResponse.ok, `application bundle returned HTTP ${bundleResponse.status}`);
