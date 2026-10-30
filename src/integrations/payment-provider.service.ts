@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, InternalServerErro
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { isStoreReviewerAccount } from '../common/store-reviewer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ensurePaymentModeColumns, paystackMode } from './paystack-mode';
@@ -37,6 +38,12 @@ type PaymentActor = {
   role: string;
 };
 
+// Store reviewer bookings carry this reference prefix. Once a live key is configured, their
+// checkout, verification, webhook and refund use PAYSTACK_TEST_SECRET_KEY instead, so Apple
+// and Google reviewers book and pay with a test card. Their escrow is never stamped 'live',
+// so it can never reach a live payout (see paystack-mode.ts).
+const REVIEW_REFERENCE_PREFIX = 'tracko_review_';
+
 @Injectable()
 export class PaymentProviderService {
   private readonly logger = new Logger(PaymentProviderService.name);
@@ -71,8 +78,46 @@ export class PaymentProviderService {
       payoutAutomation: provider === 'paystack' && hasPaystackKey
         ? { enabled: true, transferWebhookEvents: ['transfer.success', 'transfer.failed', 'transfer.reversed'], otpRisk: 'Disable "Approve transfers with OTP" in Paystack Dashboard > Settings > Preferences, or transfers will stall waiting on manual OTP entry.' }
         : { enabled: false },
+      // Live mode needs PAYSTACK_TEST_SECRET_KEY so store reviewers still pay with a test card.
+      reviewerTestCheckout: hasPaystackKey
+        && (paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) === 'test' || this.liveReviewerTestKey() !== undefined),
       requiredEnv: provider === 'stripe' ? ['STRIPE_SECRET_KEY'] : ['PAYSTACK_SECRET_KEY'],
     };
+  }
+
+  // The test key reviewer payments use while the main key is live; undefined in test mode,
+  // where the main key already is a test key.
+  private liveReviewerTestKey() {
+    if (paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) !== 'live') return undefined;
+    const testKey = this.config.get<string>('PAYSTACK_TEST_SECRET_KEY')?.trim();
+    return testKey && paystackMode(testKey) === 'test' ? testKey : undefined;
+  }
+
+  // The key that created a payment, read from its reference.
+  private secretKeyFor(reference?: string | null) {
+    if (reference?.startsWith(REVIEW_REFERENCE_PREFIX)) {
+      const testKey = this.liveReviewerTestKey();
+      if (testKey) return testKey;
+    }
+    return this.config.get<string>('PAYSTACK_SECRET_KEY');
+  }
+
+  // True when a payment went through the reviewer test key while the main key is live.
+  private isReviewerTestPayment(reference?: string | null) {
+    return Boolean(reference?.startsWith(REVIEW_REFERENCE_PREFIX) && this.liveReviewerTestKey());
+  }
+
+  // A reviewer test payment may only fund a store reviewer's own shipment: with a live key
+  // configured, test money must never mark a real customer's escrow funded.
+  private async testPaymentAllowedFor(shipmentId: string, reference?: string | null) {
+    if (!this.isReviewerTestPayment(reference)) return true;
+    const shipment = await this.prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { customer: { select: { email: true } } },
+    }).catch(() => null);
+    const allowed = isStoreReviewerAccount(shipment?.customer?.email);
+    if (!allowed) this.logger.warn(`Refused reviewer test payment ${reference} for shipment ${shipmentId}: not a store reviewer's shipment`);
+    return allowed;
   }
 
   async initializeEscrow(input: InitializeEscrowInput) {
@@ -81,7 +126,7 @@ export class PaymentProviderService {
     const shipment = input.shipmentId
       ? await this.prisma.shipment.findUnique({
           where: { id: input.shipmentId },
-          select: { id: true, customerId: true, quotedPriceKobo: true, cargoValueKobo: true },
+          select: { id: true, customerId: true, quotedPriceKobo: true, cargoValueKobo: true, customer: { select: { email: true } } },
         })
       : null;
 
@@ -119,7 +164,11 @@ export class PaymentProviderService {
     if (!amount || amount <= 0) {
       throw new BadRequestException('A valid escrow amount is required.');
     }
-    const providerReference = `tracko_escrow_${Date.now()}`;
+    const reviewer = isStoreReviewerAccount(shipment?.customer?.email);
+    if (reviewer && paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) === 'live' && !this.liveReviewerTestKey()) {
+      throw new BadRequestException('Review checkout is not set up yet (no Paystack test key), so no payment was started. Please contact support.');
+    }
+    const providerReference = `${reviewer ? REVIEW_REFERENCE_PREFIX : 'tracko_escrow_'}${Date.now()}`;
     const status = this.status();
 
     try {
@@ -181,7 +230,7 @@ export class PaymentProviderService {
   async recordWebhook(provider: string, event: string, body: unknown, signature?: string, rawBody?: Buffer | string) {
     const verified =
       provider === 'paystack'
-        ? this.verifyPaystackSignature(body, signature, rawBody)
+        ? this.verifyPaystackSignature(body, signature, rawBody, this.webhookReference(body))
         : this.status().mode === 'mock';
 
     // Paystack posts every subscribed event to the one webhook URL configured on the
@@ -200,7 +249,8 @@ export class PaymentProviderService {
     // this as already-processed rather than re-crediting/re-notifying.
     let alreadyProcessed = false;
 
-    if (verified && provider === 'paystack' && payment.shipmentId && payment.success) {
+    if (verified && provider === 'paystack' && payment.shipmentId && payment.success
+      && await this.testPaymentAllowedFor(payment.shipmentId, payment.reference)) {
       const currentStatus = await this.escrowStatus(payment.shipmentId);
       if (currentStatus && currentStatus !== 'PENDING') {
         alreadyProcessed = true;
@@ -244,6 +294,11 @@ export class PaymentProviderService {
   private wireEventName(body: unknown): string | null {
     const payload = body as { event?: string } | null;
     return typeof payload?.event === 'string' ? payload.event : null;
+  }
+
+  private webhookReference(body: unknown): string | undefined {
+    const reference = (body as { data?: { reference?: unknown } } | null)?.data?.reference;
+    return typeof reference === 'string' ? reference : undefined;
   }
 
   // transfer.success confirms a payout that reviewPayoutRequest() already marked PAID -
@@ -330,8 +385,7 @@ export class PaymentProviderService {
   // dashboard by hand. The charge's reference is kept in its BillingCharge id
   // ("bill-<reference>", see recordSuccessfulPayment).
   async refundShipmentPayment(shipmentId: string): Promise<{ status: 'refunded' | 'pending' | 'not_applicable' | 'failed'; detail: string }> {
-    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
-    if (this.status().provider !== 'paystack' || !secretKey) {
+    if (this.status().provider !== 'paystack' || !this.config.get<string>('PAYSTACK_SECRET_KEY')) {
       return { status: 'not_applicable', detail: 'Payments are not processed through Paystack here; refund recorded in Trako only.' };
     }
     try {
@@ -346,7 +400,7 @@ export class PaymentProviderService {
 
       const response = await fetch('https://api.paystack.co/refund', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${this.secretKeyFor(reference)}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ transaction: reference }),
       });
       const payload = (await response.json().catch(() => ({}))) as { status?: boolean; message?: string; data?: { status?: string } };
@@ -364,7 +418,7 @@ export class PaymentProviderService {
   }
 
   async verifyPaystackPayment(reference: string, actor?: PaymentActor) {
-    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    const secretKey = this.secretKeyFor(reference);
     if (!secretKey) {
       return {
         verified: false,
@@ -415,7 +469,7 @@ export class PaymentProviderService {
         throw new ForbiddenException('This payment belongs to another customer account.');
       }
     }
-    const escrowUpdated = verified && payment.shipmentId
+    const escrowUpdated = verified && payment.shipmentId && await this.testPaymentAllowedFor(payment.shipmentId, payment.reference ?? reference)
       ? await this.markEscrowFunded(payment.shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference, payment.authorization)
       : false;
     if (!verified && response.ok && payment.shipmentId) {
@@ -519,7 +573,7 @@ export class PaymentProviderService {
     method?: 'card' | 'bank_transfer';
     callbackUrl?: string;
   }) {
-    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+    const secretKey = this.secretKeyFor(input.providerReference);
     if (!secretKey) return this.mockProviderResponse(input, 'Paystack key is missing.');
 
     // Paystack's hosted checkout offers every channel enabled on the account when no
@@ -693,7 +747,8 @@ export class PaymentProviderService {
       let claimed = false;
       if (wasPending) {
         // Stamp live money as it is claimed, so payouts never count test-mode escrow.
-        const live = provider === 'paystack' && paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) === 'live';
+        const live = provider === 'paystack' && paystackMode(this.config.get<string>('PAYSTACK_SECRET_KEY')) === 'live'
+          && !this.isReviewerTestPayment(reference);
         if (live) await ensurePaymentModeColumns(this.prisma);
         const claimedRows = await this.prisma.$queryRawUnsafe<Array<{ shipmentId: string }>>(
           `update "Escrow"
@@ -811,8 +866,9 @@ export class PaymentProviderService {
     return `${currency === 'NGN' ? 'N' : `${currency} `}${amount}`;
   }
 
-  private verifyPaystackSignature(body: unknown, signature?: string, rawBody?: Buffer | string) {
-    const secretKey = this.config.get<string>('PAYSTACK_SECRET_KEY');
+  private verifyPaystackSignature(body: unknown, signature?: string, rawBody?: Buffer | string, reference?: string) {
+    // A reviewer test payment's webhook is signed with the test key that created it.
+    const secretKey = this.secretKeyFor(reference);
     if (!secretKey || !signature) return false;
     const payload = rawBody ?? JSON.stringify(body ?? {});
     const digest = createHmac('sha512', secretKey).update(payload).digest('hex');

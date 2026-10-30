@@ -171,6 +171,12 @@ async function main() {
       : 'configured';
   });
 
+  await check('store reviewer test checkout', 'advisory', async () => {
+    requireValue(PREFLIGHT_ACCESS_TOKEN, 'set PREFLIGHT_ACCESS_TOKEN to inspect protected payment details');
+    requireValue(integrations?.payments?.reviewerTestCheckout === true, 'live key without PAYSTACK_TEST_SECRET_KEY: Apple and Google review accounts cannot pay');
+    return integrations.payments.environment === 'live' ? 'review accounts pay with the test key' : 'test mode';
+  });
+
   await check('maps and routing', 'required', async () => {
     const configured = integrations?.maps?.realRoutingEnabled === true || readiness?.mapsAddressing?.provider === 'configured';
     requireValue(configured, 'Google maps provider is not configured');

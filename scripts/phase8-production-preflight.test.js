@@ -26,7 +26,7 @@ async function run(env = {}, options = {}) {
     let data;
     if (pathname === '/v1/health') data = { ok: true, deployable: true, service: 'tracko-api', integrations: [{ name: 'kyc', productionReady: true }, { name: 'fatalErrorAlerts', mode: 'configured' }] };
     else if (pathname === '/v1/demo/readiness') data = { ok: true, escrowPayment: { paystackReady: true }, mapsAddressing: { provider: 'configured' }, kyc: { provider: 'configured' }, database: { connected: true }, email: { status: 'domain_verified' }, fileUploads: { status: 'ready', bucket: 'media' } };
-    else if (pathname === '/v1/integrations/status') data = { payments: { mode: 'configured', provider: 'paystack', environment: 'live', realChargeEnabled: true }, kyc: { realVerificationEnabled: true, productionReady: true, provider: 'smile_id' }, maps: { realRoutingEnabled: true, provider: 'google' }, translation: { multilingualTranscriptionEnabled: true, provider: 'google' } };
+    else if (pathname === '/v1/integrations/status') data = { payments: { mode: 'configured', provider: 'paystack', environment: 'live', realChargeEnabled: true, reviewerTestCheckout: !options.noReviewerTestKey }, kyc: { realVerificationEnabled: true, productionReady: true, provider: 'smile_id' }, maps: { realRoutingEnabled: true, provider: 'google' }, translation: { multilingualTranscriptionEnabled: true, provider: 'google' } };
     else if (pathname.endsWith('/apple-app-site-association')) data = apple;
     else if (pathname.endsWith('/assetlinks.json')) data = android;
     else if (pathname.endsWith('.js')) { data = 'x'.repeat(pathname.endsWith('/runtime.js') || options.smallEntry ? 3802 : 100001); headers['content-type'] = 'application/javascript'; }
@@ -129,4 +129,9 @@ test('does not trust lookalike redirected hostnames', async () => {
 test('rejects invalid platform and unsafe timeout configuration', async () => {
   await assert.rejects(run({ RELEASE_PLATFORM: 'unknown' }), /RELEASE_PLATFORM/);
   await assert.rejects(run({ PREFLIGHT_TIMEOUT_MS: 'invalid' }), /PREFLIGHT_TIMEOUT_MS/);
+});
+test('strict production is blocked when store review accounts would have to pay live', async () => {
+  const result = await run(nativeEnv('android'), { noReviewerTestKey: true });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.logs, /store reviewer test checkout.*PAYSTACK_TEST_SECRET_KEY/);
 });

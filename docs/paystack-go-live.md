@@ -22,6 +22,8 @@ payouts (`/transferrecipient`, `/transfer`). There is no separate payout key.
    - Copy the **live secret key** (`sk_live_...`). Never paste it into the app, EAS or this repo.
    - **Live Webhook URL:** `https://trackoapi.vercel.app/v1/payments/webhooks/paystack/charge.success`
      (the same endpoint also receives `transfer.success`, `transfer.failed`, `transfer.reversed`).
+   - With live mode off, the **Test Webhook URL** must stay set to the same address: review-account
+     payments are test payments and confirm through it.
    - Leave the callback URL empty: the API sends one with each payment (`PAYMENT_CALLBACK_URL`
      or the app's own origin, `resolveCallbackBaseUrl`).
 2. **Settings → Preferences → Transfers:** turn **off** "Approve transfers with OTP". If it is on,
@@ -35,10 +37,17 @@ payouts (`/transferrecipient`, `/transfer`). There is no separate payout key.
 ## Vercel (trackoapi project, Production environment)
 
 1. Set `PAYSTACK_SECRET_KEY` to the live key. `PAYMENT_PROVIDER` stays `paystack`.
-2. Redeploy the API.
-3. Signed in as an admin, `GET /v1/integrations/status` must show
-   `payments.environment: "live"` and `realChargeEnabled: true`.
-4. Run the strict preflight with `STRICT_PRODUCTION=true`, `PREFLIGHT_ACCESS_TOKEN=<admin token>`,
+2. Set `PAYSTACK_TEST_SECRET_KEY` to the **test** secret key (`sk_test_...`, the value
+   `PAYSTACK_SECRET_KEY` had before). Apple and Google review accounts (`apple.review.*`,
+   `google.review.*`) keep paying with a Paystack test card through it, so a store reviewer
+   never moves real money. Without it their checkout is refused with "Review checkout is not set
+   up yet". Their escrow is test money: it never counts toward a live payout, and the review
+   driver's withdrawals cannot be paid. A test payment can only fund a review account's own
+   shipment.
+3. Redeploy the API.
+4. Signed in as an admin, `GET /v1/integrations/status` must show
+   `payments.environment: "live"`, `realChargeEnabled: true` and `reviewerTestCheckout: true`.
+5. Run the strict preflight with `STRICT_PRODUCTION=true`, `PREFLIGHT_ACCESS_TOKEN=<admin token>`,
    `BACKUP_RECOVERY_EVIDENCE_FILE` and `BACKUP_SOURCE_PROJECT_ID` set (plus the device evidence
    variables for a native release; see `docs/phase-8-launch-readiness.md`), then
    `node scripts/phase8-production-preflight.js`. PowerShell: set each with `$env:NAME="value"`.

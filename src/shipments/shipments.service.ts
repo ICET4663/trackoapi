@@ -3,6 +3,7 @@ import { AssignmentStatus, Prisma, ShipmentStatus, UserRole } from '@prisma/clie
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { PaymentProviderService } from '../integrations/payment-provider.service';
+import { isStoreReviewerAccount } from '../common/store-reviewer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
@@ -105,8 +106,6 @@ const RELEASABLE_BEFORE_PICKUP: ShipmentStatus[] = ['DRIVER_ASSIGNED', 'DRIVER_E
 const CARGO_ON_BOARD: ShipmentStatus[] = ['PICKED_UP', 'IN_TRANSIT', 'ARRIVED_DESTINATION'];
 // Drivers with a fresh position this close to the pickup are offered a load before anyone further away.
 const NEARBY_PICKUP_KM = 50;
-// App Store and Play review accounts (scripts/create-review-accounts.js).
-const isStoreReviewerAccount = (email?: string | null) => /^(apple|google)\.review\./i.test(email ?? '');
 
 @Injectable()
 export class ShipmentsService {
