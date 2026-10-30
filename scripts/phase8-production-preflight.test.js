@@ -29,10 +29,10 @@ async function run(env = {}, options = {}) {
     else if (pathname === '/v1/integrations/status') data = { payments: { mode: 'configured', provider: 'paystack', environment: 'live', realChargeEnabled: true }, kyc: { realVerificationEnabled: true, productionReady: true, provider: 'smile_id' }, maps: { realRoutingEnabled: true, provider: 'google' }, translation: { multilingualTranscriptionEnabled: true, provider: 'google' } };
     else if (pathname.endsWith('/apple-app-site-association')) data = apple;
     else if (pathname.endsWith('/assetlinks.json')) data = android;
-    else if (pathname.endsWith('.js')) { data = 'x'.repeat(100001); headers['content-type'] = 'application/javascript'; }
+    else if (pathname.endsWith('.js')) { data = 'x'.repeat(pathname.endsWith('/runtime.js') || options.smallEntry ? 3802 : 100001); headers['content-type'] = 'application/javascript'; }
     else if (pathname.startsWith('/v1/legal/')) data = 'Published document '.repeat(20);
     else if (pathname.startsWith('/v1/auth/')) data = {};
-    else { data = '<html><div id="root"></div><script src="/entry.js"></script></html>'; headers['content-type'] = 'text/html'; }
+    else { data = options.splitBundles ? '<html><div id="root"></div><script src="/runtime.js"></script><script src="/_expo/entry-main.js"></script></html>' : '<html><div id="root"></div><script src="/entry.js"></script></html>'; headers['content-type'] = 'text/html'; }
     const response = new Response(typeof data === 'string' ? data : JSON.stringify(data), { headers });
     Object.defineProperty(response, 'url', { value: pathname === '/' && options.redirectHost ? `https://${options.redirectHost}/` : url });
     return response;
@@ -69,6 +69,19 @@ test('web mode does not require physical-device evidence', async () => {
   const result = await run();
   assert.equal(result.exitCode, 0);
   assert.ok(!result.logs.includes('installed-device evidence'));
+});
+
+test('checks the application entry rather than the small split-bundle runtime', async () => {
+  const result = await run({}, { splitBundles: true });
+  assert.equal(result.exitCode, 0);
+  assert.ok(result.requests.some(({ url }) => url.endsWith('/_expo/entry-main.js')));
+  assert.ok(!result.requests.some(({ url }) => url.endsWith('/runtime.js')));
+});
+
+test('still rejects an unexpectedly small application entry', async () => {
+  const result = await run({}, { splitBundles: true, smallEntry: true });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.logs, /FAIL web application bundle.*unexpectedly small/);
 });
 test('Android gate requires exact certificate and device record, not Apple membership', async () => {
   const env = nativeEnv('android'); delete env.APPLE_TEAM_ID;
