@@ -1736,7 +1736,7 @@ export class ShipmentsService {
     // Timeline note and driver notification are both already best-effort/non-throwing
     // internally - supplementary to the release itself, which already succeeded above.
     await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
-    await this.notifyAssignedDriverOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
+    await this.notifySettlementOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
     await this.notifyShipmentParties(shipmentId, {
       customer: {
         title: 'Shipment completed',
@@ -2176,12 +2176,18 @@ export class ShipmentsService {
     }
   }
 
-  private async notifyAssignedDriverOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {
+  // Tells the people paid from a released escrow what they actually earned. When the truck
+  // belongs to someone other than the driver, the money is split exactly as the earnings
+  // ledger splits it (SettingsService.settlementEarnings): the driver gets the
+  // `driverOwnerSharePercent` setting (default 70) and the truck owner the rest. The
+  // driver's notice used to quote the whole payment, and the owner was never told.
+  private async notifySettlementOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null }>>(
-        `select da."driverId", s."reference"
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null; ownerId: string | null }>>(
+        `select da."driverId", s."reference", v."ownerId"
          from "DriverAssignment" da
          join "Shipment" s on s."id" = da."shipmentId"
+         left join "Vehicle" v on v."id" = da."vehicleId"
          where da."shipmentId" = $1 and da."status" = 'ACCEPTED'
          order by da."acceptedAt" desc nulls last, da."offeredAt" desc
          limit 1`,
@@ -2190,21 +2196,57 @@ export class ShipmentsService {
       const assignment = rows[0];
       if (!assignment?.driverId) return;
 
-      await this.notifications.create({
-        userId: assignment.driverId,
-        title: 'Escrow released',
-        body: `${this.formatMoney(amount, currency)} for ${assignment.reference ?? shipmentId} is now available for withdrawal.`,
-        templateKey: 'notifyTpl.driverEscrowReleased',
-        vars: { amount: this.formatMoney(amount, currency), reference: assignment.reference ?? shipmentId },
-        tone: 'SUCCESS',
-        entity: 'Escrow',
-        entityId: shipmentId,
-        actionUrl: '/driver/earnings',
-        preferenceKey: 'escrowPayments',
-      });
+      const reference = assignment.reference ?? shipmentId;
+      const total = Number(amount ?? 0);
+      const separateOwner = Boolean(assignment.ownerId) && assignment.ownerId !== assignment.driverId;
+      const driverSharePercent = separateOwner ? await this.driverSettlementSharePercent() : 100;
+      // Same rounding as the ledger's SQL round() on a positive amount.
+      const driverAmount = separateOwner ? Math.round((total * driverSharePercent) / 100) : total;
+      const ownerAmount = Math.round((total * (100 - driverSharePercent)) / 100);
+
+      const sends: Promise<unknown>[] = [
+        this.notifications.create({
+          userId: assignment.driverId,
+          title: 'Escrow released',
+          body: `${this.formatMoney(driverAmount, currency)} for ${reference} is now available for withdrawal.`,
+          templateKey: 'notifyTpl.driverEscrowReleased',
+          vars: { amount: this.formatMoney(driverAmount, currency), reference },
+          tone: 'SUCCESS',
+          entity: 'Escrow',
+          entityId: shipmentId,
+          actionUrl: '/driver/earnings',
+          preferenceKey: 'escrowPayments',
+        }),
+      ];
+      if (separateOwner && assignment.ownerId && ownerAmount > 0) {
+        sends.push(this.notifications.create({
+          userId: assignment.ownerId,
+          role: 'TRUCK_OWNER',
+          title: 'Payment released',
+          body: `Your share of ${this.formatMoney(ownerAmount, currency)} for ${reference} is now available for withdrawal.`,
+          templateKey: 'notifyTpl.ownerEscrowReleased',
+          vars: { amount: this.formatMoney(ownerAmount, currency), reference },
+          tone: 'SUCCESS',
+          entity: 'Escrow',
+          entityId: shipmentId,
+          actionUrl: `/owner/settlement/${shipmentId}`,
+          preferenceKey: 'escrowPayments',
+        }));
+      }
+      await Promise.all(sends);
     } catch {
       // Escrow release should not fail because notification delivery failed.
     }
+  }
+
+  // Mirrors SettingsService.driverSettlementSharePercent so notices quote ledger amounts.
+  private async driverSettlementSharePercent() {
+    const store = this.prisma.platformSetting;
+    const setting = store?.findUnique
+      ? await store.findUnique({ where: { key: 'driverOwnerSharePercent' } }).catch(() => null)
+      : null;
+    const configured = Number(setting?.value ?? 70);
+    return Number.isFinite(configured) ? Math.min(100, Math.max(0, configured)) : 70;
   }
 
   private errorMessage(error: unknown) {

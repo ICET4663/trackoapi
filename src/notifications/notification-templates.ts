@@ -63,6 +63,13 @@ export const NOTIFICATION_TEMPLATES: NotificationTemplateDefinition[] = [
     defaultBody: '{amount} for {reference} is now available for withdrawal.',
   },
   {
+    key: 'notifyTpl.ownerEscrowReleased',
+    title: 'Truck owner · payment released',
+    description: "Sent to the truck owner when escrow is released for a trip on their truck driven by someone else; {amount} is the owner's share.",
+    placeholders: ['amount', 'reference'],
+    defaultBody: 'Your share of {amount} for {reference} is now available for withdrawal.',
+  },
+  {
     key: 'notifyTpl.driverWithdrawalApproved',
     title: 'Driver · withdrawal approved',
     description: 'Sent to the driver when finance approves their payout request.',
