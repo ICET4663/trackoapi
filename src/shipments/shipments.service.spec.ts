@@ -51,7 +51,7 @@ describe('ShipmentsService.releaseEscrow never fakes success on failure', () => 
     const queryRawUnsafe = jest.fn()
       .mockResolvedValueOnce([escrowRow])
       .mockResolvedValueOnce([releasedRow])
-      .mockResolvedValueOnce([]); // notifyAssignedDriverOfEscrowRelease's own lookup
+      .mockResolvedValueOnce([]); // notifySettlementOfEscrowRelease's own lookup
     const service = buildService(queryRawUnsafe);
 
     const result = await service.releaseEscrow('shp-1', 'ADMIN');

@@ -27,7 +27,7 @@ describe('Payment release rules', () => {
     const prisma = { $queryRawUnsafe: queryRawUnsafe } as unknown as PrismaService;
     const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
     const internals = service as unknown as Record<string, unknown>;
-    for (const name of ['updateShipmentTimeline', 'notifyAssignedDriverOfEscrowRelease', 'notifyShipmentParties']) {
+    for (const name of ['updateShipmentTimeline', 'notifySettlementOfEscrowRelease', 'notifyShipmentParties']) {
       jest.spyOn(internals as never, name as never).mockResolvedValue(undefined as never);
     }
     return { service, released: () => queryRawUnsafe.mock.calls.some(([sql]) => String(sql).includes('update "Escrow"')) };
