@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Param, Patch, Post } from '@nestjs/common';
 import { ShipmentStatus } from '@prisma/client';
 import { RequestUserService } from '../common/request-user.service';
+import { PaymentReconciliationService } from '../integrations/payment-reconciliation.service';
 import { OperationsService } from './operations.service';
 
 @Controller('operations')
@@ -8,7 +9,32 @@ export class OperationsController {
   constructor(
     private readonly operations: OperationsService,
     private readonly requestUser: RequestUserService,
+    private readonly reconciliation: PaymentReconciliationService,
   ) {}
+
+  // Latest Paystack vs escrow ledger comparison (weekly on Monday, or run by an admin).
+  @Get('payment-reconciliation')
+  async latestReconciliation(@Headers('authorization') authorization?: string) {
+    await this.requestUser.requireRole(authorization, ['ADMIN']);
+    return { run: await this.reconciliation.latest() };
+  }
+
+  // Read-only on Paystack and the database; dates are YYYY-MM-DD (UTC), default the last 7 days.
+  @Post('payment-reconciliation/run')
+  async runReconciliation(
+    @Body() body: { from?: string; to?: string } | undefined,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
+    const day = (value: string | undefined, end: boolean) => {
+      if (!value) return undefined;
+      if (!/^d{4}-d{2}-d{2}$/.test(value)) throw new BadRequestException('Dates must look like 2026-11-06.');
+      return new Date(`${value}T${end ? '23:59:59.999' : '00:00:00.000'}Z`);
+    };
+    const to = day(body?.to, true);
+    const from = day(body?.from, false);
+    return { run: await this.reconciliation.run({ trigger: 'manual', from, to, actorId: user.sub }) };
+  }
 
   @Get('dashboard')
   async dashboard(@Headers('authorization') authorization?: string) {

@@ -3,6 +3,9 @@ import { CronController } from './cron.controller';
 import type { ShipmentsService } from './shipments.service';
 import type { TrackingService } from '../tracking/tracking.service';
 import type { ConfigService } from '@nestjs/config';
+import type { PaymentReconciliationService } from '../integrations/payment-reconciliation.service';
+
+const idleReconciliation = () => ({ runScheduled: jest.fn().mockResolvedValue({ skipped: 'Runs on Mondays.' }) }) as unknown as PaymentReconciliationService;
 
 // This endpoint is reachable without a bearer token (@Public()) since Vercel Cron cannot
 // send a normal user JWT - CRON_SECRET is the only thing standing between the public
@@ -17,7 +20,9 @@ describe('CronController.autoReleaseEscrow requires a real CRON_SECRET', () => {
     const purgeExpiredLocationHistory = jest.fn().mockResolvedValue({ retentionDays: 30, deleted: 0 });
     const tracking = { purgeExpiredLocationHistory } as unknown as TrackingService;
     const config = { get: () => configuredSecret } as unknown as ConfigService;
-    return { controller: new CronController(shipments, tracking, config), autoReleaseEligibleEscrows, expireStaleAssignmentOffers, matchWaitingShipments, purgeExpiredLocationHistory };
+    const runScheduled = jest.fn().mockResolvedValue({ skipped: 'Runs on Mondays.' });
+    const reconciliation = { runScheduled } as unknown as PaymentReconciliationService;
+    return { controller: new CronController(shipments, tracking, config, reconciliation), autoReleaseEligibleEscrows, expireStaleAssignmentOffers, matchWaitingShipments, purgeExpiredLocationHistory, runScheduled };
   }
 
   it('refuses the request outright when CRON_SECRET is not configured at all', async () => {
@@ -66,6 +71,26 @@ describe('CronController.autoReleaseEscrow requires a real CRON_SECRET', () => {
     expect(result.escrow).toBeDefined();
   });
 
+  it('runs the weekly payment reconciliation and reports a short result', async () => {
+    const { controller, runScheduled } = buildController('the-real-secret');
+    runScheduled.mockResolvedValue({ status: 'problems', problems: [{}, {}] });
+
+    const result = await controller.autoReleaseEscrow('Bearer the-real-secret');
+
+    expect(runScheduled).toHaveBeenCalledTimes(1);
+    expect(result.paymentReconciliation).toEqual({ status: 'problems', problems: 2 });
+  });
+
+  it('never lets a failed reconciliation stop escrow release', async () => {
+    const { controller, runScheduled, autoReleaseEligibleEscrows } = buildController('the-real-secret');
+    runScheduled.mockRejectedValue(new Error('paystack down'));
+
+    const result = await controller.autoReleaseEscrow('Bearer the-real-secret');
+
+    expect(autoReleaseEligibleEscrows).toHaveBeenCalledTimes(1);
+    expect(result.paymentReconciliation).toEqual({ error: 'paystack down' });
+  });
+
   it('does not purge anything for an unauthenticated request', async () => {
     const { controller, purgeExpiredLocationHistory } = buildController('the-real-secret');
 
@@ -81,7 +106,7 @@ describe('CronController.dispatchSweep', () => {
     const matchWaitingShipments = jest.fn(async () => { calls.push('match'); return { waiting: 2, offered: 1 }; });
     const shipments = { expireStaleAssignmentOffers, matchWaitingShipments } as unknown as ShipmentsService;
     const config = { get: () => configuredSecret } as unknown as ConfigService;
-    return { controller: new CronController(shipments, {} as TrackingService, config), calls, expireStaleAssignmentOffers, matchWaitingShipments };
+    return { controller: new CronController(shipments, {} as TrackingService, config, idleReconciliation()), calls, expireStaleAssignmentOffers, matchWaitingShipments };
   }
 
   it('refuses a missing secret, a missing token and a wrong token', async () => {
@@ -115,6 +140,7 @@ describe('CronController daily run offers waiting shipments', () => {
       } as unknown as ShipmentsService,
       { purgeExpiredLocationHistory: jest.fn().mockResolvedValue({}) } as unknown as TrackingService,
       { get: () => 'the-real-secret' } as unknown as ConfigService,
+      idleReconciliation(),
     );
 
     const result = await controller.autoReleaseEscrow('Bearer the-real-secret');
