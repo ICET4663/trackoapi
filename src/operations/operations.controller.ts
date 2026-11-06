@@ -28,7 +28,7 @@ export class OperationsController {
     const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
     const day = (value: string | undefined, end: boolean) => {
       if (!value) return undefined;
-      if (!/^d{4}-d{2}-d{2}$/.test(value)) throw new BadRequestException('Dates must look like 2026-11-06.');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new BadRequestException('Dates must look like 2026-11-06.');
       return new Date(`${value}T${end ? '23:59:59.999' : '00:00:00.000'}Z`);
     };
     const to = day(body?.to, true);
