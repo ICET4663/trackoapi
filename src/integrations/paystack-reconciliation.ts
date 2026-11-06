@@ -7,6 +7,8 @@
 
 export const PAYSTACK_ESCROW_PREFIX = 'tracko_escrow_';
 export const PAYSTACK_REVIEW_PREFIX = 'tracko_review_';
+// Paystack marks a fully refunded (or charged-back) payment "reversed"; the money still arrived first.
+const PAID_STATUSES = new Set(['success', 'reversed']);
 // Escrow states that mean the customer's money arrived at some point.
 export const FUNDED_ESCROW_STATES = new Set(['FUNDED', 'HELD', 'RELEASE_READY', 'RELEASED', 'DISPUTED', 'REFUNDED']);
 
@@ -45,7 +47,8 @@ export type ReconciliationProblemType =
   | 'paystack_payment_missing'
   | 'refund_not_sent'
   | 'refund_partial'
-  | 'refund_not_in_ledger';
+  | 'refund_not_in_ledger'
+  | 'payment_reversed';
 export type ReconciliationNoteType = 'store_review_payment' | 'funded_outside_paystack';
 
 export type ReconciliationItem<T extends string> = {
@@ -126,7 +129,7 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
     detail,
   });
 
-  const successes = transactions.map(normalizeTransaction).filter((tx) => tx.status === 'success' && isTrakoEscrowPayment(tx));
+  const successes = transactions.map(normalizeTransaction).filter((tx) => PAID_STATUSES.has(tx.status) && isTrakoEscrowPayment(tx));
   const countedRefunds = refunds.map(normalizeRefund).filter(refundCounts);
 
   const ledgerById = new Map(ledger.map((row) => [row.shipmentId, row]));
@@ -203,7 +206,13 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
 
     if (payment) {
       const refunded = refundedFor(payment);
-      if (row.escrowStatus === 'REFUNDED' && refunded === 0) {
+      if (payment.status === 'reversed' && refunded === 0) {
+        // Reversed with no refund on record: a chargeback, or a refund older than the listing.
+        // Money went back to the customer, which is only right when Trako refunded too.
+        if (row.escrowStatus !== 'REFUNDED') {
+          problems.push(item('payment_reversed', row, `Paystack reversed ${payment.reference} (money back to the customer) but the escrow is ${row.escrowStatus}; check for a chargeback before releasing.`));
+        }
+      } else if (row.escrowStatus === 'REFUNDED' && refunded === 0) {
         problems.push(item('refund_not_sent', row, `Escrow is REFUNDED but Paystack has no refund for ${payment.reference}; refund it in the Paystack dashboard.`));
       } else if (row.escrowStatus === 'REFUNDED' && refunded < payment.amountKobo) {
         problems.push(item('refund_partial', row, `Paystack refunded ${refunded} of ${payment.amountKobo} kobo for ${payment.reference}.`));
@@ -220,7 +229,7 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
 // (for example paid just before `from`). Callers verify these references one by one.
 export function referencesToVerify(input: { transactions?: PaystackTransaction[]; ledger?: LedgerRow[] }): string[] {
   const { transactions = [], ledger = [] } = input;
-  const seen = new Set(transactions.map(normalizeTransaction).filter((tx) => tx.status === 'success').map((tx) => tx.reference));
+  const seen = new Set(transactions.map(normalizeTransaction).filter((tx) => PAID_STATUSES.has(tx.status)).map((tx) => tx.reference));
   const refs: string[] = [];
   for (const row of ledger) {
     if (!FUNDED_ESCROW_STATES.has(row.escrowStatus)) continue;

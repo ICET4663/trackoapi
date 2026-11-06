@@ -36,7 +36,7 @@ function setup(options: { env?: Json; ledger?: Json[]; paystack?: (url: URL) => 
 
   const requests: Array<{ url: string; method: string; auth?: string; body?: string }> = [];
   const paystack: (url: URL) => { status?: number; body: Json } = options.paystack ?? ((url: URL) => ({
-    body: url.pathname === '/transaction' ? { status: true, data: [tx()], meta: { pageCount: 1 } } : { status: true, data: [], meta: { pageCount: 1 } },
+    body: url.pathname === '/transaction' && url.searchParams.get('status') === 'success' ? { status: true, data: [tx()], meta: { pageCount: 1 } } : { status: true, data: [], meta: { pageCount: 1 } },
   }));
   const fetchMock = jest.fn(async (input: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     requests.push({ url: input, method: init.method ?? 'GET', auth: init.headers?.Authorization, body: init.body });
@@ -69,15 +69,16 @@ describe('PaymentReconciliationService', () => {
     expect(auditCreate).toHaveBeenCalledWith({ data: expect.objectContaining({ action: RECONCILIATION_AUDIT_ACTION, actorId: 'admin1', entityId: run.id }) });
     expect(notify).not.toHaveBeenCalled();
     const paystackCalls = requests.filter((r) => r.url.startsWith('https://api.paystack.co'));
-    expect(paystackCalls.map((r) => new URL(r.url).pathname)).toEqual(['/transaction', '/refund']);
+    expect(paystackCalls.map((r) => new URL(r.url).pathname)).toEqual(['/transaction', '/transaction', '/refund']);
     expect(paystackCalls.every((r) => r.method === 'GET' && r.auth === 'Bearer sk_test_x')).toBe(true);
-    expect(new URL(paystackCalls[0].url).searchParams.get('status')).toBe('success');
+    // refunded payments are "reversed" on Paystack and must be read as well
+    expect(paystackCalls.slice(0, 2).map((r) => new URL(r.url).searchParams.get('status'))).toEqual(['success', 'reversed']);
   });
 
   it('differences: notifies admins and emails the alert inbox', async () => {
     const { service, notify, requests } = setup({
       env: { TELEMETRY_ALERT_EMAIL: 'ops@example.com', EMAIL_FROM: 'Trako <no-reply@trako.com.ng>', RESEND_API_KEY: 're_x' },
-      paystack: (url) => ({ body: { status: true, data: url.pathname === '/transaction' ? [tx({ amount: 400000 })] : [], meta: { pageCount: 1 } } }),
+      paystack: (url) => ({ body: { status: true, data: url.pathname === '/transaction' && url.searchParams.get('status') === 'success' ? [tx({ amount: 400000 })] : [], meta: { pageCount: 1 } } }),
     });
 
     const run = await service.run({ trigger: 'schedule', ...window });

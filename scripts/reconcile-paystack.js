@@ -82,7 +82,11 @@ async function main() {
   const mode = secretKey.startsWith('sk_live_') ? 'live' : secretKey.startsWith('sk_test_') ? 'test' : 'unknown';
   const window = { from: from.toISOString(), to: to.toISOString() };
 
-  const transactions = await listAll(secretKey, '/transaction', { status: 'success', ...window });
+  // Refunded payments leave the "success" list (Paystack marks them "reversed"), so read both.
+  const transactions = [
+    ...(await listAll(secretKey, '/transaction', { status: 'success', ...window })),
+    ...(await listAll(secretKey, '/transaction', { status: 'reversed', ...window })),
+  ];
   const refunds = await listAll(secretKey, '/refund', window);
 
   const prisma = new PrismaClient();

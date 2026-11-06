@@ -128,11 +128,13 @@ export class PaymentReconciliationService {
 
   private async compare(base: Omit<ReconciliationRun, 'mode' | 'status' | 'message' | 'truncated' | 'problems' | 'notes' | 'noteCounts' | 'totals' | 'counts'>, secretKey: string, mode: 'test' | 'live', from: Date, to: Date): Promise<ReconciliationRun> {
     const window = { from: from.toISOString(), to: to.toISOString() };
+    // Refunded payments leave the "success" list (Paystack marks them "reversed"), so read both.
     const txList = await this.listAll<PaystackTransaction>(secretKey, '/transaction', { status: 'success', ...window });
+    const reversedList = await this.listAll<PaystackTransaction>(secretKey, '/transaction', { status: 'reversed', ...window });
     const refundList = await this.listAll<PaystackRefund>(secretKey, '/refund', window);
-    const transactions = txList.rows;
+    const transactions = [...txList.rows, ...reversedList.rows];
     const refunds = refundList.rows;
-    let truncated = txList.truncated || refundList.truncated;
+    let truncated = txList.truncated || reversedList.truncated || refundList.truncated;
 
     const shipmentIds = [...new Set(transactions.map((tx) => parsePaystackMetadata(tx.metadata).shipmentId).filter((id): id is string => typeof id === 'string'))];
     const ledger = await this.loadLedger(from, to, shipmentIds);
