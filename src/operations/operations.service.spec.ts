@@ -510,6 +510,21 @@ describe('OperationsService.financeSummary', () => {
     expect(result.driverSettlementLiabilityKobo).toBe(0);
   });
 
+  it("reports Trako's commission earned on released trips and still held in escrow", async () => {
+    const service = build(
+      { collected: 1_075_000, held: 0, disputed: 0, released: 1_075_000, refunded: 0, commissionHeld: 22_500 },
+      { paid: 0, approved: 0, pending: 0, rejected: 0 },
+      { fundedShipments: 0, openDisputes: 0, pendingPayouts: 0 },
+      { driverEntitlement: 1_000_000, ownerEntitlement: 0, commissionEarned: 75_000 },
+    );
+
+    const result = await service.financeSummary(admin);
+
+    expect(result.commission).toEqual({ earnedKobo: 75_000, heldKobo: 22_500 });
+    // Drivers are owed the carrier amount only, not Trako's commission.
+    expect(result.driverSettlementLiabilityKobo).toBe(1_000_000);
+  });
+
   it('reports driver and truck-owner settlement liabilities separately', async () => {
     const service = build(
       { collected: 1_000_000, held: 0, disputed: 0, released: 1_000_000, refunded: 0 },

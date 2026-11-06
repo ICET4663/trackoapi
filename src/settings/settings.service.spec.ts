@@ -161,6 +161,7 @@ describe('SettingsService.requestDriverWithdrawal never validates against the fa
     payoutCreate = jest.fn().mockResolvedValue({ id: 'payout-1', status: 'PENDING' });
     const prisma = {
       $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       payout: { findMany: payoutFindMany, create: payoutCreate },
       auditLog: { create: jest.fn().mockResolvedValue(undefined) },
     } as unknown as PrismaService;
@@ -210,6 +211,7 @@ describe('SettingsService driver and truck-owner settlement split', () => {
     });
     const prisma = {
       $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       platformSetting: { findUnique: jest.fn().mockResolvedValue({ key: 'driverOwnerSharePercent', value: share }) },
       payout: { findMany: jest.fn().mockResolvedValue([]) },
     } as unknown as PrismaService;
@@ -243,8 +245,36 @@ describe('SettingsService driver and truck-owner settlement split', () => {
 
     expect(result).toMatchObject({ beneficiary: 'DRIVER', sharePercent: 65 });
     const releasedSql = queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0];
-    expect(releasedSql).toContain('else e."amount" end');
+    expect(releasedSql).toContain('else (e."amount" - coalesce(e."platformFeeKobo", 0)) end');
     expect(releasedSql).toContain('v."ownerId" <> da."driverId"');
+  });
+
+  // Trako's commission stays with Trako: drivers and owners share only the carrier amount.
+  it('splits only the carrier amount, after Trako\'s commission, for drivers and owners', async () => {
+    const owner = buildSettlementService();
+    await owner.service.ownerEarnings('owner-1', { strict: true });
+    const ownerSql = String(owner.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(ownerSql).toContain('round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100)');
+    expect(ownerSql).not.toMatch(/round\(e\."amount"/);
+
+    const driver = buildSettlementService();
+    await driver.service.driverEarnings('driver-1', { strict: true });
+    const driverSql = String(driver.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(driverSql).toContain('round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $2::numeric / 100)');
+  });
+
+  // A hired driver gets the pay recorded at booking; the truck owner, who fuels the truck,
+  // gets the rest. Escrows without recorded pay keep the percentage split.
+  it('pays a hired driver the recorded driver pay and the truck owner the rest', async () => {
+    const owner = buildSettlementService();
+    await owner.service.ownerEarnings('owner-1', { strict: true });
+    const ownerSql = String(owner.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(ownerSql).toContain('when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo"');
+
+    const driver = buildSettlementService();
+    await driver.service.driverEarnings('driver-1', { strict: true });
+    const driverSql = String(driver.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(driverSql).toContain('then (coalesce(e."driverPayKobo", round(');
   });
 });
 
@@ -395,13 +425,32 @@ describe('SettingsService platform settings are actually persisted', () => {
   });
 
   it('persists a valid pricing adjustment', async () => {
-    const result = await service.updatePlatformSetting('pricingFuelSurchargePercent', '12.5', 'admin-1');
+    const result = await service.updatePlatformSetting('pricingDieselPriceNgn', '1750', 'admin-1');
 
     expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { key: 'pricingFuelSurchargePercent' },
-      update: { value: '12.5', updatedById: 'admin-1' },
+      where: { key: 'pricingDieselPriceNgn' },
+      update: { value: '1750', updatedById: 'admin-1' },
     }));
-    expect(result).toMatchObject({ key: 'pricingFuelSurchargePercent', value: '12.5' });
+    expect(result).toMatchObject({ key: 'pricingDieselPriceNgn', value: '1750' });
+  });
+
+  it('lists the fuel prices and commission with the defaults new quotes really use', async () => {
+    const settings = await service.platformSettings();
+    const value = (key: string) => settings.find((entry) => entry.key === key)?.value;
+
+    expect(value('pricingPetrolPriceNgn')).toBe('1355');
+    expect(value('pricingDieselPriceNgn')).toBe('1800');
+    expect(value('fee')).toBe('10');
+    expect(value('pricingDriverTripAllowanceNgn')).toBe('15000');
+    expect(value('pricingDriverPayPerKmNgn')).toBe('100');
+    expect(value('pricingFlatbedBaseFareNgn')).toBe('50000');
+    // Settings the formula no longer reads are not offered to admins.
+    expect(settings.some((entry) => ['pricingServiceFeePercent', 'pricingFuelSurchargePercent', 'pricingFlatbedPerKmRateNgn'].includes(entry.key))).toBe(false);
+  });
+
+  it('refuses a commission above 30%', async () => {
+    await expect(service.updatePlatformSetting('fee', '45', 'admin-1')).rejects.toThrow('must not exceed 30');
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('throws a real error instead of a fake success when the write fails', async () => {

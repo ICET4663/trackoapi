@@ -8,6 +8,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { NOTIFICATION_TEMPLATES } from '../notifications/notification-templates';
 import { PrismaService } from '../prisma/prisma.service';
 import { ensurePaymentModeColumns, paystackMode } from '../integrations/paystack-mode';
+import { ensurePlatformFeeColumn } from '../integrations/platform-commission';
+import { PRICING_SETTING_DEFAULTS, PRICING_SETTING_DEFINITIONS } from '../integrations/pricing-settings';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
 type PreferenceKey =
@@ -1219,12 +1221,13 @@ export class SettingsService {
 
   private async settlementEarnings(userId: string, beneficiary: SettlementBeneficiary, options: { strict?: boolean } = {}) {
     try {
+      await ensurePlatformFeeColumn(this.prisma);
       const driverSharePercent = await this.driverSettlementSharePercent();
       const amountExpression = beneficiary === 'DRIVER'
         ? `case when v."ownerId" is not null and v."ownerId" <> da."driverId"
-             then round(e."amount"::numeric * $2::numeric / 100)::int
-             else e."amount" end`
-        : `round(e."amount"::numeric * (100 - $2::numeric) / 100)::int`;
+             then (coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $2::numeric / 100)))::int
+             else (e."amount" - coalesce(e."platformFeeKobo", 0)) end`
+        : `((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))::int`;
       const beneficiaryFilter = beneficiary === 'DRIVER'
         ? `da."driverId" = $1`
         : `v."ownerId" = $1 and v."ownerId" <> da."driverId"`;
@@ -1387,6 +1390,7 @@ export class SettingsService {
   }
 
   async ownerSettlementReceipt(ownerId: string, shipmentId: string) {
+    await ensurePlatformFeeColumn(this.prisma);
     const driverSharePercent = await this.driverSettlementSharePercent();
     const rows = await this.prisma.$queryRawUnsafe<Array<{
       shipmentId: string; reference: string; pickupLabel: string; destinationLabel: string;
@@ -1395,12 +1399,12 @@ export class SettingsService {
       ownerAmount: number; driverAmount: number;
     }>>(
       `select s."id" as "shipmentId", s."reference", s."pickupLabel", s."destinationLabel",
-              s."cargoDescription", e."amount", e."currency", e."status"::text as "status",
+              s."cargoDescription", (e."amount" - coalesce(e."platformFeeKobo", 0)) as "amount", e."currency", e."status"::text as "status",
               e."updatedAt" as "releasedAt", v."plateNumber", v."type" as "vehicleType",
               coalesce(dp."fullName", du."email") as "driverName",
               coalesce(op."fullName", ou."email") as "ownerName",
-              round(e."amount"::numeric * (100 - $3::numeric) / 100)::int as "ownerAmount",
-              round(e."amount"::numeric * $3::numeric / 100)::int as "driverAmount"
+              ((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $3::numeric) / 100) end))::int as "ownerAmount",
+              (coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $3::numeric / 100)))::int as "driverAmount"
        from "DriverAssignment" da
        join "Shipment" s on s."id" = da."shipmentId"
        join "Escrow" e on e."shipmentId" = s."id"
@@ -2124,6 +2128,7 @@ export class SettingsService {
 
   async ownerVehicleIncome(ownerId: string) {
     await this.ensureVehicleExpenseLedger();
+    await ensurePlatformFeeColumn(this.prisma);
     const driverSharePercent = await this.driverSettlementSharePercent();
     const rows = await this.prisma.$queryRawUnsafe<Array<{
       vehicleId: string; plateNumber: string; type: string; releasedIncome: bigint | number;
@@ -2131,11 +2136,11 @@ export class SettingsService {
       nextServiceDate: Date | null;
     }>>(
       `select v."id" as "vehicleId", v."plateNumber", v."type",
-         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+         coalesce((select sum((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))
            from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
            where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
              and da."driverId" <> v."ownerId" and e."status" = 'RELEASED'::"EscrowStatus"), 0) as "releasedIncome",
-         coalesce((select sum(round(e."amount"::numeric * (100 - $2::numeric) / 100))
+         coalesce((select sum((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))
            from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
            where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
              and da."driverId" <> v."ownerId" and e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "pendingIncome",
@@ -2192,6 +2197,7 @@ export class SettingsService {
   async ownerFleetAnalytics(ownerId: string, month?: string) {
     await this.ensureVehicleExpenseLedger();
     const period = this.ownerReportingPeriod(month);
+    await ensurePlatformFeeColumn(this.prisma);
     const driverSharePercent = await this.driverSettlementSharePercent();
     const rows = await this.prisma.$queryRawUnsafe<Array<{
       vehicleId: string; plateNumber: string; type: string; isActive: boolean;
@@ -2202,7 +2208,7 @@ export class SettingsService {
       `select v."id" as "vehicleId", v."plateNumber", v."type", v."isActive",
          coalesce(sum(case when e."status" = 'RELEASED'::"EscrowStatus"
            and e."updatedAt" >= $3 and e."updatedAt" < $4 and da."driverId" <> v."ownerId"
-           then round(e."amount"::numeric * (100 - $2::numeric) / 100) else 0 end), 0) as "releasedIncome",
+           then (case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end) else 0 end), 0) as "releasedIncome",
          coalesce((select sum(x."amountKobo") from "VehicleExpense" x
            where x."vehicleId" = v."id" and x."serviceDate" >= $3 and x."serviceDate" < $4), 0) as "expenses",
          count(distinct case when s."status" = 'COMPLETED'::"ShipmentStatus"
@@ -2640,28 +2646,8 @@ export class SettingsService {
     max?: number;
     multiline?: boolean;
   }[] = [
-    { key: 'fee', title: 'Platform fee', description: 'Default platform commission applied to new shipments.', label: 'Fee (%)', defaultValue: '7.5', helper: 'Applies to newly created shipments only; shipments already in progress keep their original rate.', type: 'number' },
-    { key: 'pricingServiceFeePercent', title: 'Quote service fee', description: 'Service and escrow fee included in new customer quotes.', label: 'Service fee (%)', defaultValue: '3.5', helper: 'Allowed range: 0-20%. Existing shipment quotes remain unchanged.', type: 'number', min: 0, max: 20 },
-    { key: 'pricingFuelSurchargePercent', title: 'Fuel surcharge', description: 'Fuel adjustment applied to the distance-based line-haul charge.', label: 'Fuel surcharge (%)', defaultValue: '0', helper: 'Allowed range: 0-50%. Set to 0 when no surcharge is required.', type: 'number', min: 0, max: 50 },
-    { key: 'pricingTollAllowanceNgn', title: 'Toll allowance', description: 'Flat toll and route allowance included in every new quote.', label: 'Allowance (NGN)', defaultValue: '0', helper: 'Allowed range: NGN 0-500,000 per shipment.', type: 'number', min: 0, max: 500000 },
-    { key: 'pricingDemandSurgePercent', title: 'Demand adjustment', description: 'Temporary network demand adjustment applied to new quotes.', label: 'Demand adjustment (%)', defaultValue: '0', helper: 'Allowed range: 0-50%. Keep at 0 during normal demand.', type: 'number', min: 0, max: 50 },
-    { key: 'pricingQuoteValidityMinutes', title: 'Quote validity', description: 'How long a customer quote remains valid before it must be recalculated.', label: 'Validity (minutes)', defaultValue: '30', helper: 'Allowed range: 5-240 minutes.', type: 'number', min: 5, max: 240 },
-    { key: 'driverOfferValidityMinutes', title: 'Driver offer validity', description: 'How long a driver has to accept or decline a shipment offer.', label: 'Validity (minutes)', defaultValue: '15', helper: 'Allowed range: 5-120 minutes. Expired offers return to dispatch for reassignment.', type: 'number', min: 5, max: 120 },
-    { key: 'pricingFlatbedBaseFareNgn', title: 'Flatbed base fare', description: 'Starting charge for a flatbed shipment.', label: 'Base fare (NGN)', defaultValue: '55000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingFlatbedPerKmRateNgn', title: 'Flatbed kilometre rate', description: 'Distance rate for flatbed shipments.', label: 'Rate per km (NGN)', defaultValue: '720', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
-    { key: 'pricingFlatbedMinimumFareNgn', title: 'Flatbed minimum fare', description: 'Lowest permitted quote for a flatbed shipment.', label: 'Minimum fare (NGN)', defaultValue: '95000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingBoxBaseFareNgn', title: 'Box truck base fare', description: 'Starting charge for a box truck shipment.', label: 'Base fare (NGN)', defaultValue: '50000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingBoxPerKmRateNgn', title: 'Box truck kilometre rate', description: 'Distance rate for box truck shipments.', label: 'Rate per km (NGN)', defaultValue: '680', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
-    { key: 'pricingBoxMinimumFareNgn', title: 'Box truck minimum fare', description: 'Lowest permitted quote for a box truck shipment.', label: 'Minimum fare (NGN)', defaultValue: '90000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingTipperBaseFareNgn', title: 'Tipper base fare', description: 'Starting charge for a tipper shipment.', label: 'Base fare (NGN)', defaultValue: '60000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingTipperPerKmRateNgn', title: 'Tipper kilometre rate', description: 'Distance rate for tipper shipments.', label: 'Rate per km (NGN)', defaultValue: '760', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
-    { key: 'pricingTipperMinimumFareNgn', title: 'Tipper minimum fare', description: 'Lowest permitted quote for a tipper shipment.', label: 'Minimum fare (NGN)', defaultValue: '100000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingTankerBaseFareNgn', title: 'Tanker base fare', description: 'Starting charge for a tanker shipment.', label: 'Base fare (NGN)', defaultValue: '70000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingTankerPerKmRateNgn', title: 'Tanker kilometre rate', description: 'Distance rate for tanker shipments.', label: 'Rate per km (NGN)', defaultValue: '820', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
-    { key: 'pricingTankerMinimumFareNgn', title: 'Tanker minimum fare', description: 'Lowest permitted quote for a tanker shipment.', label: 'Minimum fare (NGN)', defaultValue: '115000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingStandardBaseFareNgn', title: 'Standard truck base fare', description: 'Starting charge for a standard truck shipment.', label: 'Base fare (NGN)', defaultValue: '50000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
-    { key: 'pricingStandardPerKmRateNgn', title: 'Standard truck kilometre rate', description: 'Distance rate for standard truck shipments.', label: 'Rate per km (NGN)', defaultValue: '700', helper: 'Allowed range: NGN 100-10,000 per km.', type: 'number', min: 100, max: 10000 },
-    { key: 'pricingStandardMinimumFareNgn', title: 'Standard truck minimum fare', description: 'Lowest permitted quote for a standard truck shipment.', label: 'Minimum fare (NGN)', defaultValue: '90000', helper: 'Allowed range: NGN 0-2,000,000.', type: 'number', min: 0, max: 2000000 },
+    // Pricing entries come from the quote formula's own defaults (pricing-settings.ts).
+    ...PRICING_SETTING_DEFINITIONS.map((definition) => ({ ...definition, defaultValue: String(PRICING_SETTING_DEFAULTS[definition.key]), type: 'number' as const })),
     { key: 'payout', title: 'Payout schedule', description: 'How often driver payout requests are reviewed for release.', label: 'Schedule', defaultValue: 'weekly', helper: 'Accepted values: daily, weekly, biweekly, monthly.', type: 'text' },
     { key: 'driverOwnerSharePercent', title: 'Driver settlement share', description: 'Percentage of released transport income paid to the driver when a separate truck owner supplies the vehicle.', label: 'Driver share (%)', defaultValue: '70', helper: 'Allowed range: 0-100%. The truck owner receives the remainder. Drivers using their own truck receive 100%.', type: 'number', min: 0, max: 100 },
     { key: 'trackingRetentionDays', title: 'Location history retention', description: 'How long the GPS trail of a completed or cancelled shipment is kept before it is deleted automatically.', label: 'Days', defaultValue: '30', helper: 'Allowed range: 7-365 days. Trails of shipments with an open or in-review dispute are kept until it is resolved. Runs with the daily scheduled job.', type: 'number', min: 7, max: 365 },

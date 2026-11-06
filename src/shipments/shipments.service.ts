@@ -5,6 +5,7 @@ import { MapsProviderService } from '../integrations/maps-provider.service';
 import { PaymentProviderService } from '../integrations/payment-provider.service';
 import { isStoreReviewerAccount } from '../common/store-reviewer';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ensurePlatformFeeColumn, splitCarrierAmount } from '../integrations/platform-commission';
 import { PrismaService } from '../prisma/prisma.service';
 import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
@@ -210,6 +211,7 @@ export class ShipmentsService {
         shipment.id,
         quote.quotedPriceKobo,
       );
+      await this.recordPlatformCommission(shipment.id, quote);
       const media = dto.cargoPhotoUri
         ? await this.createMediaRecord(customerId, shipment.id, dto.cargoPhotoUri)
         : undefined;
@@ -2183,10 +2185,12 @@ export class ShipmentsService {
   // driver's notice used to quote the whole payment, and the owner was never told.
   private async notifySettlementOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {
     try {
-      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null; ownerId: string | null }>>(
-        `select da."driverId", s."reference", v."ownerId"
+      await ensurePlatformFeeColumn(this.prisma);
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null; ownerId: string | null; platformFeeKobo: number | null; driverPayKobo: number | null }>>(
+        `select da."driverId", s."reference", v."ownerId", e."platformFeeKobo", e."driverPayKobo"
          from "DriverAssignment" da
          join "Shipment" s on s."id" = da."shipmentId"
+         left join "Escrow" e on e."shipmentId" = s."id"
          left join "Vehicle" v on v."id" = da."vehicleId"
          where da."shipmentId" = $1 and da."status" = 'ACCEPTED'
          order by da."acceptedAt" desc nulls last, da."offeredAt" desc
@@ -2197,12 +2201,11 @@ export class ShipmentsService {
       if (!assignment?.driverId) return;
 
       const reference = assignment.reference ?? shipmentId;
-      const total = Number(amount ?? 0);
+      // The carrier amount is the payment minus Trako's commission, as in the earnings ledger.
+      const total = Math.max(0, Number(amount ?? 0) - Number(assignment.platformFeeKobo ?? 0));
       const separateOwner = Boolean(assignment.ownerId) && assignment.ownerId !== assignment.driverId;
       const driverSharePercent = separateOwner ? await this.driverSettlementSharePercent() : 100;
-      // Same rounding as the ledger's SQL round() on a positive amount.
-      const driverAmount = separateOwner ? Math.round((total * driverSharePercent) / 100) : total;
-      const ownerAmount = Math.round((total * (100 - driverSharePercent)) / 100);
+      const { driverKobo: driverAmount, ownerKobo: ownerAmount } = splitCarrierAmount(total, separateOwner, driverSharePercent, assignment.driverPayKobo);
 
       const sends: Promise<unknown>[] = [
         this.notifications.create({
@@ -2237,6 +2240,24 @@ export class ShipmentsService {
     } catch {
       // Escrow release should not fail because notification delivery failed.
     }
+  }
+
+  // Trako's commission and the hired-driver pay from the signed quote, fixed on the escrow at
+  // booking so later setting changes never alter a booked job. Quotes signed before these
+  // existed carry neither, and those shipments settle the way they always did.
+  private async recordPlatformCommission(shipmentId: string, quote: { quotedPriceKobo: number; pricingBreakdown?: Record<string, string | number> }) {
+    const commissionKobo = Number(quote.pricingBreakdown?.commissionKobo);
+    if (!Number.isFinite(commissionKobo) || commissionKobo <= 0 || commissionKobo >= quote.quotedPriceKobo) return;
+    const carrierKobo = quote.quotedPriceKobo - Math.round(commissionKobo);
+    const driverPayKobo = Number(quote.pricingBreakdown?.hiredDriverPayKobo);
+    const validDriverPay = Number.isFinite(driverPayKobo) && driverPayKobo > 0 && driverPayKobo <= carrierKobo ? Math.round(driverPayKobo) : null;
+    await ensurePlatformFeeColumn(this.prisma);
+    await this.prisma.$executeRawUnsafe(
+      'update "Escrow" set "platformFeeKobo" = $2, "driverPayKobo" = $3 where "shipmentId" = $1',
+      shipmentId,
+      Math.round(commissionKobo),
+      validDriverPay,
+    );
   }
 
   // Mirrors SettingsService.driverSettlementSharePercent so notices quote ledger amounts.

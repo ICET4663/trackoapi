@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { PRICING_SETTING_DEFAULTS, PRICING_VERSION } from './pricing-settings';
 import { RateLimitService } from '../auth/rate-limit.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -80,39 +81,19 @@ const PREVIEW_PLACES: PlaceSuggestion[] = [
 
 const ROAD_FACTOR = 1.29;
 const AVERAGE_SPEED_KMH = 58;
-const PRICING_VERSION = '2026-09-vehicle-catalogue-1';
-
-// Admin-overridable defaults for the five rate-carded vehicle classes. The wider
-// catalogue below carries its own fixed rates (not admin-tuned yet).
-const PRICING_SETTING_DEFAULTS = {
-  pricingServiceFeePercent: 3.5,
-  pricingFuelSurchargePercent: 0,
-  pricingTollAllowanceNgn: 0,
-  pricingDemandSurgePercent: 0,
-  pricingQuoteValidityMinutes: 30,
-  pricingFlatbedBaseFareNgn: 60_000,
-  pricingFlatbedPerKmRateNgn: 780,
-  pricingFlatbedMinimumFareNgn: 115_000,
-  pricingBoxBaseFareNgn: 45_000,
-  pricingBoxPerKmRateNgn: 620,
-  pricingBoxMinimumFareNgn: 85_000,
-  pricingTipperBaseFareNgn: 65_000,
-  pricingTipperPerKmRateNgn: 800,
-  pricingTipperMinimumFareNgn: 120_000,
-  pricingTankerBaseFareNgn: 75_000,
-  pricingTankerPerKmRateNgn: 860,
-  pricingTankerMinimumFareNgn: 135_000,
-  pricingStandardBaseFareNgn: 45_000,
-  pricingStandardPerKmRateNgn: 620,
-  pricingStandardMinimumFareNgn: 85_000,
-} as const;
-
 type TruckPricingProfile = {
   label: string;
   capacityTons: number;
   capacityM3: number;
+  fuel: 'PETROL' | 'DIESEL';
+  // Hired-driver pay relative to a heavy truck's (trip allowance and per-km settings).
+  driverPayScale: number;
+  // Litres per 100 km: empty, and with the truck fully loaded.
+  litresPer100KmEmpty: number;
+  litresPer100KmLoaded: number;
   baseFareNgn: number;
-  perKmRateNgn: number;
+  // Cost per km apart from fuel: driver pay, tyres, maintenance, insurance.
+  operatingPerKmNgn: number;
   minimumFareNgn: number;
 };
 
@@ -163,23 +144,24 @@ type SignedQuotePayload = {
 // order (see truckProfile), so the specific keys come before the generic ones
 // ("light"/"refrigerat" before "truck"; "container"/"lowbed"/"articulated" before
 // "trailer"). Capacities MUST match the frontend src/constants/truck-catalog.ts,
-// or a truck that passes the client capacity check gets rejected here. Per-km
-// rates scale with vehicle size plus a fixed dispatch base fare - typical
-// Nigerian road-freight economics.
+// or a truck that passes the client capacity check gets rejected here.
+// Fuel use and running costs are planning estimates for Nigerian roads (Nov 2026); check
+// them with real drivers. The five admin-tuned classes take base fare, running cost and
+// minimum fare from PRICING_SETTING_DEFAULTS / admin settings instead of this table.
 const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
-  pickup: { label: 'Pickup', capacityTons: 1, capacityM3: 4, baseFareNgn: 12_000, perKmRateNgn: 180, minimumFareNgn: 20_000 },
-  van: { label: 'Cargo van', capacityTons: 2, capacityM3: 9, baseFareNgn: 16_000, perKmRateNgn: 240, minimumFareNgn: 28_000 },
-  light: { label: 'Light truck', capacityTons: 6, capacityM3: 20, baseFareNgn: 26_000, perKmRateNgn: 400, minimumFareNgn: 48_000 },
-  refrigerat: { label: 'Refrigerated truck', capacityTons: 12, capacityM3: 38, baseFareNgn: 60_000, perKmRateNgn: 780, minimumFareNgn: 115_000 },
-  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, baseFareNgn: 45_000, perKmRateNgn: 620, minimumFareNgn: 85_000 },
-  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, baseFareNgn: 60_000, perKmRateNgn: 780, minimumFareNgn: 115_000 },
-  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, baseFareNgn: 65_000, perKmRateNgn: 800, minimumFareNgn: 120_000 },
-  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, baseFareNgn: 75_000, perKmRateNgn: 860, minimumFareNgn: 135_000 },
-  container: { label: 'Container trailer', capacityTons: 30, capacityM3: 67, baseFareNgn: 80_000, perKmRateNgn: 900, minimumFareNgn: 150_000 },
-  lowbed: { label: 'Lowbed trailer', capacityTons: 45, capacityM3: 30, baseFareNgn: 120_000, perKmRateNgn: 1_150, minimumFareNgn: 250_000 },
-  articulated: { label: 'Articulated trailer', capacityTons: 40, capacityM3: 90, baseFareNgn: 90_000, perKmRateNgn: 950, minimumFareNgn: 175_000 },
-  trailer: { label: 'Trailer', capacityTons: 35, capacityM3: 70, baseFareNgn: 80_000, perKmRateNgn: 900, minimumFareNgn: 150_000 },
-  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, baseFareNgn: 45_000, perKmRateNgn: 620, minimumFareNgn: 85_000 },
+  pickup: { label: 'Pickup', capacityTons: 1, capacityM3: 4, fuel: 'PETROL', driverPayScale: 0.4, litresPer100KmEmpty: 11, litresPer100KmLoaded: 14, baseFareNgn: 10_000, operatingPerKmNgn: 120, minimumFareNgn: 18_000 },
+  van: { label: 'Cargo van', capacityTons: 2, capacityM3: 9, fuel: 'PETROL', driverPayScale: 0.4, litresPer100KmEmpty: 12, litresPer100KmLoaded: 16, baseFareNgn: 12_000, operatingPerKmNgn: 150, minimumFareNgn: 22_000 },
+  light: { label: 'Light truck', capacityTons: 6, capacityM3: 20, fuel: 'DIESEL', driverPayScale: 0.6, litresPer100KmEmpty: 16, litresPer100KmLoaded: 20, baseFareNgn: 20_000, operatingPerKmNgn: 220, minimumFareNgn: 40_000 },
+  refrigerat: { label: 'Refrigerated truck', capacityTons: 12, capacityM3: 38, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 26, litresPer100KmLoaded: 34, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
+  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 22, litresPer100KmLoaded: 28, baseFareNgn: 35_000, operatingPerKmNgn: 300, minimumFareNgn: 70_000 },
+  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 38, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
+  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 50_000, operatingPerKmNgn: 400, minimumFareNgn: 100_000 },
+  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  container: { label: 'Container trailer', capacityTons: 30, capacityM3: 67, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  lowbed: { label: 'Lowbed trailer', capacityTons: 45, capacityM3: 30, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 35, litresPer100KmLoaded: 45, baseFareNgn: 90_000, operatingPerKmNgn: 500, minimumFareNgn: 180_000 },
+  articulated: { label: 'Articulated trailer', capacityTons: 40, capacityM3: 90, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 32, litresPer100KmLoaded: 42, baseFareNgn: 70_000, operatingPerKmNgn: 450, minimumFareNgn: 140_000 },
+  trailer: { label: 'Trailer', capacityTons: 35, capacityM3: 70, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 24, litresPer100KmLoaded: 30, baseFareNgn: 35_000, operatingPerKmNgn: 320, minimumFareNgn: 70_000 },
 };
 
 const ADMIN_TUNED_KEYS = new Set(['flatbed', 'box', 'tipper', 'tanker', 'truck']);
@@ -300,20 +282,33 @@ export class MapsProviderService {
     const weightUtilization = safeWeight / profile.capacityTons;
     const volumeUtilization = safeVolume > 0 ? safeVolume / profile.capacityM3 : 0;
     const loadUtilization = Math.max(weightUtilization, volumeUtilization);
-    // A customer reserves the whole truck, so a light load cannot be priced as if only
-    // the cargo moved itself. The route component starts at 65% and rises linearly to
-    // 100% at full capacity; the fixed base/minimum fare still covers dispatch costs.
-    const loadMultiplier = 0.65 + 0.35 * Math.min(loadUtilization, 1);
+    // What the trip costs the carrier: base fare (getting to the pickup, loading, waiting)
+    // + fuel at today's pump price + running costs per km. Fuel use rises with the load,
+    // and the empty share of the drive back is paid too. The minimum fare is the least a
+    // carrier receives. Trako's commission is added on top; the customer sees one total.
     const distancePricing = this.distancePricing(distanceKm);
-    const linehaulNgn = distanceKm * profile.perKmRateNgn * distancePricing.multiplier * loadMultiplier;
-    const fuelSurchargeNgn = Math.round(linehaulNgn * (adjustments.pricingFuelSurchargePercent / 100));
+    const fuelPriceNgn = profile.fuel === 'PETROL' ? adjustments.pricingPetrolPriceNgn : adjustments.pricingDieselPriceNgn;
+    const litresPer100Km = profile.litresPer100KmEmpty + (profile.litresPer100KmLoaded - profile.litresPer100KmEmpty) * Math.min(loadUtilization, 1);
+    const emptyReturnShare = Math.min(100, Math.max(0, adjustments.pricingEmptyReturnPercent)) / 100;
+    const fuelLitres = (distanceKm * litresPer100Km) / 100 + (distanceKm * emptyReturnShare * profile.litresPer100KmEmpty) / 100;
+    const fuelCostNgn = Math.round(fuelLitres * fuelPriceNgn);
+    const operatingNgn = Math.round(distanceKm * profile.operatingPerKmNgn * distancePricing.multiplier);
     const tollAllowanceNgn = adjustments.pricingTollAllowanceNgn;
-    const preSurgeSubtotalNgn = profile.baseFareNgn + linehaulNgn + fuelSurchargeNgn + tollAllowanceNgn;
+    const preSurgeSubtotalNgn = profile.baseFareNgn + fuelCostNgn + operatingNgn + tollAllowanceNgn;
     const demandSurgeNgn = Math.round(preSurgeSubtotalNgn * (adjustments.pricingDemandSurgePercent / 100));
-    const subtotalNgn = preSurgeSubtotalNgn + demandSurgeNgn;
-    const serviceFeeNgn = Math.round(subtotalNgn * (adjustments.pricingServiceFeePercent / 100));
-    const quotedPriceKobo = Math.max(profile.minimumFareNgn * 100, Math.round((subtotalNgn + serviceFeeNgn) * 100));
-    const minimumFareAdjustmentKobo = Math.max(0, quotedPriceKobo - (Math.round(linehaulNgn * 100) + Math.round((profile.baseFareNgn + fuelSurchargeNgn + tollAllowanceNgn + demandSurgeNgn + serviceFeeNgn) * 100)));
+    const tripCostNgn = preSurgeSubtotalNgn + demandSurgeNgn;
+    const carrierNgn = Math.max(profile.minimumFareNgn, tripCostNgn);
+    const minimumFareAdjustmentNgn = carrierNgn - tripCostNgn;
+    const commissionPercent = Math.min(30, Math.max(0, adjustments.fee));
+    const commissionNgn = Math.round(carrierNgn * (commissionPercent / 100));
+    const quotedPriceKobo = (carrierNgn + commissionNgn) * 100;
+    // A hired driver's pay when the truck belongs to someone else, who gets the rest of the
+    // carrier amount (fuel, truck costs). Never more than the carrier amount minus fuel, so the
+    // owner always gets the fuel money back. A driver on their own truck gets the whole amount.
+    const hiredDriverPayNgn = Math.max(0, Math.min(
+      Math.round((adjustments.pricingDriverTripAllowanceNgn + distanceKm * adjustments.pricingDriverPayPerKmNgn) * profile.driverPayScale),
+      carrierNgn - fuelCostNgn,
+    ));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     const quote: RouteQuoteCore = {
@@ -326,20 +321,28 @@ export class MapsProviderService {
       pricingVersion: PRICING_VERSION,
       quoteValidMinutes: adjustments.pricingQuoteValidityMinutes,
       pricingBreakdown: {
-        minimumFareAdjustmentKobo,
+        carrierCostKobo: carrierNgn * 100,
+        commissionKobo: commissionNgn * 100,
+        commissionRate: commissionPercent / 100,
+        hiredDriverPayKobo: hiredDriverPayNgn * 100,
+        fuelType: profile.fuel,
+        fuelLitres: Number(fuelLitres.toFixed(1)),
+        fuelPricePerLitreNgn: fuelPriceNgn,
+        fuelCostKobo: fuelCostNgn * 100,
+        operatingCostKobo: operatingNgn * 100,
+        emptyReturnRate: emptyReturnShare,
+        minimumFareAdjustmentKobo: minimumFareAdjustmentNgn * 100,
         baseFareKobo: profile.baseFareNgn * 100,
-        linehaulKobo: Math.round(linehaulNgn * 100),
-        escrowFeeKobo: serviceFeeNgn * 100,
-        fuelSurchargeKobo: fuelSurchargeNgn * 100,
+        linehaulKobo: (fuelCostNgn + operatingNgn) * 100,
+        escrowFeeKobo: commissionNgn * 100,
+        fuelSurchargeKobo: 0,
         tollAllowanceKobo: tollAllowanceNgn * 100,
         demandSurgeKobo: demandSurgeNgn * 100,
-        perKmRateKobo: profile.perKmRateNgn * 100,
+        operatingPerKmKobo: profile.operatingPerKmNgn * 100,
         roadFactor: liveRoute ? 1 : ROAD_FACTOR,
         routeSource: liveRoute ? 'google_routes' : 'coordinate_factor',
         averageSpeedKmh: AVERAGE_SPEED_KMH,
         weightTons: safeWeight,
-        weightMultiplier: Number(loadMultiplier.toFixed(2)),
-        loadMultiplier: Number(loadMultiplier.toFixed(2)),
         truckMultiplier: 1,
         truckType: profile.label,
         truckCapacityTons: profile.capacityTons,
@@ -351,8 +354,7 @@ export class MapsProviderService {
         loadUtilization: Number(loadUtilization.toFixed(3)),
         distanceBand: distancePricing.band,
         distanceMultiplier: distancePricing.multiplier,
-        serviceFeeRate: adjustments.pricingServiceFeePercent / 100,
-        fuelSurchargeRate: adjustments.pricingFuelSurchargePercent / 100,
+        serviceFeeRate: commissionPercent / 100,
         demandSurgeRate: adjustments.pricingDemandSurgePercent / 100,
       },
     };
@@ -504,7 +506,7 @@ export class MapsProviderService {
     return {
       ...defaults,
       baseFareNgn: adjustments[`pricing${prefix}BaseFareNgn`] ?? defaults.baseFareNgn,
-      perKmRateNgn: adjustments[`pricing${prefix}PerKmRateNgn`] ?? defaults.perKmRateNgn,
+      operatingPerKmNgn: adjustments[`pricing${prefix}OperatingPerKmNgn`] ?? defaults.operatingPerKmNgn,
       minimumFareNgn: adjustments[`pricing${prefix}MinimumFareNgn`] ?? defaults.minimumFareNgn,
     };
   }
