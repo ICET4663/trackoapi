@@ -29,6 +29,7 @@
     "smoke:workflow": "node scripts/smoke-workflow.js",
     "simulate:trip": "node scripts/simulate-trip.js",
     "check:journey": "node scripts/check-customer-journey.js",
+    "reconcile:paystack": "node scripts/reconcile-paystack.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run prisma:validate",
