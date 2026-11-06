@@ -129,8 +129,26 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
     detail,
   });
 
-  const successes = transactions.map(normalizeTransaction).filter((tx) => PAID_STATUSES.has(tx.status) && isTrakoEscrowPayment(tx));
   const countedRefunds = refunds.map(normalizeRefund).filter(refundCounts);
+  const refundsByTx = new Map<string, number>();
+  for (const refund of countedRefunds) {
+    for (const key of [refund.transactionId, refund.transactionReference]) {
+      if (!key) continue;
+      refundsByTx.set(key, (refundsByTx.get(key) ?? 0) + refund.amountKobo);
+    }
+  }
+  const refundedFor = (tx: NormalizedTransaction) => (tx.id ? refundsByTx.get(tx.id) : undefined) ?? refundsByTx.get(tx.reference) ?? 0;
+
+  // Paid: "success", "reversed" (refunded), or any status while a refund is on its way back
+  // (Paystack moves a payment out of "success" as soon as a refund starts).
+  const normalized = transactions.map(normalizeTransaction).filter(isTrakoEscrowPayment);
+  const seenRefs = new Set<string>();
+  const successes = normalized.filter((tx) => {
+    if (!(PAID_STATUSES.has(tx.status) || refundedFor(tx) > 0) || seenRefs.has(tx.reference)) return false;
+    seenRefs.add(tx.reference);
+    return true;
+  });
+  const statusByRef = new Map(normalized.map((tx) => [tx.reference, tx.status]));
 
   const ledgerById = new Map(ledger.map((row) => [row.shipmentId, row]));
   const ledgerByChargeRef = new Map<string, LedgerRow>();
@@ -149,15 +167,6 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
     list.push(tx);
     paymentsByShipment.set(row.shipmentId, list);
   }
-
-  const refundsByTx = new Map<string, number>();
-  for (const refund of countedRefunds) {
-    for (const key of [refund.transactionId, refund.transactionReference]) {
-      if (!key) continue;
-      refundsByTx.set(key, (refundsByTx.get(key) ?? 0) + refund.amountKobo);
-    }
-  }
-  const refundedFor = (tx: NormalizedTransaction) => (tx.id ? refundsByTx.get(tx.id) : undefined) ?? refundsByTx.get(tx.reference) ?? 0;
 
   const totals = { paystackCollectedKobo: 0, paystackRefundedKobo: 0, ledgerFundedKobo: 0, ledgerRefundedKobo: 0 };
 
@@ -198,7 +207,7 @@ export function reconcilePaystack(input: { transactions?: PaystackTransaction[];
     }
     if (!payment && funded) {
       if (paystackRefs.length) {
-        problems.push(item('paystack_payment_missing', row, `Escrow is ${row.escrowStatus} with charge ${paystackRefs[0]}, but Paystack shows no successful payment for it.`));
+        problems.push(item('paystack_payment_missing', row, `Escrow is ${row.escrowStatus} with charge ${paystackRefs[0]}, but Paystack ${statusByRef.has(paystackRefs[0]) ? `shows it as "${statusByRef.get(paystackRefs[0])}", not paid` : 'has no payment with that reference'}.`));
       } else {
         notes.push(item('funded_outside_paystack', row, `Escrow is ${row.escrowStatus} with no Paystack charge (demo, mock or manual funding).`));
       }

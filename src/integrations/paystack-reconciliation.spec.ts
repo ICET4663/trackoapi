@@ -176,3 +176,27 @@ test('failed or abandoned payments still do not count as paid', () => {
 test('referencesToVerify does not look up a payment already listed as reversed', () => {
   assert.deepEqual(referencesToVerify({ transactions: [tx({ status: 'reversed' })], ledger: [row({ escrowStatus: 'REFUNDED' })] }), []);
 });
+
+// While a refund is processing Paystack moves the payment out of "success" (live case, 6 Nov).
+test('a payment with a refund on its way counts as paid, whatever its status', () => {
+  const result = reconcile({
+    transactions: [tx({ status: 'processing' })],
+    refunds: [{ id: 8, transaction: 101, amount: 500000, status: 'pending' }],
+    ledger: [row({ escrowStatus: 'REFUNDED' })],
+  });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.counts.paystackPayments, 1);
+});
+
+test('a payment listed twice (listing and lookup) is counted once', () => {
+  const result = reconcile({ transactions: [tx(), tx()], ledger: [row()] });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.totals.paystackCollectedKobo, 500000);
+});
+
+test('the missing-payment message says what Paystack shows', () => {
+  const unpaid = reconcile({ transactions: [tx({ status: 'abandoned' })], ledger: [row()] });
+  assert.match(unpaid.problems[0].detail, /shows it as "abandoned", not paid/);
+  const unknown = reconcile({ transactions: [], ledger: [row()] });
+  assert.match(unknown.problems[0].detail, /has no payment with that reference/);
+});
