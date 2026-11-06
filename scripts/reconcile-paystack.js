@@ -3,14 +3,22 @@
 // verifies Paystack transactions and reads the database; it never charges, refunds or transfers.
 // Exits 1 when there is a problem for finance to resolve, so it can run on a schedule.
 //
+// The deployed API runs the same comparison every Monday and on demand from the admin Finance
+// screen (PaymentReconciliationService); this runner is for a local or custom window.
 // Usage (API repo, PAYSTACK_SECRET_KEY and DATABASE_URL in .env):
 //   node scripts/reconcile-paystack.js                      last 7 days
 //   node scripts/reconcile-paystack.js --from 2026-10-01 --to 2026-10-31
 //   node scripts/reconcile-paystack.js --json report.json   also write the full result
 require('dotenv').config();
+// The comparison itself is shared with the API (src/integrations/paystack-reconciliation.ts).
+require('ts-node').register({ transpileOnly: true, compilerOptions: { module: 'commonjs' } });
 const fs = require('node:fs');
 const { PrismaClient } = require('@prisma/client');
-const { reconcile, referencesToVerify, formatReport } = require('./lib/paystack-reconciliation');
+const {
+  reconcilePaystack: reconcile,
+  referencesToVerify,
+  formatReconciliationReport: formatReport,
+} = require('../src/integrations/paystack-reconciliation');
 
 const PAYSTACK = 'https://api.paystack.co';
 const DAY = 24 * 60 * 60 * 1000;

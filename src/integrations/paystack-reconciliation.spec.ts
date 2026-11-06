@@ -1,8 +1,12 @@
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const { reconcile, referencesToVerify, formatReport } = require('./paystack-reconciliation');
+import * as assert from 'node:assert/strict';
+import {
+  formatReconciliationReport as formatReport,
+  type LedgerRow,
+  reconcilePaystack as reconcile,
+  referencesToVerify,
+} from './paystack-reconciliation';
 
-const tx = (over = {}) => ({
+const tx = (over: Record<string, unknown> = {}) => ({
   id: 101,
   reference: 'tracko_escrow_1',
   status: 'success',
@@ -11,7 +15,7 @@ const tx = (over = {}) => ({
   metadata: { shipmentId: 'shp1', purpose: 'shipment_escrow' },
   ...over,
 });
-const row = (over = {}) => ({
+const row = (over: Partial<LedgerRow> = {}): LedgerRow => ({
   shipmentId: 'shp1',
   shipmentReference: 'TRK-1',
   escrowStatus: 'FUNDED',
@@ -19,7 +23,7 @@ const row = (over = {}) => ({
   chargeReferences: ['tracko_escrow_1'],
   ...over,
 });
-const types = (list) => list.map((item) => item.type);
+const types = (list: Array<{ type: string }>) => list.map((item) => item.type);
 
 test('a matching payment gives no problems and equal totals', () => {
   const result = reconcile({ transactions: [tx()], ledger: [row()] });
