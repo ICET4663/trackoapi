@@ -6,7 +6,7 @@ import type { MapsProviderService } from '../integrations/maps-provider.service'
 // Release notices must quote what the earnings ledger credits: with a separate truck owner
 // the driver gets `driverOwnerSharePercent` (default 70) and the owner the rest.
 describe('ShipmentsService escrow release notices', () => {
-  function build(assignment: { driverId: string; reference: string; ownerId: string | null; platformFeeKobo?: number | null } | null, sharePercent?: string) {
+  function build(assignment: { driverId: string; reference: string; ownerId: string | null; platformFeeKobo?: number | null; driverPayKobo?: number | null } | null, sharePercent?: string) {
     const create = jest.fn().mockResolvedValue({ id: 'n' });
     const prisma = {
       $queryRawUnsafe: jest.fn().mockResolvedValue(assignment ? [assignment] : []),
@@ -29,6 +29,26 @@ describe('ShipmentsService escrow release notices', () => {
     const [driver, owner] = create.mock.calls.map(([input]) => input);
     expect(driver.vars).toEqual({ amount: 'N70,000', reference: 'TRK-1' });
     expect(owner.vars).toEqual({ amount: 'N30,000', reference: 'TRK-1' });
+  });
+
+  it("pays a hired driver the pay recorded at booking and tells the owner the rest", async () => {
+    // N230,086 paid = N209,169 carrier + N20,917 commission; hired driver pay N27,040.
+    const { create, notify } = build({ driverId: 'drv-1', reference: 'TRK-1', ownerId: 'own-1', platformFeeKobo: 2_091_700, driverPayKobo: 2_704_000 });
+
+    await notify(23_008_600);
+
+    const [driver, owner] = create.mock.calls.map(([input]) => input);
+    expect(driver.vars).toEqual({ amount: 'N27,040', reference: 'TRK-1' });
+    expect(owner.vars).toEqual({ amount: 'N182,129', reference: 'TRK-1' });
+  });
+
+  it('ignores recorded hired-driver pay when the driver owns the truck', async () => {
+    const { create, notify } = build({ driverId: 'drv-1', reference: 'TRK-1', ownerId: 'drv-1', platformFeeKobo: 2_091_700, driverPayKobo: 2_704_000 });
+
+    await notify(23_008_600);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].vars).toEqual({ amount: 'N209,169', reference: 'TRK-1' });
   });
 
   it('gives a driver on their own truck the whole carrier amount, not the commission', async () => {

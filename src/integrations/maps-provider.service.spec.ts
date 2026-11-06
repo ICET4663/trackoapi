@@ -99,8 +99,9 @@ describe('MapsProviderService route pricing', () => {
   // The end-to-end trip of 6 Nov: Ikeja City Mall to Bodija Market, 120.4 km by Google,
   // 5 t on a flatbed, default settings. Worked by hand:
   //   litres: 120.4 x (30 + 8 x 5/30) / 100 + 120.4 x 0.7 x 30 / 100 = 63.009 L
-  //   fuel 63.009 x NGN 1,700 = 107,116; running 120.4 x 380 = 45,752; base 50,000
-  //   carrier 202,868; commission 7.5% = 15,215; customer pays 218,083
+  //   fuel 63.009 x NGN 1,800 = 113,417; running 120.4 x 380 = 45,752; base 50,000
+  //   carrier 209,169; commission 10% = 20,917; customer pays 230,086
+  //   hired driver on someone else's truck: 15,000 + 120.4 x 100 = 27,040; owner gets 182,129
   it('prices a trip from fuel at the pump price, running costs and base fare, plus commission', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -111,16 +112,35 @@ describe('MapsProviderService route pricing', () => {
     const b = quote.pricingBreakdown;
 
     expect(b.fuelType).toBe('DIESEL');
-    expect(b.fuelPricePerLitreNgn).toBe(1_700);
+    expect(b.fuelPricePerLitreNgn).toBe(1_800);
     expect(b.fuelLitres).toBe(63);
-    expect(b.fuelCostKobo).toBe(10_711_600);
+    expect(b.fuelCostKobo).toBe(11_341_700);
     expect(b.operatingCostKobo).toBe(4_575_200);
     expect(b.baseFareKobo).toBe(5_000_000);
-    expect(b.carrierCostKobo).toBe(20_286_800);
-    expect(b.commissionKobo).toBe(1_521_500);
-    expect(quote.quotedPriceKobo).toBe(21_808_300);
+    expect(b.carrierCostKobo).toBe(20_916_900);
+    expect(b.commissionRate).toBe(0.1);
+    expect(b.commissionKobo).toBe(2_091_700);
+    expect(b.hiredDriverPayKobo).toBe(2_704_000);
+    expect(quote.quotedPriceKobo).toBe(23_008_600);
     expect(Number(b.carrierCostKobo) + Number(b.commissionKobo)).toBe(quote.quotedPriceKobo);
     expect(quote.pricingVersion).toBe('2026-11-fuel-indexed-1');
+  });
+
+  it("scales a hired driver's pay by vehicle and never lets it eat the owner's fuel money", async () => {
+    const service = createService();
+    const pickup = await service.routeEstimate({ ...routeInput, truckType: 'Pickup', weightTons: 0.5 });
+    const trailer = await service.routeEstimate({ ...routeInput, truckType: 'Articulated trailer', weightTons: 20 });
+    const flatbed = await service.routeEstimate(routeInput);
+    const km = flatbed.distanceKm;
+
+    // km on the quote is rounded to 0.1 km; the pay uses the exact distance, so allow NGN 1.
+    expect(Math.abs(Number(flatbed.pricingBreakdown.hiredDriverPayKobo) - Math.round(15_000 + km * 100) * 100)).toBeLessThanOrEqual(100);
+    expect(Number(pickup.pricingBreakdown.hiredDriverPayKobo)).toBeLessThan(Number(flatbed.pricingBreakdown.hiredDriverPayKobo));
+    expect(Number(trailer.pricingBreakdown.hiredDriverPayKobo)).toBeGreaterThan(Number(flatbed.pricingBreakdown.hiredDriverPayKobo));
+
+    const greedy = await createService({ settings: [{ key: 'pricingDriverTripAllowanceNgn', value: '500000' }] }).routeEstimate(routeInput);
+    const b = greedy.pricingBreakdown;
+    expect(Number(b.hiredDriverPayKobo)).toBe(Number(b.carrierCostKobo) - Number(b.fuelCostKobo));
   });
 
   it('follows the petrol price for pickups and the diesel price for trucks', async () => {

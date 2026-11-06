@@ -2186,8 +2186,8 @@ export class ShipmentsService {
   private async notifySettlementOfEscrowRelease(shipmentId: string, amount?: number | null, currency = 'NGN') {
     try {
       await ensurePlatformFeeColumn(this.prisma);
-      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null; ownerId: string | null; platformFeeKobo: number | null }>>(
-        `select da."driverId", s."reference", v."ownerId", e."platformFeeKobo"
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ driverId: string; reference: string | null; ownerId: string | null; platformFeeKobo: number | null; driverPayKobo: number | null }>>(
+        `select da."driverId", s."reference", v."ownerId", e."platformFeeKobo", e."driverPayKobo"
          from "DriverAssignment" da
          join "Shipment" s on s."id" = da."shipmentId"
          left join "Escrow" e on e."shipmentId" = s."id"
@@ -2205,7 +2205,7 @@ export class ShipmentsService {
       const total = Math.max(0, Number(amount ?? 0) - Number(assignment.platformFeeKobo ?? 0));
       const separateOwner = Boolean(assignment.ownerId) && assignment.ownerId !== assignment.driverId;
       const driverSharePercent = separateOwner ? await this.driverSettlementSharePercent() : 100;
-      const { driverKobo: driverAmount, ownerKobo: ownerAmount } = splitCarrierAmount(total, separateOwner, driverSharePercent);
+      const { driverKobo: driverAmount, ownerKobo: ownerAmount } = splitCarrierAmount(total, separateOwner, driverSharePercent, assignment.driverPayKobo);
 
       const sends: Promise<unknown>[] = [
         this.notifications.create({
@@ -2242,17 +2242,21 @@ export class ShipmentsService {
     }
   }
 
-  // Trako's commission from the signed quote, fixed on the escrow at booking so a later
-  // change of the commission setting never alters a booked job. Quotes signed before
-  // commissions existed carry none, and those shipments settle in full to the carrier.
+  // Trako's commission and the hired-driver pay from the signed quote, fixed on the escrow at
+  // booking so later setting changes never alter a booked job. Quotes signed before these
+  // existed carry neither, and those shipments settle the way they always did.
   private async recordPlatformCommission(shipmentId: string, quote: { quotedPriceKobo: number; pricingBreakdown?: Record<string, string | number> }) {
     const commissionKobo = Number(quote.pricingBreakdown?.commissionKobo);
     if (!Number.isFinite(commissionKobo) || commissionKobo <= 0 || commissionKobo >= quote.quotedPriceKobo) return;
+    const carrierKobo = quote.quotedPriceKobo - Math.round(commissionKobo);
+    const driverPayKobo = Number(quote.pricingBreakdown?.hiredDriverPayKobo);
+    const validDriverPay = Number.isFinite(driverPayKobo) && driverPayKobo > 0 && driverPayKobo <= carrierKobo ? Math.round(driverPayKobo) : null;
     await ensurePlatformFeeColumn(this.prisma);
     await this.prisma.$executeRawUnsafe(
-      'update "Escrow" set "platformFeeKobo" = $2 where "shipmentId" = $1',
+      'update "Escrow" set "platformFeeKobo" = $2, "driverPayKobo" = $3 where "shipmentId" = $1',
       shipmentId,
       Math.round(commissionKobo),
+      validDriverPay,
     );
   }
 

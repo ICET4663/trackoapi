@@ -4,17 +4,23 @@
 //
 // Fuel prices are the filling-station price per litre (petrol for pickups and vans, diesel
 // for trucks). Admins update them as pump prices move; quotes never show them to customers.
-// Starting values: Lagos pump prices reported in September 2026 (petrol NGN 1,385 at NNPC,
-// diesel about NGN 1,700 after the Dangote ex-depot rise).
+// Starting values (6 Nov 2026): petrol NGN 1,355 at NNPC stations (8 Oct cut); diesel NGN 1,800
+// (national pump average NGN 1,790 on 19 Oct; Lagos depot NGN 1,809 late October).
 
 export const PRICING_VERSION = '2026-11-fuel-indexed-1';
 
 export const PRICING_SETTING_DEFAULTS = {
   // Trako's commission, added on top of what the trip costs the carrier. The key is the
   // admin "Platform fee" setting, which existed before it was applied to quotes.
-  fee: 7.5,
-  pricingPetrolPriceNgn: 1_385,
-  pricingDieselPriceNgn: 1_700,
+  fee: 10,
+  pricingPetrolPriceNgn: 1_355,
+  pricingDieselPriceNgn: 1_800,
+  // What a hired driver earns for one trip in a truck that belongs to someone else: a trip
+  // allowance plus an amount per km (scaled per vehicle class in maps-provider). Nigerian
+  // haulage adverts in 2026: NGN 120,000-250,000 a month plus NGN 5,000-35,000 per trip,
+  // with fuel paid by the truck owner.
+  pricingDriverTripAllowanceNgn: 15_000,
+  pricingDriverPayPerKmNgn: 100,
   // Share of the trip back that a truck usually drives empty after a one-way load.
   pricingEmptyReturnPercent: 70,
   pricingTollAllowanceNgn: 0,
@@ -62,6 +68,8 @@ export const PRICING_SETTING_DEFINITIONS: SettingDefinition[] = [
   { key: 'fee', title: 'Platform fee', description: "Trako's commission, added on top of the carrier's trip cost in every new quote and kept by Trako when the payment is released.", label: 'Commission (%)', helper: 'Allowed range: 0-30%. Shipments already booked keep the commission they were quoted with.', min: 0, max: 30 },
   { key: 'pricingPetrolPriceNgn', title: 'Petrol pump price', description: 'Filling-station price of petrol per litre, used for pickups and vans. Not shown to customers.', label: 'Petrol (NGN per litre)', helper: 'Update when pump prices change. Allowed range: NGN 200-5,000.', min: 200, max: 5_000 },
   { key: 'pricingDieselPriceNgn', title: 'Diesel pump price', description: 'Filling-station price of diesel per litre, used for trucks. Not shown to customers.', label: 'Diesel (NGN per litre)', helper: 'Update when pump prices change. Allowed range: NGN 200-5,000.', min: 200, max: 5_000 },
+  { key: 'pricingDriverTripAllowanceNgn', title: 'Hired driver trip allowance', description: "Fixed part of a hired driver's pay per trip when the truck belongs to someone else (scaled down for pickups, vans and light trucks). The truck owner gets the rest of the trip money.", label: 'Trip allowance (NGN)', helper: 'Allowed range: NGN 0-500,000.', min: 0, max: 500_000 },
+  { key: 'pricingDriverPayPerKmNgn', title: 'Hired driver pay per km', description: "Distance part of a hired driver's pay per trip when the truck belongs to someone else.", label: 'Pay per km (NGN)', helper: 'Allowed range: NGN 0-5,000 per km.', min: 0, max: 5_000 },
   { key: 'pricingEmptyReturnPercent', title: 'Empty return trip', description: 'How much of the drive back a truck usually makes empty; its fuel is part of the trip cost.', label: 'Empty return (%)', helper: 'Allowed range: 0-100%. 0 means trucks always find a load back.', min: 0, max: 100 },
   { key: 'pricingTollAllowanceNgn', title: 'Toll allowance', description: 'Flat toll and route allowance included in every new quote.', label: 'Allowance (NGN)', helper: 'Allowed range: NGN 0-500,000 per shipment.', min: 0, max: 500_000 },
   { key: 'pricingDemandSurgePercent', title: 'Demand adjustment', description: 'Temporary network demand adjustment applied to new quotes.', label: 'Demand adjustment (%)', helper: 'Allowed range: 0-50%. Keep at 0 during normal demand.', min: 0, max: 50 },

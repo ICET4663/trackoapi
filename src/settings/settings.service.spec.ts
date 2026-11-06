@@ -262,6 +262,20 @@ describe('SettingsService driver and truck-owner settlement split', () => {
     const driverSql = String(driver.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
     expect(driverSql).toContain('round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $2::numeric / 100)');
   });
+
+  // A hired driver gets the pay recorded at booking; the truck owner, who fuels the truck,
+  // gets the rest. Escrows without recorded pay keep the percentage split.
+  it('pays a hired driver the recorded driver pay and the truck owner the rest', async () => {
+    const owner = buildSettlementService();
+    await owner.service.ownerEarnings('owner-1', { strict: true });
+    const ownerSql = String(owner.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(ownerSql).toContain('when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo"');
+
+    const driver = buildSettlementService();
+    await driver.service.driverEarnings('driver-1', { strict: true });
+    const driverSql = String(driver.queryRawUnsafe.mock.calls.find(([sql]) => String(sql).includes(`e."status" = 'RELEASED'`))?.[0]);
+    expect(driverSql).toContain('then (coalesce(e."driverPayKobo", round(');
+  });
 });
 
 describe('SettingsService truck-owner fleet reporting', () => {
@@ -424,9 +438,11 @@ describe('SettingsService platform settings are actually persisted', () => {
     const settings = await service.platformSettings();
     const value = (key: string) => settings.find((entry) => entry.key === key)?.value;
 
-    expect(value('pricingPetrolPriceNgn')).toBe('1385');
-    expect(value('pricingDieselPriceNgn')).toBe('1700');
-    expect(value('fee')).toBe('7.5');
+    expect(value('pricingPetrolPriceNgn')).toBe('1355');
+    expect(value('pricingDieselPriceNgn')).toBe('1800');
+    expect(value('fee')).toBe('10');
+    expect(value('pricingDriverTripAllowanceNgn')).toBe('15000');
+    expect(value('pricingDriverPayPerKmNgn')).toBe('100');
     expect(value('pricingFlatbedBaseFareNgn')).toBe('50000');
     // Settings the formula no longer reads are not offered to admins.
     expect(settings.some((entry) => ['pricingServiceFeePercent', 'pricingFuelSurchargePercent', 'pricingFlatbedPerKmRateNgn'].includes(entry.key))).toBe(false);

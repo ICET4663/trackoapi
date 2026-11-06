@@ -15,6 +15,12 @@ describe('platform commission helpers', () => {
     expect(splitCarrierAmount(10_000_000, false, 70)).toEqual({ driverKobo: 10_000_000, ownerKobo: 0 });
   });
 
+  it('gives a hired driver the recorded pay and the owner the rest, never more than the whole', () => {
+    expect(splitCarrierAmount(20_916_900, true, 70, 2_704_000)).toEqual({ driverKobo: 2_704_000, ownerKobo: 18_212_900 });
+    expect(splitCarrierAmount(1_000_000, true, 70, 5_000_000)).toEqual({ driverKobo: 1_000_000, ownerKobo: 0 });
+    expect(splitCarrierAmount(20_916_900, false, 70, 2_704_000)).toEqual({ driverKobo: 20_916_900, ownerKobo: 0 });
+  });
+
   it('adds the column once per database client and retries after a failure', async () => {
     const execute = jest.fn().mockRejectedValueOnce(new Error('busy')).mockResolvedValue(0);
     const prisma = { $executeRawUnsafe: execute };
@@ -23,8 +29,11 @@ describe('platform commission helpers', () => {
     await ensurePlatformFeeColumn(prisma);
     await ensurePlatformFeeColumn(prisma);
 
-    expect(execute).toHaveBeenCalledTimes(2);
-    expect(execute.mock.calls[1][0]).toContain('add column if not exists "platformFeeKobo" integer');
+    expect(execute.mock.calls.map(([sql]) => sql)).toEqual(expect.arrayContaining([
+      expect.stringContaining('add column if not exists "platformFeeKobo" integer'),
+      expect.stringContaining('add column if not exists "driverPayKobo" integer'),
+    ]));
+    expect(execute).toHaveBeenCalledTimes(3);
   });
 
   it('reports a missing database method as a rejection, not a crash', async () => {
@@ -48,9 +57,18 @@ describe('ShipmentsService records the commission when a shipment is booked', ()
   it('stores the quoted commission on the escrow', async () => {
     const { execute, record } = build();
 
-    await record({ quotedPriceKobo: 21_808_300, pricingBreakdown: { commissionKobo: 1_521_500 } });
+    await record({ quotedPriceKobo: 23_008_600, pricingBreakdown: { commissionKobo: 2_091_700, hiredDriverPayKobo: 2_704_000 } });
 
-    expect(execute).toHaveBeenLastCalledWith('update "Escrow" set "platformFeeKobo" = $2 where "shipmentId" = $1', 'shp-1', 1_521_500);
+    expect(execute).toHaveBeenLastCalledWith('update "Escrow" set "platformFeeKobo" = $2, "driverPayKobo" = $3 where "shipmentId" = $1', 'shp-1', 2_091_700, 2_704_000);
+  });
+
+  it('records no driver pay when the quote has none or an impossible one', async () => {
+    const { execute, record } = build();
+
+    await record({ quotedPriceKobo: 23_008_600, pricingBreakdown: { commissionKobo: 2_091_700 } });
+    expect(execute).toHaveBeenLastCalledWith(expect.any(String), 'shp-1', 2_091_700, null);
+    await record({ quotedPriceKobo: 23_008_600, pricingBreakdown: { commissionKobo: 2_091_700, hiredDriverPayKobo: 99_000_000 } });
+    expect(execute).toHaveBeenLastCalledWith(expect.any(String), 'shp-1', 2_091_700, null);
   });
 
   it('stores nothing for a quote signed before commissions, or an impossible commission', async () => {

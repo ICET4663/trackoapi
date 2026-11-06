@@ -1225,9 +1225,9 @@ export class SettingsService {
       const driverSharePercent = await this.driverSettlementSharePercent();
       const amountExpression = beneficiary === 'DRIVER'
         ? `case when v."ownerId" is not null and v."ownerId" <> da."driverId"
-             then round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $2::numeric / 100)::int
+             then (coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $2::numeric / 100)))::int
              else (e."amount" - coalesce(e."platformFeeKobo", 0)) end`
-        : `round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100)::int`;
+        : `((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))::int`;
       const beneficiaryFilter = beneficiary === 'DRIVER'
         ? `da."driverId" = $1`
         : `v."ownerId" = $1 and v."ownerId" <> da."driverId"`;
@@ -1403,8 +1403,8 @@ export class SettingsService {
               e."updatedAt" as "releasedAt", v."plateNumber", v."type" as "vehicleType",
               coalesce(dp."fullName", du."email") as "driverName",
               coalesce(op."fullName", ou."email") as "ownerName",
-              round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $3::numeric) / 100)::int as "ownerAmount",
-              round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $3::numeric / 100)::int as "driverAmount"
+              ((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $3::numeric) / 100) end))::int as "ownerAmount",
+              (coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * $3::numeric / 100)))::int as "driverAmount"
        from "DriverAssignment" da
        join "Shipment" s on s."id" = da."shipmentId"
        join "Escrow" e on e."shipmentId" = s."id"
@@ -2136,11 +2136,11 @@ export class SettingsService {
       nextServiceDate: Date | null;
     }>>(
       `select v."id" as "vehicleId", v."plateNumber", v."type",
-         coalesce((select sum(round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100))
+         coalesce((select sum((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))
            from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
            where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
              and da."driverId" <> v."ownerId" and e."status" = 'RELEASED'::"EscrowStatus"), 0) as "releasedIncome",
-         coalesce((select sum(round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100))
+         coalesce((select sum((case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end))
            from "DriverAssignment" da join "Escrow" e on e."shipmentId" = da."shipmentId"
            where da."vehicleId" = v."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
              and da."driverId" <> v."ownerId" and e."status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "pendingIncome",
@@ -2208,7 +2208,7 @@ export class SettingsService {
       `select v."id" as "vehicleId", v."plateNumber", v."type", v."isActive",
          coalesce(sum(case when e."status" = 'RELEASED'::"EscrowStatus"
            and e."updatedAt" >= $3 and e."updatedAt" < $4 and da."driverId" <> v."ownerId"
-           then round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) else 0 end), 0) as "releasedIncome",
+           then (case when e."driverPayKobo" is not null then (e."amount" - coalesce(e."platformFeeKobo", 0)) - e."driverPayKobo" else round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * (100 - $2::numeric) / 100) end) else 0 end), 0) as "releasedIncome",
          coalesce((select sum(x."amountKobo") from "VehicleExpense" x
            where x."vehicleId" = v."id" and x."serviceDate" >= $3 and x."serviceDate" < $4), 0) as "expenses",
          count(distinct case when s."status" = 'COMPLETED'::"ShipmentStatus"

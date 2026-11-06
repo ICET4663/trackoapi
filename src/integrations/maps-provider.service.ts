@@ -86,6 +86,8 @@ type TruckPricingProfile = {
   capacityTons: number;
   capacityM3: number;
   fuel: 'PETROL' | 'DIESEL';
+  // Hired-driver pay relative to a heavy truck's (trip allowance and per-km settings).
+  driverPayScale: number;
   // Litres per 100 km: empty, and with the truck fully loaded.
   litresPer100KmEmpty: number;
   litresPer100KmLoaded: number;
@@ -147,19 +149,19 @@ type SignedQuotePayload = {
 // them with real drivers. The five admin-tuned classes take base fare, running cost and
 // minimum fare from PRICING_SETTING_DEFAULTS / admin settings instead of this table.
 const TRUCK_PRICING: Record<string, TruckPricingProfile> = {
-  pickup: { label: 'Pickup', capacityTons: 1, capacityM3: 4, fuel: 'PETROL', litresPer100KmEmpty: 11, litresPer100KmLoaded: 14, baseFareNgn: 10_000, operatingPerKmNgn: 120, minimumFareNgn: 18_000 },
-  van: { label: 'Cargo van', capacityTons: 2, capacityM3: 9, fuel: 'PETROL', litresPer100KmEmpty: 12, litresPer100KmLoaded: 16, baseFareNgn: 12_000, operatingPerKmNgn: 150, minimumFareNgn: 22_000 },
-  light: { label: 'Light truck', capacityTons: 6, capacityM3: 20, fuel: 'DIESEL', litresPer100KmEmpty: 16, litresPer100KmLoaded: 20, baseFareNgn: 20_000, operatingPerKmNgn: 220, minimumFareNgn: 40_000 },
-  refrigerat: { label: 'Refrigerated truck', capacityTons: 12, capacityM3: 38, fuel: 'DIESEL', litresPer100KmEmpty: 26, litresPer100KmLoaded: 34, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
-  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, fuel: 'DIESEL', litresPer100KmEmpty: 22, litresPer100KmLoaded: 28, baseFareNgn: 35_000, operatingPerKmNgn: 300, minimumFareNgn: 70_000 },
-  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, fuel: 'DIESEL', litresPer100KmEmpty: 30, litresPer100KmLoaded: 38, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
-  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, fuel: 'DIESEL', litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 50_000, operatingPerKmNgn: 400, minimumFareNgn: 100_000 },
-  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, fuel: 'DIESEL', litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
-  container: { label: 'Container trailer', capacityTons: 30, capacityM3: 67, fuel: 'DIESEL', litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
-  lowbed: { label: 'Lowbed trailer', capacityTons: 45, capacityM3: 30, fuel: 'DIESEL', litresPer100KmEmpty: 35, litresPer100KmLoaded: 45, baseFareNgn: 90_000, operatingPerKmNgn: 500, minimumFareNgn: 180_000 },
-  articulated: { label: 'Articulated trailer', capacityTons: 40, capacityM3: 90, fuel: 'DIESEL', litresPer100KmEmpty: 32, litresPer100KmLoaded: 42, baseFareNgn: 70_000, operatingPerKmNgn: 450, minimumFareNgn: 140_000 },
-  trailer: { label: 'Trailer', capacityTons: 35, capacityM3: 70, fuel: 'DIESEL', litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
-  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, fuel: 'DIESEL', litresPer100KmEmpty: 24, litresPer100KmLoaded: 30, baseFareNgn: 35_000, operatingPerKmNgn: 320, minimumFareNgn: 70_000 },
+  pickup: { label: 'Pickup', capacityTons: 1, capacityM3: 4, fuel: 'PETROL', driverPayScale: 0.4, litresPer100KmEmpty: 11, litresPer100KmLoaded: 14, baseFareNgn: 10_000, operatingPerKmNgn: 120, minimumFareNgn: 18_000 },
+  van: { label: 'Cargo van', capacityTons: 2, capacityM3: 9, fuel: 'PETROL', driverPayScale: 0.4, litresPer100KmEmpty: 12, litresPer100KmLoaded: 16, baseFareNgn: 12_000, operatingPerKmNgn: 150, minimumFareNgn: 22_000 },
+  light: { label: 'Light truck', capacityTons: 6, capacityM3: 20, fuel: 'DIESEL', driverPayScale: 0.6, litresPer100KmEmpty: 16, litresPer100KmLoaded: 20, baseFareNgn: 20_000, operatingPerKmNgn: 220, minimumFareNgn: 40_000 },
+  refrigerat: { label: 'Refrigerated truck', capacityTons: 12, capacityM3: 38, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 26, litresPer100KmLoaded: 34, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
+  box: { label: 'Box truck', capacityTons: 15, capacityM3: 45, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 22, litresPer100KmLoaded: 28, baseFareNgn: 35_000, operatingPerKmNgn: 300, minimumFareNgn: 70_000 },
+  flatbed: { label: 'Flatbed', capacityTons: 30, capacityM3: 55, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 38, baseFareNgn: 50_000, operatingPerKmNgn: 380, minimumFareNgn: 100_000 },
+  tipper: { label: 'Tipper', capacityTons: 30, capacityM3: 18, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 50_000, operatingPerKmNgn: 400, minimumFareNgn: 100_000 },
+  tanker: { label: 'Tanker', capacityTons: 33, capacityM3: 38, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 30, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  container: { label: 'Container trailer', capacityTons: 30, capacityM3: 67, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  lowbed: { label: 'Lowbed trailer', capacityTons: 45, capacityM3: 30, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 35, litresPer100KmLoaded: 45, baseFareNgn: 90_000, operatingPerKmNgn: 500, minimumFareNgn: 180_000 },
+  articulated: { label: 'Articulated trailer', capacityTons: 40, capacityM3: 90, fuel: 'DIESEL', driverPayScale: 1.15, litresPer100KmEmpty: 32, litresPer100KmLoaded: 42, baseFareNgn: 70_000, operatingPerKmNgn: 450, minimumFareNgn: 140_000 },
+  trailer: { label: 'Trailer', capacityTons: 35, capacityM3: 70, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 32, litresPer100KmLoaded: 40, baseFareNgn: 60_000, operatingPerKmNgn: 420, minimumFareNgn: 120_000 },
+  truck: { label: 'Standard truck', capacityTons: 20, capacityM3: 40, fuel: 'DIESEL', driverPayScale: 1, litresPer100KmEmpty: 24, litresPer100KmLoaded: 30, baseFareNgn: 35_000, operatingPerKmNgn: 320, minimumFareNgn: 70_000 },
 };
 
 const ADMIN_TUNED_KEYS = new Set(['flatbed', 'box', 'tipper', 'tanker', 'truck']);
@@ -300,6 +302,13 @@ export class MapsProviderService {
     const commissionPercent = Math.min(30, Math.max(0, adjustments.fee));
     const commissionNgn = Math.round(carrierNgn * (commissionPercent / 100));
     const quotedPriceKobo = (carrierNgn + commissionNgn) * 100;
+    // A hired driver's pay when the truck belongs to someone else, who gets the rest of the
+    // carrier amount (fuel, truck costs). Never more than the carrier amount minus fuel, so the
+    // owner always gets the fuel money back. A driver on their own truck gets the whole amount.
+    const hiredDriverPayNgn = Math.max(0, Math.min(
+      Math.round((adjustments.pricingDriverTripAllowanceNgn + distanceKm * adjustments.pricingDriverPayPerKmNgn) * profile.driverPayScale),
+      carrierNgn - fuelCostNgn,
+    ));
     const roundedDistanceKm = Number(distanceKm.toFixed(1));
 
     const quote: RouteQuoteCore = {
@@ -315,6 +324,7 @@ export class MapsProviderService {
         carrierCostKobo: carrierNgn * 100,
         commissionKobo: commissionNgn * 100,
         commissionRate: commissionPercent / 100,
+        hiredDriverPayKobo: hiredDriverPayNgn * 100,
         fuelType: profile.fuel,
         fuelLitres: Number(fuelLitres.toFixed(1)),
         fuelPricePerLitreNgn: fuelPriceNgn,

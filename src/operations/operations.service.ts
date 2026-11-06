@@ -775,12 +775,12 @@ export class OperationsService {
            select
              coalesce(sum(case
                when v."ownerId" is not null and v."ownerId" <> da."driverId"
-                 then round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent" / 100)
+                 then coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent"::numeric / 100))
                else (e."amount" - coalesce(e."platformFeeKobo", 0))
              end), 0) as "driverEntitlement",
              coalesce(sum(case
                when v."ownerId" is not null and v."ownerId" <> da."driverId"
-                 then (e."amount" - coalesce(e."platformFeeKobo", 0)) - round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent" / 100)
+                 then (e."amount" - coalesce(e."platformFeeKobo", 0)) - coalesce(e."driverPayKobo", round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent"::numeric / 100))
                else 0
              end), 0) as "ownerEntitlement",
              coalesce(sum(coalesce(e."platformFeeKobo", 0)), 0) as "commissionEarned"
