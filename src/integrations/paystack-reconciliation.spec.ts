@@ -145,3 +145,34 @@ test('the report names each problem and the totals', () => {
   assert.match(text, /\[amount_mismatch\] TRK-1/);
   assert.match(text, /NGN 4,000\.00/);
 });
+
+// Paystack marks a refunded payment "reversed" and drops it from the "success" list.
+test('a reversed payment with its refund matches a REFUNDED escrow (live case, 20 Oct)', () => {
+  const result = reconcile({
+    transactions: [tx({ status: 'reversed' })],
+    refunds: [{ id: 7, transaction: 101, amount: 500000, status: 'pending' }],
+    ledger: [row({ escrowStatus: 'REFUNDED' })],
+  });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.totals.paystackRefundedKobo, 500000);
+});
+
+test('a reversed payment whose refund predates the listing still matches a REFUNDED escrow', () => {
+  const result = reconcile({ transactions: [tx({ status: 'reversed' })], ledger: [row({ escrowStatus: 'REFUNDED' })] });
+  assert.deepEqual(result.problems, []);
+});
+
+test('a reversal Trako did not make (chargeback) on a held escrow is flagged', () => {
+  const result = reconcile({ transactions: [tx({ status: 'reversed' })], ledger: [row({ escrowStatus: 'HELD' })] });
+  assert.deepEqual(types(result.problems), ['payment_reversed']);
+});
+
+test('failed or abandoned payments still do not count as paid', () => {
+  const result = reconcile({ transactions: [tx({ status: 'failed' }), tx({ id: 2, status: 'abandoned' })], ledger: [row({ escrowStatus: 'PENDING', chargeReferences: [] })] });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.counts.paystackPayments, 0);
+});
+
+test('referencesToVerify does not look up a payment already listed as reversed', () => {
+  assert.deepEqual(referencesToVerify({ transactions: [tx({ status: 'reversed' })], ledger: [row({ escrowStatus: 'REFUNDED' })] }), []);
+});
