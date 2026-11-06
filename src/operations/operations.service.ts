@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, ShipmentStatus, UserRole } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ensurePlatformFeeColumn } from '../integrations/platform-commission';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
 import { customerStatusAlert, isForwardTripStep } from '../shipments/trip-status-rules';
@@ -710,10 +711,12 @@ export class OperationsService {
   // driver payouts. All figures are in the smallest currency unit (kobo).
   async financeSummary(actor: OperationActor) {
     this.assertCanOperate(actor.role);
+    await ensurePlatformFeeColumn(this.prisma).catch(() => null);
 
     try {
       const [escrowRows, payoutRows, countRows, settlementRows] = await Promise.all([
         this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
+          commissionHeld: bigint | null;
           collected: bigint | null;
           held: bigint | null;
           disputed: bigint | null;
@@ -721,6 +724,7 @@ export class OperationsService {
           refunded: bigint | null;
         }>>(
           `select
+             coalesce(sum(coalesce("platformFeeKobo", 0)) filter (where "status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus", 'DISPUTED'::"EscrowStatus")), 0) as "commissionHeld",
              coalesce(sum("amount") filter (where "status" <> 'PENDING'::"EscrowStatus"), 0) as "collected",
              coalesce(sum("amount") filter (where "status" in ('FUNDED'::"EscrowStatus", 'HELD'::"EscrowStatus", 'RELEASE_READY'::"EscrowStatus")), 0) as "held",
              coalesce(sum("amount") filter (where "status" = 'DISPUTED'::"EscrowStatus"), 0) as "disputed",
@@ -763,6 +767,7 @@ export class OperationsService {
         this.retryDatabaseRead(() => this.prisma.$queryRawUnsafe<Array<{
           driverEntitlement: bigint | null;
           ownerEntitlement: bigint | null;
+          commissionEarned: bigint | null;
         }>>(
           `with split as (
              select coalesce((select "value"::numeric from "PlatformSetting" where "key" = 'driverOwnerSharePercent'), 70) as "driverPercent"
@@ -770,14 +775,15 @@ export class OperationsService {
            select
              coalesce(sum(case
                when v."ownerId" is not null and v."ownerId" <> da."driverId"
-                 then round(e."amount"::numeric * split."driverPercent" / 100)
-               else e."amount"
+                 then round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent" / 100)
+               else (e."amount" - coalesce(e."platformFeeKobo", 0))
              end), 0) as "driverEntitlement",
              coalesce(sum(case
                when v."ownerId" is not null and v."ownerId" <> da."driverId"
-                 then e."amount" - round(e."amount"::numeric * split."driverPercent" / 100)
+                 then (e."amount" - coalesce(e."platformFeeKobo", 0)) - round((e."amount" - coalesce(e."platformFeeKobo", 0))::numeric * split."driverPercent" / 100)
                else 0
-             end), 0) as "ownerEntitlement"
+             end), 0) as "ownerEntitlement",
+             coalesce(sum(coalesce(e."platformFeeKobo", 0)), 0) as "commissionEarned"
            from "Escrow" e
            join "Shipment" s on s."id" = e."shipmentId"
            join "DriverAssignment" da on da."shipmentId" = s."id" and da."status" = 'ACCEPTED'::"AssignmentStatus"
@@ -820,6 +826,11 @@ export class OperationsService {
           approvedAwaitingDisbursementKobo: approved,
           pendingReviewKobo: n(payout.pending),
           rejectedKobo: n(payout.rejected),
+        },
+        // Trako's commission: kept from released payments, and still inside payments held.
+        commission: {
+          earnedKobo: n(settlements.commissionEarned),
+          heldKobo: n(escrow.commissionHeld),
         },
         driverSettlementLiabilityKobo: driverLiability,
         ownerSettlementLiabilityKobo: ownerLiability,

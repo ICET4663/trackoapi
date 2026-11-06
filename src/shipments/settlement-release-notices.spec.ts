@@ -6,10 +6,11 @@ import type { MapsProviderService } from '../integrations/maps-provider.service'
 // Release notices must quote what the earnings ledger credits: with a separate truck owner
 // the driver gets `driverOwnerSharePercent` (default 70) and the owner the rest.
 describe('ShipmentsService escrow release notices', () => {
-  function build(assignment: { driverId: string; reference: string; ownerId: string | null } | null, sharePercent?: string) {
+  function build(assignment: { driverId: string; reference: string; ownerId: string | null; platformFeeKobo?: number | null } | null, sharePercent?: string) {
     const create = jest.fn().mockResolvedValue({ id: 'n' });
     const prisma = {
       $queryRawUnsafe: jest.fn().mockResolvedValue(assignment ? [assignment] : []),
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       platformSetting: { findUnique: jest.fn().mockResolvedValue(sharePercent === undefined ? null : { value: sharePercent }) },
     } as unknown as PrismaService;
     const service = new ShipmentsService(prisma, { create } as unknown as NotificationsService, {} as MapsProviderService);
@@ -18,6 +19,26 @@ describe('ShipmentsService escrow release notices', () => {
         .notifySettlementOfEscrowRelease('shp-1', amount);
     return { create, notify };
   }
+
+  it("quotes shares of the payment after Trako's commission", async () => {
+    // N107,500 paid = N100,000 carrier amount + N7,500 commission (7.5%).
+    const { create, notify } = build({ driverId: 'drv-1', reference: 'TRK-1', ownerId: 'own-1', platformFeeKobo: 750_000 });
+
+    await notify(10_750_000);
+
+    const [driver, owner] = create.mock.calls.map(([input]) => input);
+    expect(driver.vars).toEqual({ amount: 'N70,000', reference: 'TRK-1' });
+    expect(owner.vars).toEqual({ amount: 'N30,000', reference: 'TRK-1' });
+  });
+
+  it('gives a driver on their own truck the whole carrier amount, not the commission', async () => {
+    const { create, notify } = build({ driverId: 'drv-1', reference: 'TRK-1', ownerId: 'drv-1', platformFeeKobo: 750_000 });
+
+    await notify(10_750_000);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].vars).toEqual({ amount: 'N100,000', reference: 'TRK-1' });
+  });
 
   it('splits the notice between driver and a separate truck owner (default 70/30)', async () => {
     const { create, notify } = build({ driverId: 'drv-1', reference: 'TRK-1', ownerId: 'own-1' });

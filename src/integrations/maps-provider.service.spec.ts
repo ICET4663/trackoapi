@@ -79,11 +79,10 @@ describe('MapsProviderService route pricing', () => {
     expect(quote.quoteValidMinutes).toBe(30);
   });
 
-  it('applies persisted fuel, toll, surge, fee, and validity controls', async () => {
+  it('applies persisted toll, surge, commission and validity controls', async () => {
     const quote = await createService({
       settings: [
-        { key: 'pricingServiceFeePercent', value: '10' },
-        { key: 'pricingFuelSurchargePercent', value: '12.5' },
+        { key: 'fee', value: '10' },
         { key: 'pricingTollAllowanceNgn', value: '5000' },
         { key: 'pricingDemandSurgePercent', value: '20' },
         { key: 'pricingQuoteValidityMinutes', value: '60' },
@@ -91,10 +90,70 @@ describe('MapsProviderService route pricing', () => {
     }).routeEstimate(routeInput);
 
     expect(quote.quoteValidMinutes).toBe(60);
-    expect(quote.pricingBreakdown.fuelSurchargeKobo).toBeGreaterThan(0);
     expect(quote.pricingBreakdown.tollAllowanceKobo).toBe(500_000);
     expect(quote.pricingBreakdown.demandSurgeKobo).toBeGreaterThan(0);
-    expect(quote.pricingBreakdown.serviceFeeRate).toBe(0.1);
+    expect(quote.pricingBreakdown.commissionRate).toBe(0.1);
+    expect(quote.pricingBreakdown.commissionKobo).toBe(Math.round(Number(quote.pricingBreakdown.carrierCostKobo) / 100 * 0.1) * 100);
+  });
+
+  // The end-to-end trip of 6 Nov: Ikeja City Mall to Bodija Market, 120.4 km by Google,
+  // 5 t on a flatbed, default settings. Worked by hand:
+  //   litres: 120.4 x (30 + 8 x 5/30) / 100 + 120.4 x 0.7 x 30 / 100 = 63.009 L
+  //   fuel 63.009 x NGN 1,700 = 107,116; running 120.4 x 380 = 45,752; base 50,000
+  //   carrier 202,868; commission 7.5% = 15,215; customer pays 218,083
+  it('prices a trip from fuel at the pump price, running costs and base fare, plus commission', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: jest.fn().mockResolvedValue({ routes: [{ distanceMeters: 120_400, duration: '7860s' }] }),
+    }) as unknown as typeof fetch;
+
+    const quote = await createService({ googleKey: 'test-key' }).routeEstimate({ ...routeInput, weightTons: 5 });
+    const b = quote.pricingBreakdown;
+
+    expect(b.fuelType).toBe('DIESEL');
+    expect(b.fuelPricePerLitreNgn).toBe(1_700);
+    expect(b.fuelLitres).toBe(63);
+    expect(b.fuelCostKobo).toBe(10_711_600);
+    expect(b.operatingCostKobo).toBe(4_575_200);
+    expect(b.baseFareKobo).toBe(5_000_000);
+    expect(b.carrierCostKobo).toBe(20_286_800);
+    expect(b.commissionKobo).toBe(1_521_500);
+    expect(quote.quotedPriceKobo).toBe(21_808_300);
+    expect(Number(b.carrierCostKobo) + Number(b.commissionKobo)).toBe(quote.quotedPriceKobo);
+    expect(quote.pricingVersion).toBe('2026-11-fuel-indexed-1');
+  });
+
+  it('follows the petrol price for pickups and the diesel price for trucks', async () => {
+    const pickup = { ...routeInput, truckType: 'Pickup', weightTons: 0.5 };
+    const base = createService();
+    const dearPetrol = createService({ settings: [{ key: 'pricingPetrolPriceNgn', value: '2000' }] });
+    const dearDiesel = createService({ settings: [{ key: 'pricingDieselPriceNgn', value: '2500' }] });
+
+    const [pickupBase, pickupPetrol, pickupDiesel] = await Promise.all([base, dearPetrol, dearDiesel].map((s) => s.routeEstimate(pickup)));
+    const [truckBase, truckPetrol, truckDiesel] = await Promise.all([base, dearPetrol, dearDiesel].map((s) => s.routeEstimate(routeInput)));
+
+    expect(pickupBase.pricingBreakdown.fuelType).toBe('PETROL');
+    expect(pickupPetrol.quotedPriceKobo).toBeGreaterThan(pickupBase.quotedPriceKobo);
+    expect(pickupDiesel.quotedPriceKobo).toBe(pickupBase.quotedPriceKobo);
+    expect(truckDiesel.quotedPriceKobo).toBeGreaterThan(truckBase.quotedPriceKobo);
+    expect(truckPetrol.quotedPriceKobo).toBe(truckBase.quotedPriceKobo);
+  });
+
+  it('charges the empty drive back only as far as the empty-return setting says', async () => {
+    const always = await createService({ settings: [{ key: 'pricingEmptyReturnPercent', value: '100' }] }).routeEstimate(routeInput);
+    const never = await createService({ settings: [{ key: 'pricingEmptyReturnPercent', value: '0' }] }).routeEstimate(routeInput);
+
+    expect(Number(always.pricingBreakdown.fuelLitres)).toBeGreaterThan(Number(never.pricingBreakdown.fuelLitres));
+    expect(always.quotedPriceKobo).toBeGreaterThan(never.quotedPriceKobo);
+  });
+
+  it('adds the commission on top of the minimum fare, so the carrier always gets the minimum', async () => {
+    const quote = await createService({ settings: [{ key: 'fee', value: '10' }] })
+      .routeEstimate({ ...routeInput, destinationLatitude: routeInput.originLatitude + 0.001, destinationLongitude: routeInput.originLongitude });
+
+    expect(quote.pricingBreakdown.carrierCostKobo).toBe(10_000_000);
+    expect(quote.pricingBreakdown.commissionKobo).toBe(1_000_000);
+    expect(quote.quotedPriceKobo).toBe(11_000_000);
   });
 
   it('uses live Google road distance and duration when Routes API succeeds', async () => {
@@ -149,14 +208,14 @@ describe('MapsProviderService route pricing', () => {
     const quote = await createService({
       settings: [
         { key: 'pricingFlatbedBaseFareNgn', value: '80000' },
-        { key: 'pricingFlatbedPerKmRateNgn', value: '1200' },
+        { key: 'pricingFlatbedOperatingPerKmNgn', value: '600' },
         { key: 'pricingFlatbedMinimumFareNgn', value: '150000' },
       ],
     }).routeEstimate(routeInput);
 
     expect(quote.pricingBreakdown.baseFareKobo).toBe(8_000_000);
-    expect(quote.pricingBreakdown.perKmRateKobo).toBe(120_000);
-    expect(quote.quotedPriceKobo).toBeGreaterThanOrEqual(15_000_000);
+    expect(quote.pricingBreakdown.operatingPerKmKobo).toBe(60_000);
+    expect(Number(quote.pricingBreakdown.carrierCostKobo)).toBeGreaterThanOrEqual(15_000_000);
   });
 
   it('verifies the exact signed quote that the customer previewed', async () => {
@@ -202,15 +261,15 @@ describe('MapsProviderService route pricing', () => {
     );
   });
 
-  it('scales the route portion from a reserved light-load floor to full capacity', async () => {
+  it('burns more fuel, and costs more, the heavier the load', async () => {
     const service = createService();
     const light = await service.routeEstimate({ ...routeInput, weightTons: 3 });
     const full = await service.routeEstimate({ ...routeInput, weightTons: 30 });
 
     expect(light.pricingBreakdown.loadUtilization).toBe(0.1);
-    expect(light.pricingBreakdown.weightMultiplier).toBe(0.69);
     expect(full.pricingBreakdown.loadUtilization).toBe(1);
-    expect(full.pricingBreakdown.weightMultiplier).toBe(1);
+    expect(Number(full.pricingBreakdown.fuelLitres)).toBeGreaterThan(Number(light.pricingBreakdown.fuelLitres));
+    expect(full.pricingBreakdown.operatingCostKobo).toBe(light.pricingBreakdown.operatingCostKobo);
     expect(full.quotedPriceKobo).toBeGreaterThan(light.quotedPriceKobo);
   });
 
