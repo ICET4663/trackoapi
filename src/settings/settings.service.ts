@@ -1571,33 +1571,64 @@ export class SettingsService {
         take: 100,
         include: { driver: { include: { profile: true } } },
       });
+      // Transfer columns are added lazily on the first payout, so an older database may not
+      // have them yet: then every payout simply has no transfer details.
+      const transfers = payouts.length
+        ? await this.prisma.$queryRawUnsafe<Array<{ id: string; transferStatus: string | null; transferReference: string | null }>>(
+            'select "id", "transferStatus", "transferReference" from "Payout" where "id" = any($1::text[])',
+            payouts.map((payout) => payout.id),
+          ).catch(() => [])
+        : [];
+      const transferById = new Map(transfers.map((row) => [row.id, row]));
 
-      return payouts.map((payout) => ({
-        id: payout.id,
-        driverId: payout.driverId,
-        recipientId: payout.driverId,
-        recipientRole: payout.driver.role,
-        recipientName: payout.driver.profile?.fullName ?? payout.driver.email,
-        driverName: payout.driver.profile?.fullName ?? payout.driver.email,
-        driverEmail: payout.driver.email,
-        amount: payout.amountKobo,
-        amountLabel: this.formatMoney(payout.amountKobo),
-        status: payout.status,
-        bankLabel: payout.bankLabel || 'Payout account pending',
-        note: payout.note,
-        reviewNote: payout.reviewNote,
-        requestedAt: payout.createdAt.toISOString(),
-        requestedAtLabel: payout.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      }));
+      return payouts.map((payout) => {
+        const transfer = transferById.get(payout.id);
+        const manual = transfer?.transferStatus === 'manual';
+        return {
+          id: payout.id,
+          driverId: payout.driverId,
+          recipientId: payout.driverId,
+          recipientRole: payout.driver.role,
+          recipientName: payout.driver.profile?.fullName ?? payout.driver.email,
+          driverName: payout.driver.profile?.fullName ?? payout.driver.email,
+          driverEmail: payout.driver.email,
+          amount: payout.amountKobo,
+          amountLabel: this.formatMoney(payout.amountKobo),
+          status: payout.status,
+          bankLabel: payout.bankLabel || 'Payout account pending',
+          note: payout.note,
+          reviewNote: payout.reviewNote,
+          requestedAt: payout.createdAt.toISOString(),
+          requestedAtLabel: payout.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          paidBy: payout.status !== 'PAID' ? null : manual ? 'BANK_TRANSFER' : 'PAYSTACK',
+          transferStatus: transfer?.transferStatus ?? null,
+          transferReference: manual ? transfer?.transferReference?.replace(/^manual:/, '') ?? null : transfer?.transferReference ?? null,
+          // Marked paid, but Paystack later reported the transfer failed or reversed: the
+          // recipient has not been paid and finance must follow up.
+          transferFailed: payout.status === 'PAID' && ['failed', 'reversed'].includes(transfer?.transferStatus ?? ''),
+        };
+      });
     } catch (error) {
       throw new InternalServerErrorException(`Could not load payout requests. Please try again: ${this.errorMessage(error)}`);
     }
   }
 
-  async reviewPayoutRequest(id: string, reviewerId: string, input: { decision?: string; note?: string }) {
+  async reviewPayoutRequest(
+    id: string,
+    reviewerId: string,
+    input: { decision?: string; note?: string; method?: string; reference?: string },
+  ) {
     const decision = String(input.decision ?? '').toUpperCase();
     if (!['APPROVED', 'REJECTED', 'PAID'].includes(decision)) {
       throw new BadRequestException('Use APPROVED, REJECTED, or PAID as the payout decision.');
+    }
+    const method = String(input.method ?? 'PAYSTACK').toUpperCase();
+    if (!['PAYSTACK', 'BANK_TRANSFER'].includes(method)) {
+      throw new BadRequestException('Use PAYSTACK or BANK_TRANSFER as the payout method.');
+    }
+    if (method === 'BANK_TRANSFER') {
+      if (decision !== 'PAID') throw new BadRequestException('A bank transfer can only be recorded when marking a payout paid.');
+      return this.recordBankTransferPayout(id, reviewerId, input.reference, input.note);
     }
 
     const existing = await this.prisma.payout.findUnique({
@@ -1713,6 +1744,126 @@ export class SettingsService {
       amount: updated.amountKobo,
       amountLabel: this.formatMoney(updated.amountKobo),
       message: `Payout request marked as ${decision.toLowerCase()}.`,
+    };
+  }
+
+  // Paystack refuses transfers on a Starter business, so finance may pay a withdrawal by bank
+  // transfer outside Trako and record it here with the bank's reference. Allowed for an approved
+  // payout, or for one marked paid whose Paystack transfer later failed or was reversed (the
+  // recipient was never paid). Nothing is sent from here: this only records money already sent.
+  private async recordBankTransferPayout(id: string, reviewerId: string, rawReference?: string, rawNote?: string) {
+    const reference = String(rawReference ?? '').trim().replace(/\s+/g, ' ');
+    if (reference.length < 6 || reference.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9 ./_-]*$/.test(reference)) {
+      throw new BadRequestException('Enter the bank transfer reference (6-64 letters, numbers, spaces, dots, dashes or slashes).');
+    }
+    const note = rawNote?.trim() || null;
+    if (note && note.length > 500) throw new BadRequestException('Keep the note under 500 characters.');
+
+    const existing = await this.prisma.payout.findUnique({
+      where: { id },
+      include: { driver: { select: { role: true } } },
+    });
+    if (!existing) throw new NotFoundException('Payout request not found.');
+
+    await this.ensurePayoutTransferColumns();
+    const [current] = await this.prisma.$queryRawUnsafe<Array<{ transferStatus: string | null; transferReference: string | null }>>(
+      'select "transferStatus", "transferReference" from "Payout" where "id" = $1 limit 1',
+      id,
+    );
+    const storedReference = `manual:${reference}`;
+    if (existing.status === 'PAID' && current?.transferStatus === 'manual') {
+      if (current.transferReference === storedReference) {
+        return {
+          id: existing.id,
+          status: existing.status,
+          amount: existing.amountKobo,
+          amountLabel: this.formatMoney(existing.amountKobo),
+          message: 'This bank transfer is already recorded.',
+        };
+      }
+      throw new BadRequestException('This payout is already recorded as paid by bank transfer.');
+    }
+    const failedTransfer = existing.status === 'PAID' && ['failed', 'reversed'].includes(current?.transferStatus ?? '');
+    if (existing.status !== 'APPROVED' && !failedTransfer) {
+      throw new BadRequestException(
+        existing.status === 'PENDING'
+          ? 'Approve this payout before recording a bank transfer.'
+          : existing.status === 'PAID'
+            ? 'This payout is already paid through Paystack. Record a bank transfer only if Paystack reports that transfer failed or reversed.'
+            : `A ${existing.status.toLowerCase()} payout cannot be marked paid.`,
+      );
+    }
+    if (await this.paystackLive()) {
+      const [row] = await this.prisma.$queryRawUnsafe<Array<{ paymentMode: string | null }>>(
+        'select "paymentMode" from "Payout" where "id" = $1 limit 1',
+        id,
+      );
+      if (row?.paymentMode !== 'live') {
+        throw new BadRequestException('This request was made against test-mode earnings before Trako went live, so it must not be paid with real money. Reject it instead.');
+      }
+    }
+
+    // One statement, conditional on the state just checked, so two admins recording at the same
+    // time (or a Paystack webhook landing in between) cannot both win.
+    let updated: Array<{ id: string; driverId: string; amountKobo: number; status: PayoutStatus }>;
+    try {
+      updated = await this.prisma.$queryRawUnsafe(
+        `update "Payout" set "status" = 'PAID'::"PayoutStatus", "reviewedAt" = current_timestamp, "reviewedById" = $2,
+           "reviewNote" = $3, "transferCode" = null, "transferReference" = $4, "transferStatus" = 'manual',
+           "updatedAt" = current_timestamp
+         where "id" = $1
+           and ("status" = 'APPROVED'::"PayoutStatus"
+             or ("status" = 'PAID'::"PayoutStatus" and "transferStatus" in ('failed', 'reversed')))
+         returning "id", "driverId", "amountKobo", "status"::text as "status"`,
+        id,
+        reviewerId,
+        note ?? `Paid by bank transfer, reference ${reference}.`,
+        storedReference,
+      );
+    } catch (error) {
+      if (/Payout_transferReference_key|unique/i.test(this.errorMessage(error))) {
+        throw new BadRequestException('That bank transfer reference is already recorded against another payout.');
+      }
+      throw error;
+    }
+    const payout = updated[0];
+    if (!payout) throw new BadRequestException('This payout changed while you were recording it. Refresh and check it again.');
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: reviewerId,
+        action: 'PAYOUT_PAID_BY_BANK_TRANSFER',
+        entity: 'Payout',
+        entityId: payout.id,
+        metadata: this.toJson({
+          reference,
+          note,
+          amountKobo: payout.amountKobo,
+          previousStatus: existing.status,
+          previousTransfer: failedTransfer ? { reference: current?.transferReference, status: current?.transferStatus } : null,
+        }),
+      },
+    }).catch(() => null);
+
+    await this.notifications.create({
+      userId: payout.driverId,
+      title: 'Withdrawal paid',
+      body: `${this.formatMoney(payout.amountKobo)} was sent to your bank account by bank transfer (reference ${reference}).`,
+      templateKey: 'notifyTpl.driverWithdrawalPaid',
+      vars: { amount: this.formatMoney(payout.amountKobo) },
+      tone: 'SUCCESS',
+      entity: 'Payout',
+      entityId: payout.id,
+      actionUrl: existing.driver?.role === 'TRUCK_OWNER' ? '/owner/earnings' : '/driver/earnings',
+      preferenceKey: 'escrowPayments',
+    });
+
+    return {
+      id: payout.id,
+      status: 'PAID',
+      amount: payout.amountKobo,
+      amountLabel: this.formatMoney(payout.amountKobo),
+      message: `Recorded as paid by bank transfer (reference ${reference}).`,
     };
   }
 
