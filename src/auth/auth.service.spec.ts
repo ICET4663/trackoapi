@@ -129,6 +129,20 @@ describe('AuthService registration is actually gated by the pauseRegistrations p
     } as never)).rejects.toThrow('temporarily paused');
   });
 
+  it('refuses the reserved sandbox addresses before sending a code or creating an account', async () => {
+    const { service, otpCreate, rateLimit } = buildService('false');
+
+    await expect(service.requestRegistrationCode({
+      email: ' tester01.customer@trako.com.ng ', phone: '+2348030000001', role: 'CUSTOMER' as never,
+    } as never)).rejects.toThrow('reserved');
+    await expect(service.register({
+      email: 'apple.review.driver@trako.com.ng', phone: '+2348030000001', fullName: 'New User', password: 'password123', code: '123456', role: 'DRIVER' as never,
+    } as never)).rejects.toThrow('reserved');
+
+    expect(rateLimit.assertAllowed).not.toHaveBeenCalled();
+    expect(otpCreate).not.toHaveBeenCalled();
+  });
+
   it('is not gated when the setting is off, unset, or unreadable (fails open on a read error)', async () => {
     for (const pauseValue of ['false', null]) {
       const { service, findUnique } = buildService(pauseValue);

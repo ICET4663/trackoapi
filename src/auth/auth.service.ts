@@ -11,6 +11,7 @@ import { DeleteAccountDto } from './dto/delete-account.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterRequestDto } from './dto/register-request.dto';
 import { RateLimitService } from './rate-limit.service';
+import { isStoreReviewerAccount } from '../common/store-reviewer';
 
 const PUBLIC_ROLES: UserRole[] = ['CUSTOMER', 'DRIVER', 'TRUCK_OWNER'];
 
@@ -28,6 +29,7 @@ export class AuthService {
     if (!PUBLIC_ROLES.includes(dto.role)) {
       throw new BadRequestException('This role cannot self-register.');
     }
+    this.assertNotSandboxEmail(dto.email);
     await this.assertRegistrationsNotPaused();
 
     const code = this.generateOtpCode();
@@ -202,6 +204,7 @@ export class AuthService {
     }
     // Also gated here, not just in requestRegistrationCode() - a code requested before
     // registrations were paused would otherwise still let the account get created.
+    this.assertNotSandboxEmail(dto.email);
     await this.assertRegistrationsNotPaused();
 
     await this.verifyOtp(dto.email, dto.phone, dto.code, OtpPurpose.REGISTER);
@@ -216,6 +219,15 @@ export class AuthService {
     });
 
     return this.createSession(user.id);
+  }
+
+  // Review and closed-test addresses pay with the Paystack test key, so only the account
+  // scripts may create them; the registration code can go to a phone, which does not prove
+  // the email is the caller's.
+  private assertNotSandboxEmail(email: string) {
+    if (isStoreReviewerAccount(email?.trim())) {
+      throw new BadRequestException('This email address is reserved. Please use your own email address.');
+    }
   }
 
   private static readonly ADMIN_CREATABLE_ROLES: UserRole[] = ['CUSTOMER', 'DRIVER', 'TRUCK_OWNER', 'DISPATCHER', 'ADMIN'];

@@ -6,7 +6,7 @@
 // usage: REVIEW_PASSWORD_APPLE=... REVIEW_PASSWORD_GOOGLE=... node scripts/create-review-accounts.js
 require('dotenv').config();
 const { PrismaClient } = require('@prisma/client');
-const bcrypt = require('bcryptjs');
+const { upsertUser: upsert, ensureDriverFixtures: ensureFixtures } = require('./lib/sandbox-fixtures');
 
 const prisma = new PrismaClient();
 
@@ -15,49 +15,8 @@ const STORES = [
   { key: 'google', label: 'Google Review', password: process.env.REVIEW_PASSWORD_GOOGLE, phoneBase: 203, plate: 'TRK-REV-G1' },
 ];
 
-async function upsertUser({ email, phone, fullName, role, password }) {
-  const passwordHash = await bcrypt.hash(password, 12);
-  const fields = { phone, passwordHash, role, availableRoles: [role], verificationStatus: 'VERIFIED', isActive: true };
-  return prisma.user.upsert({
-    where: { email },
-    update: { ...fields, profile: { upsert: { create: { fullName }, update: { fullName } } } },
-    create: { email, ...fields, profile: { create: { fullName } } },
-  });
-}
-
-async function ensureDriverFixtures(driverId, holderName, plateNumber) {
-  const bank = { bankName: 'Preview Bank', maskedNumber: '**** 0012', holderName, verified: true, payoutSchedule: 'Weekly', pendingPayout: 'N0' };
-  await prisma.bankAccount.upsert({ where: { userId: driverId }, update: bank, create: { userId: driverId, ...bank } });
-
-  const truck = { ownerId: driverId, assignedDriverId: driverId, type: 'Box truck', capacityKg: 30000, capacityM3: 45, registrationState: 'Lagos', isActive: true };
-  const vehicle = await prisma.vehicle.upsert({ where: { plateNumber }, update: truck, create: { plateNumber, ...truck } });
-
-  // Same verified document set the demo bootstrap gives its fixture truck.
-  const expires = new Date();
-  expires.setUTCFullYear(expires.getUTCFullYear() + 1);
-  const documents = [
-    { type: 'REGISTRATION', title: 'Vehicle registration' },
-    { type: 'INSURANCE', title: 'Insurance certificate' },
-    { type: 'ROADWORTHINESS', title: 'Roadworthiness certificate' },
-  ];
-  for (const document of documents) {
-    await prisma.$executeRawUnsafe(
-      `insert into "VehicleDocument" ("id", "vehicleId", "type", "title", "state", "number", "expires", "reviewNote", "reviewedAt")
-       values ($1, $2, $3, $4, 'VERIFIED'::"DriverDocumentState", $5, $6, $7, current_timestamp)
-       on conflict ("vehicleId", "type") do update set
-         "title" = excluded."title", "state" = excluded."state", "number" = excluded."number",
-         "expires" = excluded."expires", "reviewNote" = excluded."reviewNote", "reviewedAt" = current_timestamp,
-         "updatedAt" = current_timestamp`,
-      `${vehicle.id}-${document.type.toLowerCase()}`,
-      vehicle.id,
-      document.type,
-      document.title,
-      `REVIEW-${document.type}`,
-      expires,
-      'Verified fixture for store review.',
-    );
-  }
-}
+const upsertUser = (input) => upsert(prisma, input);
+const ensureDriverFixtures = (driverId, holderName, plateNumber) => ensureFixtures(prisma, driverId, holderName, plateNumber);
 
 async function main() {
   for (const store of STORES) {

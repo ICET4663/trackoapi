@@ -1327,9 +1327,10 @@ export class ShipmentsService {
       const cargoVolumeM3 = Math.max(0, Number(shipment.cargoVolumeM3 ?? 0));
       const ranked = candidates
         .filter((driver) => !excluded.has(driver.id) && availabilityByDriver.get(driver.id)?.availableForAssignments !== false)
-        // Store reviewer drivers only get loads booked by store reviewer customers, so a real
-        // customer's load never waits on an account nobody drives.
-        .filter((driver) => reviewerLoad || !isStoreReviewerAccount(driver.email))
+        // Sandbox (store review and closed-test) loads stay among sandbox drivers both ways: a real
+        // customer's load never waits on a test account, and a real driver is never offered a
+        // load paid with Paystack test money.
+        .filter((driver) => isStoreReviewerAccount(driver.email) === reviewerLoad)
         .map((driver) => {
           const vehicle = [...driver.driverVehicles]
             .filter((candidate) => this.isVehicleAssignmentReady(candidate))

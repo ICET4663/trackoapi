@@ -1330,4 +1330,25 @@ describe('ShipmentsService keeps store reviewer drivers off real loads', () => {
 
     expect(service.offerAssignment).toHaveBeenCalledWith('shipment-1', { driverId: 'reviewer-near', vehicleId: 'vehicle-reviewer-near' }, 'DISPATCHER');
   });
+
+  it('never offers a closed tester\'s test-money load to a real driver, even when no sandbox driver is free', async () => {
+    const service = buildService('tester03.customer@trako.com.ng');
+    const prisma = (service as unknown as { prisma: { $queryRawUnsafe: jest.Mock } }).prisma;
+    prisma.$queryRawUnsafe.mockResolvedValue([
+      { userId: 'reviewer-near', availableForAssignments: false, lastKnownLatitude: 6.455, lastKnownLongitude: 3.395, locationUpdatedAt: new Date() },
+      { userId: 'driver-far', availableForAssignments: true, lastKnownLatitude: 6.6, lastKnownLongitude: 3.35, locationUpdatedAt: new Date() },
+    ]);
+
+    await service.autoDispatch('shipment-1');
+
+    expect(service.offerAssignment).not.toHaveBeenCalledWith('shipment-1', expect.objectContaining({ driverId: 'driver-far' }), expect.anything());
+  });
+
+  it('offers a closed tester\'s load to a sandbox driver', async () => {
+    const service = buildService('tester03.customer@trako.com.ng');
+
+    await service.autoDispatch('shipment-1');
+
+    expect(service.offerAssignment).toHaveBeenCalledWith('shipment-1', { driverId: 'reviewer-near', vehicleId: 'vehicle-reviewer-near' }, 'DISPATCHER');
+  });
 });
