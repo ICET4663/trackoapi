@@ -1,11 +1,11 @@
 const { spawnSync } = require('child_process');
 
-const isWindows = process.platform === 'win32';
-const prismaBin = isWindows
-  ? 'node_modules\\.bin\\prisma.cmd'
-  : 'node_modules/.bin/prisma';
+// Run the Prisma CLI through node rather than node_modules/.bin/prisma(.cmd): since the April 2024
+// security fix, Node on Windows refuses to spawn a .cmd file without a shell (EINVAL), which failed
+// `npm ci` on Windows. The same command works on Vercel's Linux build.
+const prismaCli = require.resolve('prisma/build/index.js');
 
-const result = spawnSync(prismaBin, ['generate'], {
+const result = spawnSync(process.execPath, [prismaCli, 'generate'], {
   stdio: 'inherit',
   shell: false,
   env: {
@@ -15,4 +15,5 @@ const result = spawnSync(prismaBin, ['generate'], {
   },
 });
 
+if (result.error) console.error(result.error);
 process.exit(result.status ?? 1);

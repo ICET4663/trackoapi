@@ -717,7 +717,7 @@ describe('SettingsService fleet assignments', () => {
     const userFindUnique = jest.fn().mockResolvedValue(verifiedDriver);
     const updateMany = jest.fn().mockResolvedValue({ count: 1 });
     const update = jest.fn().mockResolvedValue({ id: 'vehicle-1', plateNumber: 'LAG-1', assignedDriverId: 'driver-1' });
-    const transaction = jest.fn(async (ops: unknown[]) => [await updateMany(), await update()]);
+    const transaction = jest.fn(async (_ops: unknown[]) => [await updateMany(), await update()]);
     const { service, notificationsCreate } = buildService({
       vehicle: { findUnique: vehicleFindUnique, updateMany, update },
       user: { findUnique: userFindUnique },

@@ -3,7 +3,8 @@ name: Dispatch sweep
 # Passes unanswered driver offers to the next driver and offers waiting shipments.
 # Vercel Hobby cron runs once a day, so this calls the API every 5 minutes instead.
 # Needs the repository secret CRON_SECRET (the same value as the API's CRON_SECRET on Vercel).
-# GitHub may start scheduled runs a few minutes late.
+# GitHub drops most of these runs (median gap 5.5 hours, measured 10 Nov 2026), so this is only a
+# backup: the Supabase scheduler in docs/dispatch-sweep-schedule.md is the every-5-minutes trigger.
 on:
   schedule:
     - cron: '*/5 * * * *'
