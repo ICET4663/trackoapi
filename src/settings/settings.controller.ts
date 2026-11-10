@@ -533,7 +533,7 @@ export class SettingsController {
   @Post('admin/payout-requests/:id/review')
   async reviewPayoutRequest(
     @Param('id') id: string,
-    @Body() body: { decision?: string; note?: string },
+    @Body() body: { decision?: string; note?: string; method?: string; reference?: string },
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.requireRole(authorization, ['ADMIN']);
