@@ -417,6 +417,90 @@ export class PaymentProviderService {
     }
   }
 
+  // A customer who pays and never comes back to Trako (tab closed, signed out, another browser)
+  // leaves the escrow PENDING unless Paystack's webhook reaches the API. The dispatch sweep calls
+  // this every few minutes: it asks Paystack about recent checkouts whose escrow is still PENDING
+  // and funds the ones Paystack reports paid, through the same amount-checked path as the webhook.
+  // Silent otherwise: Paystack reports a checkout that is still open as "abandoned", so an
+  // unpaid result here must not send "Payment not completed" to someone still paying.
+  async confirmRecentPendingPayments(options: { now?: Date; withinHours?: number; limit?: number } = {}) {
+    const status = this.status();
+    if (status.provider !== 'paystack' || !status.realChargeEnabled) {
+      return { skipped: 'Paystack checkout is not configured.' };
+    }
+    const now = options.now ?? new Date();
+    const since = new Date(now.getTime() - (options.withinHours ?? 24) * 60 * 60 * 1000);
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ shipmentId: string; reference: string | null }>>(
+      `select a."entityId" as "shipmentId",
+              a."metadata"->'payload'->'data'->>'reference' as "reference"
+       from "AuditLog" a
+       join "Escrow" e on e."shipmentId" = a."entityId"
+       where a."action" = 'PAYSTACK_ESCROW_INITIALIZED'
+         and a."createdAt" >= $1
+         and e."status" = 'PENDING'::"EscrowStatus"
+       order by a."createdAt" desc
+       limit $2`,
+      since,
+      options.limit ?? 20,
+    );
+
+    const funded: string[] = [];
+    const failed: string[] = [];
+    const seen = new Set<string>();
+    let checked = 0;
+    for (const row of rows) {
+      const reference = row.reference?.trim();
+      if (!reference || seen.has(reference) || funded.includes(row.shipmentId)) continue;
+      seen.add(reference);
+      checked += 1;
+      try {
+        const confirmed = await this.confirmPaidReference(row.shipmentId, reference);
+        if (confirmed) funded.push(row.shipmentId);
+      } catch (error) {
+        failed.push(reference);
+        this.logger.warn(`Pending payment check for ${reference} failed: ${this.errorMessage(error)}`);
+      }
+    }
+    return { checked, funded, failed: failed.length };
+  }
+
+  // Funds escrow for one reference only when Paystack says it succeeded for this same shipment.
+  private async confirmPaidReference(shipmentId: string, reference: string) {
+    const secretKey = this.secretKeyFor(reference);
+    if (!secretKey) return false;
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return false;
+    const payload = (await response.json().catch(() => ({}))) as { status?: boolean; data?: { status?: string } };
+    if (!payload.status || payload.data?.status !== 'success') return false;
+
+    const payment = this.extractPaymentEvent({ event: 'charge.success', data: payload.data });
+    if (payment.shipmentId !== shipmentId) {
+      this.logger.warn(`Paystack reference ${reference} belongs to shipment ${payment.shipmentId ?? 'none'}, not ${shipmentId}`);
+      return false;
+    }
+    if (!(await this.testPaymentAllowedFor(shipmentId, payment.reference ?? reference))) return false;
+    const escrowUpdated = await this.markEscrowFunded(
+      shipmentId, payment.amount, payment.currency, 'paystack', payment.reference ?? reference, payment.authorization,
+    );
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'PAYSTACK_PAYMENT_CONFIRMED_BY_SWEEP',
+          entity: 'PaymentProvider',
+          entityId: shipmentId,
+          metadata: this.toJson({ reference, escrowUpdated, payload }),
+        },
+      });
+    } catch {
+      // Funding already happened; a missing audit row must not undo or repeat it.
+    }
+    return escrowUpdated;
+  }
+
   async verifyPaystackPayment(reference: string, actor?: PaymentActor) {
     const secretKey = this.secretKeyFor(reference);
     if (!secretKey) {
