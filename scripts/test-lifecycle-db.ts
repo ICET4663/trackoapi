@@ -10,6 +10,7 @@ import { AuthService } from '../src/auth/auth.service';
 import { RateLimitService } from '../src/auth/rate-limit.service';
 import { MapsProviderService } from '../src/integrations/maps-provider.service';
 import { PaymentProviderService } from '../src/integrations/payment-provider.service';
+import { splitCarrierAmount } from '../src/integrations/platform-commission';
 import { NotificationsService } from '../src/notifications/notifications.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { SettingsService } from '../src/settings/settings.service';
@@ -92,8 +93,9 @@ async function main() {
   try {
     await admin.$executeRawUnsafe(`create schema "${schema}"`);
     process.env.DATABASE_URL = lifecycleUrl;
-    const prismaCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    execFileSync(prismaCommand, ['prisma', 'db', 'push', '--skip-generate', '--accept-data-loss'], {
+    // Run the Prisma CLI through node: Windows refuses to spawn npx.cmd without a shell (EINVAL).
+    const prismaCli = require.resolve('prisma/build/index.js');
+    execFileSync(process.execPath, [prismaCli, 'db', 'push', '--skip-generate', '--accept-data-loss'], {
       cwd: process.cwd(),
       env: { ...process.env, DATABASE_URL: lifecycleUrl },
       stdio: 'inherit',
@@ -176,8 +178,11 @@ async function main() {
     const [chargeCount] = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>('select count(*) as "count" from "BillingCharge" where "userId" = $1', customer.id);
     expectValue(Number(chargeCount.count) === 1, 'payment replay did not create a duplicate billing charge');
 
+    // Approval starts automatic matching, which offers the load to the only free driver and truck.
     await shipments.approveShipment(shipment.id, adminUser.id, 'ADMIN');
-    const assignment = await shipments.offerAssignment(shipment.id, { driverId: driver.id, vehicleId: vehicle.id }, dispatcher.role);
+    const assignment = await prisma.driverAssignment.findFirst({ where: { shipmentId: shipment.id, status: 'OFFERED' } });
+    expectValue(assignment, 'approval offered the shipment to a driver automatically');
+    expectValue(assignment.driverId === driver.id && assignment.vehicleId === vehicle.id, 'automatic offer went to the free driver and truck');
     await expectRejected(
       () => shipments.offerAssignment(shipment.id, { driverId: driver.id, vehicleId: vehicle.id }, dispatcher.role),
       'a second pending assignment was accepted',
@@ -261,10 +266,16 @@ async function main() {
       'completed shipment did not create a GPS ping');
 
     const earnings = await settings.driverEarnings(driver.id, { strict: true });
-    const driverAmount = Math.round(initialized.amount * 70 / 100);
-    expectValue(earnings.availableBalance === driverAmount, 'driver received the configured share of owner-truck earnings');
+    // Hired driver on an owner's truck: Trako's commission comes off first, then the driver gets the trip pay
+    // fixed on the escrow at booking (70% of the carrier amount on escrows booked before it existed).
+    const [split] = await prisma.$queryRawUnsafe<Array<{ platformFeeKobo: number | null; driverPayKobo: number | null }>>(
+      'select "platformFeeKobo", "driverPayKobo" from "Escrow" where "shipmentId" = $1', shipment.id);
+    const carrierAmount = initialized.amount - Number(split?.platformFeeKobo ?? 0);
+    const { driverKobo: driverAmount, ownerKobo: ownerAmount } = splitCarrierAmount(carrierAmount, true, 70, split?.driverPayKobo);
+    console.log(`Settlement: paid ${initialized.amount}, commission ${split?.platformFeeKobo ?? 0}, driver ${driverAmount}, owner ${ownerAmount} (kobo)`);
+    expectValue(earnings.availableBalance === driverAmount, 'driver received the hired-driver share of owner-truck earnings');
     const ownerEarnings = await settings.ownerEarnings(owner.id, { strict: true });
-    expectValue(ownerEarnings.availableBalance === initialized.amount - driverAmount, 'owner received the remaining settlement share');
+    expectValue(ownerEarnings.availableBalance === ownerAmount, 'truck owner received the rest of the carrier amount');
     const withdrawalAmount = Math.max(100, Math.floor(driverAmount / 2));
     const withdrawal = await settings.requestDriverWithdrawal(driver.id, { amountKobo: withdrawalAmount, note: 'Lifecycle test withdrawal.' });
     expectValue(withdrawal.status === 'PENDING', 'driver withdrawal entered finance queue');
