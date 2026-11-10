@@ -2,6 +2,7 @@ import { Controller, ForbiddenException, Get, Headers } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { Public } from '../common/decorators/public.decorator';
+import { PaymentProviderService } from '../integrations/payment-provider.service';
 import { PaymentReconciliationService } from '../integrations/payment-reconciliation.service';
 import { TrackingService } from '../tracking/tracking.service';
 import { ShipmentsService } from './shipments.service';
@@ -17,6 +18,7 @@ export class CronController {
     private readonly tracking: TrackingService,
     private readonly config: ConfigService,
     private readonly reconciliation: PaymentReconciliationService,
+    private readonly payments: PaymentProviderService,
   ) {}
 
   @Get('escrow-auto-release')
@@ -47,9 +49,13 @@ export class CronController {
   async dispatchSweep(@Headers('authorization') authorization?: string) {
     this.assertScheduledJob(authorization);
 
+    // Fund paid checkouts whose customer never returned and whose webhook never arrived, before
+    // matching, so a shipment funded here is offered to drivers in this same run. Never breaks the sweep.
+    const pendingPayments = await this.payments.confirmRecentPendingPayments()
+      .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
     const assignments = await this.shipments.expireStaleAssignmentOffers();
     const matching = await this.shipments.matchWaitingShipments();
-    return { assignments, matching, ranAt: new Date().toISOString() };
+    return { pendingPayments, assignments, matching, ranAt: new Date().toISOString() };
   }
 
   private assertScheduledJob(authorization?: string) {
