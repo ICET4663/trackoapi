@@ -396,7 +396,7 @@ export class AuthService {
     return this.rolesForUser(user);
   }
 
-  async refresh(refreshToken: string) {
+  async refresh(refreshToken: string, role?: UserRole) {
     // Every refresh previously just minted a new session without ever revoking the token
     // that was presented - refresh tokens were never rotated, so a stolen one (XSS,
     // insecure device storage, a leaked log line) stayed valid for its full 30-day
@@ -421,8 +421,28 @@ export class AuthService {
 
     if (stored.expiresAt <= new Date()) throw new UnauthorizedException('Refresh token is invalid or expired.');
 
+    // A deactivated (or deleted) account must not get a new session. Every request made
+    // with one is refused by the JWT strategy anyway, so issuing it only kept a dead
+    // session rotating; end all of that user's sessions instead.
+    // Only "not found" means the account is gone; a database hiccup must not end sessions.
+    const user = await this.users.findById(stored.userId).catch((error: unknown) => {
+      if (error instanceof NotFoundException) return null;
+      throw error;
+    });
+    if (!user || user.isActive === false || user.verificationStatus === 'SUSPENDED') {
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: stored.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw new UnauthorizedException('This account is no longer active.');
+    }
+
     await this.prisma.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } });
-    return this.createSession(stored.userId);
+    // Keep the portal the person signed in to. Without this a refresh always returned the
+    // account's first role, so someone working in their second role (a driver who is also
+    // a truck owner) was moved to the other dashboard when the access token ran out.
+    const keepRole = role && this.rolesForUser(user).includes(role) ? role : undefined;
+    return this.createSession(stored.userId, keepRole);
   }
 
   async logout(refreshToken: string) {

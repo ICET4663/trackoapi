@@ -1,4 +1,5 @@
 import { AuthService } from './auth.service';
+import { NotFoundException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { JwtService } from '@nestjs/jwt';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -282,7 +283,10 @@ describe('AuthService.deleteUserByAdmin', () => {
 // (the presented token becomes unusable) and reuse detection (presenting an already-
 // rotated token nukes every other active session, since that only happens if it leaked).
 describe('AuthService.refresh rotates tokens and detects reuse', () => {
-  function buildService(otpRow: { id: string; userId: string; revokedAt: Date | null; expiresAt: Date } | null) {
+  function buildService(
+    otpRow: { id: string; userId: string; revokedAt: Date | null; expiresAt: Date } | null,
+    account: Record<string, unknown> | null = { id: 'user-1', email: 'a@b.com', role: 'CUSTOMER', isActive: true, verificationStatus: 'VERIFIED' },
+  ) {
     const config = { get: () => undefined } as unknown as ConfigService;
     const jwt = { signAsync: jest.fn().mockResolvedValue('access-token') } as unknown as JwtService;
     const prisma = {
@@ -295,10 +299,60 @@ describe('AuthService.refresh rotates tokens and detects reuse', () => {
       user: { findUnique: jest.fn() },
       auditLog: { create: jest.fn().mockResolvedValue(undefined) },
     } as unknown as PrismaService;
-    const users = { findById: jest.fn().mockResolvedValue({ id: 'user-1', email: 'a@b.com', role: 'CUSTOMER', verificationStatus: 'VERIFIED' }) } as unknown as UsersService;
+    const users = {
+      findById: account ? jest.fn().mockResolvedValue(account) : jest.fn().mockRejectedValue(new NotFoundException('User not found.')),
+    } as unknown as UsersService;
     const rateLimit = { assertAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as RateLimitService;
-    return { service: new AuthService(config, jwt, prisma, rateLimit, users), prisma };
+    return { service: new AuthService(config, jwt, prisma, rateLimit, users), prisma, jwt };
   }
+
+  const liveRow = () => ({ id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 1000 * 60 * 60) });
+
+  it.each([
+    ['deactivated', { id: 'user-1', email: 'a@b.com', role: 'DRIVER', isActive: false, verificationStatus: 'SUSPENDED' }],
+    ['suspended', { id: 'user-1', email: 'a@b.com', role: 'DRIVER', isActive: true, verificationStatus: 'SUSPENDED' }],
+    ['deleted', null],
+  ])('refuses a %s account and ends all of its sessions', async (_label, account) => {
+    const { service, prisma, jwt } = buildService(liveRow(), account);
+
+    await expect(service.refresh('some-refresh-token')).rejects.toThrow('This account is no longer active.');
+
+    expect((prisma.refreshToken.updateMany as jest.Mock)).toHaveBeenCalledWith({
+      where: { userId: 'user-1', revokedAt: null },
+      data: { revokedAt: expect.any(Date) },
+    });
+    expect((prisma.refreshToken.create as jest.Mock)).not.toHaveBeenCalled();
+    expect(jwt.signAsync as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it('a database error while checking the account does not end any session', async () => {
+    const { service, prisma } = buildService(liveRow());
+    (service as unknown as { users: { findById: jest.Mock } }).users.findById = jest.fn().mockRejectedValue(new Error('connection reset'));
+
+    await expect(service.refresh('some-refresh-token')).rejects.toThrow('connection reset');
+    expect((prisma.refreshToken.updateMany as jest.Mock)).not.toHaveBeenCalled();
+    expect((prisma.refreshToken.update as jest.Mock)).not.toHaveBeenCalled();
+  });
+
+  it('keeps the portal the person signed in to when the account has that role', async () => {
+    const account = { id: 'user-1', email: 'a@b.com', role: 'TRUCK_OWNER', availableRoles: ['TRUCK_OWNER', 'DRIVER'], isActive: true, verificationStatus: 'VERIFIED' };
+    const { service, jwt } = buildService(liveRow(), account);
+
+    const session = await service.refresh('some-refresh-token', 'DRIVER');
+
+    expect(jwt.signAsync as jest.Mock).toHaveBeenCalledWith(expect.objectContaining({ role: 'DRIVER' }));
+    expect(session.user.role).toBe('DRIVER');
+  });
+
+  it('falls back to the account role when the requested role is not one it has, or none is sent', async () => {
+    const account = { id: 'user-1', email: 'a@b.com', role: 'CUSTOMER', isActive: true, verificationStatus: 'VERIFIED' };
+    const asked = buildService(liveRow(), account);
+    expect((await asked.service.refresh('some-refresh-token', 'ADMIN')).user.role).toBe('CUSTOMER');
+    expect(asked.jwt.signAsync as jest.Mock).toHaveBeenCalledWith(expect.objectContaining({ role: 'CUSTOMER' }));
+
+    const plain = buildService(liveRow(), account);
+    expect((await plain.service.refresh('some-refresh-token')).user.role).toBe('CUSTOMER');
+  });
 
   it('revokes the presented token as part of issuing a new session (rotation)', async () => {
     const row = { id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 1000 * 60 * 60) };
