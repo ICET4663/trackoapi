@@ -53,7 +53,7 @@ export class AuthController {
   @Post('refresh')
   @Public()
   refresh(@Body() dto: RefreshDto) {
-    return this.authService.refresh(dto.refreshToken);
+    return this.authService.refresh(dto.refreshToken, dto.role);
   }
 
   @Post('logout')
