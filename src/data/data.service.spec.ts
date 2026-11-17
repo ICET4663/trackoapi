@@ -315,6 +315,48 @@ describe('DataService driver workflow collections', () => {
     expect(result[0].expiresAt).toBeUndefined();
   });
 
+  it('tells the driver a queued load starts near where the current trip ends', async () => {
+    const prisma = {
+      driverAssignment: {
+        findFirst: jest.fn().mockResolvedValue({
+          shipmentId: 'active-shipment',
+          shipment: { reference: 'TRK-ACTIVE-1', destinationLabel: 'Garki, Abuja', destinationLatitude: 9.0333, destinationLongitude: 7.4891 },
+        }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'offer-near', shipmentId: 'near-shipment', status: 'OFFERED', offeredAt: new Date(),
+            shipment: {
+              id: 'near-shipment', reference: 'TRK-NEAR', pickupLabel: 'Wuse, Abuja', destinationLabel: 'Kano',
+              pickupLatitude: 9.0765, pickupLongitude: 7.3986, status: 'DRIVER_ASSIGNED',
+            },
+            vehicle: null,
+          },
+          {
+            id: 'offer-far', shipmentId: 'far-shipment', status: 'OFFERED', offeredAt: new Date(),
+            shipment: {
+              id: 'far-shipment', reference: 'TRK-FAR', pickupLabel: 'Ikeja, Lagos', destinationLabel: 'Ibadan',
+              pickupLatitude: 6.6018, pickupLongitude: 3.3515, status: 'DRIVER_ASSIGNED',
+            },
+            vehicle: null,
+          },
+        ]),
+      },
+    } as unknown as PrismaService;
+    const shipments = {
+      expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }),
+    } as unknown as ShipmentsService;
+    const service = new DataService(prisma, shipments);
+
+    const [near, far] = await service.list('driver-jobs', 'driver-1', 'DRIVER') as Array<Record<string, unknown>>;
+
+    expect(near).toMatchObject({ queued: true, returnLoadEndsAt: 'Garki, Abuja' });
+    expect(near.returnLoadKm).toBeGreaterThan(9);
+    expect(near.returnLoadKm).toBeLessThan(12);
+    expect(far).toMatchObject({ queued: true });
+    expect(far.returnLoadKm).toBeUndefined();
+    expect(far.returnLoadEndsAt).toBeUndefined();
+  });
+
   it('excludes final shipments from accepted active trips', async () => {
     const findMany = jest.fn().mockResolvedValue([]);
     const prisma = { driverAssignment: { findMany } } as unknown as PrismaService;

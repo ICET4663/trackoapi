@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, InternalServerErro
 import { Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
+import { isReturnLoad, returnLoadDistanceKm } from '../shipments/return-load';
 
 export type DataCollection =
   | 'customer-shipments'
@@ -174,7 +175,10 @@ export class DataService {
                   status: 'ACCEPTED',
                   shipment: { status: { notIn: [...hiddenShipmentStatuses] } },
                 },
-                select: { shipmentId: true, shipment: { select: { reference: true } } },
+                select: {
+                  shipmentId: true,
+                  shipment: { select: { reference: true, destinationLabel: true, destinationLatitude: true, destinationLongitude: true } },
+                },
               })
             : null;
           return await this.prisma.driverAssignment.findMany({
@@ -187,6 +191,10 @@ export class DataService {
             orderBy: { offeredAt: 'desc' },
           }).then((assignments) => assignments.map((assignment) => {
             const queued = Boolean(activeDriverTrip && activeDriverTrip.shipmentId !== assignment.shipmentId);
+            // A queued load that starts near where the current trip ends: tell the driver it
+            // saves an empty drive back (same rule dispatch ranks by, see return-load.ts).
+            const returnDistanceKm = queued ? returnLoadDistanceKm(activeDriverTrip?.shipment, assignment.shipment) : null;
+            const returnLoad = isReturnLoad(returnDistanceKm);
             return {
             id: assignment.id,
             shipmentDbId: assignment.shipment.id,
@@ -203,6 +211,8 @@ export class DataService {
             expiresAt: queued ? undefined : new Date(assignment.offeredAt.getTime() + (offerWindow?.validityMinutes ?? 15) * 60_000).toISOString(),
             queued,
             queuedBehindShipment: queued ? activeDriverTrip?.shipment.reference : undefined,
+            returnLoadKm: returnLoad ? Math.round(returnDistanceKm! * 10) / 10 : undefined,
+            returnLoadEndsAt: returnLoad ? activeDriverTrip?.shipment.destinationLabel ?? undefined : undefined,
             proposedPriceKobo: assignment.proposedPriceKobo ?? null,
             proposedNote: assignment.proposedNote ?? null,
             proposedAt: assignment.proposedAt ? assignment.proposedAt.toISOString() : null,
