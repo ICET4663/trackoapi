@@ -7,6 +7,7 @@ import { isStoreReviewerAccount } from '../common/store-reviewer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ensurePlatformFeeColumn, splitCarrierAmount } from '../integrations/platform-commission';
 import { PrismaService } from '../prisma/prisma.service';
+import { returnLoadDistanceKm } from './return-load';
 import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
 import { UpdateShipmentStatusDto } from './dto/update-shipment-status.dto';
@@ -1296,7 +1297,10 @@ export class ShipmentsService {
               include: { documents: { select: { type: true, state: true, expires: true } } },
             },
             driverAssignments: {
-              select: { status: true, shipment: { select: { status: true } } },
+              select: {
+                status: true,
+                shipment: { select: { status: true, destinationLatitude: true, destinationLongitude: true } },
+              },
               orderBy: { offeredAt: 'desc' },
               take: 100,
             },
@@ -1349,10 +1353,16 @@ export class ShipmentsService {
             assignment.status === 'OFFERED'
             && !['COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
           ).length;
-          const acceptedTrips = driver.driverAssignments.filter((assignment) =>
+          const acceptedTripRows = driver.driverAssignments.filter((assignment) =>
             assignment.status === 'ACCEPTED'
             && !['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(assignment.shipment.status),
-          ).length;
+          );
+          const acceptedTrips = acceptedTripRows.length;
+          // A driver on a trip starts this load from where that trip ends, not from where they
+          // are now: measure from the trip's destination (a return load when it is close). Their
+          // live position is only the fallback when the trip has no map position.
+          const returnDistanceKm = returnLoadDistanceKm(acceptedTripRows[0]?.shipment, shipment);
+          const startDistanceKm = acceptedTrips > 0 && returnDistanceKm !== null ? returnDistanceKm : pickupDistanceKm;
           const completedTrips = driver.driverAssignments.filter((assignment) => assignment.shipment.status === 'COMPLETED').length;
           const reviews = driver.driverReviews ?? [];
           const averageRating = reviews.length
@@ -1366,19 +1376,19 @@ export class ShipmentsService {
           const capacityScore = Math.round(35 - Math.min(spareRatio * 12, 12));
           const ratingScore = averageRating === null ? 9 : Math.round((Math.min(5, averageRating) / 5) * 15);
           const experienceScore = Math.min(10, completedTrips * 2);
-          const proximityScore = pickupDistanceKm === null
+          const proximityScore = startDistanceKm === null
             ? 5
-            : pickupDistanceKm <= 10
+            : startDistanceKm <= 10
               ? 15
-              : pickupDistanceKm <= 25
+              : startDistanceKm <= 25
                 ? 12
-                : pickupDistanceKm <= 50
+                : startDistanceKm <= 50
                   ? 9
-                  : pickupDistanceKm <= 100
+                  : startDistanceKm <= 100
                     ? 5
                     : 1;
           const score = capacityScore + Math.max(5, 20 - acceptedTrips * 15) + ratingScore + experienceScore + 5 + proximityScore;
-          return { driver, vehicle, pendingOffers, acceptedTrips, pickupDistanceKm, score };
+          return { driver, vehicle, pendingOffers, acceptedTrips, pickupDistanceKm: startDistanceKm, score };
         })
         .filter((candidate) => Boolean(candidate.vehicle) && candidate.pendingOffers === 0)
         .sort((left, right) => {

@@ -4,6 +4,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ensurePlatformFeeColumn } from '../integrations/platform-commission';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
+import { isReturnLoad, returnLoadBonus, returnLoadDistanceKm } from '../shipments/return-load';
 import { customerStatusAlert, isForwardTripStep } from '../shipments/trip-status-rules';
 
 type OperationActor = {
@@ -51,7 +52,10 @@ type DriverMatchInput = {
   }>;
   driverAssignments: Array<{
     status: string;
-    shipment: { id: string; reference: string; status: string };
+    shipment: {
+      id: string; reference: string; status: string;
+      destinationLabel?: string | null; destinationLatitude?: number | null; destinationLongitude?: number | null;
+    };
   }>;
   driverReviews: Array<{ rating: number }>;
   lastKnownLatitude?: number | null;
@@ -195,7 +199,15 @@ export class OperationsService {
               include: { documents: { select: { type: true, state: true, expires: true } } },
             },
             driverAssignments: {
-              select: { status: true, shipment: { select: { id: true, reference: true, status: true } } },
+              select: {
+                status: true,
+                shipment: {
+                  select: {
+                    id: true, reference: true, status: true,
+                    destinationLabel: true, destinationLatitude: true, destinationLongitude: true,
+                  },
+                },
+              },
               orderBy: { offeredAt: 'desc' },
               take: 100,
             },
@@ -342,6 +354,19 @@ export class OperationsService {
         };
       }
       const activeReference = acceptedTrip?.shipment.reference;
+      const returnDistanceKm = returnLoadDistanceKm(acceptedTrip?.shipment, shipment);
+      if (activeReference && isReturnLoad(returnDistanceKm)) {
+        const endsAt = acceptedTrip?.shipment.destinationLabel ? ` (${acceptedTrip.shipment.destinationLabel})` : '';
+        return {
+          score: 20 + returnLoadBonus(returnDistanceKm),
+          eligible: true,
+          queued: true,
+          returnLoad: true,
+          returnLoadDistanceKm: Math.round(returnDistanceKm! * 10) / 10,
+          vehicleId: vehicle.id,
+          reason: `Return load: pickup is ${returnDistanceKm!.toFixed(1)} km from where ${activeReference} ends${endsAt}. Queue it after that trip so the truck does not drive back empty; the driver can message or negotiate now.`,
+        };
+      }
       return {
         score: 20,
         eligible: true,

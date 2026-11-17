@@ -610,3 +610,92 @@ describe('OperationsService.fraudSignals', () => {
   });
 });
 
+
+describe('OperationsService.assignmentQueue return loads', () => {
+  // New load picks up in Abuja; Lagos is about 530 km away.
+  function queueWith(tripEndsAt: { latitude: number | null; longitude: number | null }) {
+    const prisma = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([
+        {
+          id: 'shipment-abuja', reference: 'TRK-NEW', pickupLabel: 'Wuse, Abuja', destinationLabel: 'Kano',
+          pickupLatitude: 9.0765, pickupLongitude: 7.3986,
+          cargoDescription: 'Rice', cargoWeightKg: 8000, cargoVolumeM3: 20, status: 'ESCROW_FUNDED', quotedPriceKobo: 20_000_000,
+          escrowId: 'escrow-1', escrowStatus: 'FUNDED', escrowAmount: 20_000_000, escrowCurrency: 'NGN',
+          assignmentId: null, assignedDriverId: null, assignedVehicleId: null, assignmentStatus: null,
+          assignmentOfferedAt: null, rejectedDriverIds: [], createdAt: new Date('2026-11-17T09:00:00.000Z'),
+        },
+      ]),
+      user: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'driver-busy', email: 'busy@tracko.ng', phone: '+2342', verificationStatus: 'VERIFIED',
+            profile: { fullName: 'Busy Driver' },
+            driverVehicles: [{ id: 'truck-large', plateNumber: 'BIG-1', type: 'Box truck', capacityKg: 12000, capacityM3: 40, documents: verifiedDocuments }],
+            driverAssignments: [{
+              status: 'ACCEPTED',
+              shipment: {
+                id: 'active-1', reference: 'TRK-ACTIVE-1', status: 'IN_TRANSIT',
+                destinationLabel: 'Garki, Abuja', destinationLatitude: tripEndsAt.latitude, destinationLongitude: tripEndsAt.longitude,
+              },
+            }],
+            driverReviews: [],
+          },
+        ]),
+      },
+    };
+    const service = new OperationsService(
+      prisma as unknown as PrismaService,
+      {} as NotificationsService,
+      { expireStaleAssignmentOffers: jest.fn().mockResolvedValue({ expiredCount: 0, validityMinutes: 15 }) } as unknown as ShipmentsService,
+    );
+    return { service, prisma };
+  }
+
+  type Match = { score: number; eligible: boolean; queued?: boolean; returnLoad?: boolean; returnLoadDistanceKm?: number; reason: string };
+
+  it('marks a queued load as a return load when it starts near where the current trip ends', async () => {
+    const { service, prisma } = queueWith({ latitude: 9.0333, longitude: 7.4891 });
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+    const match = (queue.drivers[0].matches as Record<string, Match>)['shipment-abuja'];
+
+    expect(match).toMatchObject({ eligible: true, queued: true, returnLoad: true });
+    expect(match.returnLoadDistanceKm).toBeGreaterThan(9);
+    expect(match.returnLoadDistanceKm).toBeLessThan(12);
+    // 20 for a queued load plus 20 for ending 10-25 km away.
+    expect(match.score).toBe(40);
+    expect(match.reason).toContain('Return load: pickup is');
+    expect(match.reason).toContain('where TRK-ACTIVE-1 ends (Garki, Abuja)');
+    // The trip's destination is read for every driver assignment.
+    expect(prisma.user.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        driverAssignments: expect.objectContaining({
+          select: expect.objectContaining({
+            shipment: { select: expect.objectContaining({ destinationLatitude: true, destinationLongitude: true }) },
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('keeps an ordinary queued match when the current trip ends far away', async () => {
+    const { service } = queueWith({ latitude: 6.5244, longitude: 3.3792 });
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+    const match = (queue.drivers[0].matches as Record<string, Match>)['shipment-abuja'];
+
+    expect(match).toMatchObject({ score: 20, eligible: true, queued: true });
+    expect(match.returnLoad).toBeUndefined();
+    expect(match.reason).toContain('Queue this load after TRK-ACTIVE-1');
+  });
+
+  it('keeps an ordinary queued match when the current trip has no map position', async () => {
+    const { service } = queueWith({ latitude: null, longitude: null });
+
+    const queue = await service.assignmentQueue({ sub: 'dispatcher-1', role: 'DISPATCHER' });
+    const match = (queue.drivers[0].matches as Record<string, Match>)['shipment-abuja'];
+
+    expect(match).toMatchObject({ score: 20, queued: true });
+    expect(match.returnLoad).toBeUndefined();
+  });
+});

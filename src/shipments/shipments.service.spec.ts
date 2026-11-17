@@ -281,6 +281,97 @@ describe('ShipmentsService driver assignment offer expiry', () => {
     );
   });
 
+  describe('return loads', () => {
+    // New load picks up in Abuja. Lagos is about 530 km away.
+    const ABUJA = { latitude: 9.0765, longitude: 7.3986 };
+    const LAGOS = { latitude: 6.5244, longitude: 3.3792 };
+
+    function buildDispatch(drivers: Array<{ id: string; tripEndsAt?: { latitude: number; longitude: number }; gps: { latitude: number; longitude: number } }>) {
+      const now = new Date();
+      const prisma = {
+        platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '15' }) },
+        driverAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+        shipment: {
+          findUnique: jest.fn().mockResolvedValue({
+            cargoWeightKg: 8000, pickupLatitude: ABUJA.latitude, pickupLongitude: ABUJA.longitude,
+          }),
+        },
+        user: {
+          findMany: jest.fn().mockResolvedValue(drivers.map((driver) => ({
+            id: driver.id,
+            driverVehicles: [{ id: `vehicle-${driver.id}`, capacityKg: 10000, isActive: true, documents: verifiedDocuments }],
+            driverAssignments: driver.tripEndsAt
+              ? [{
+                  status: 'ACCEPTED',
+                  shipment: { status: 'IN_TRANSIT', destinationLatitude: driver.tripEndsAt.latitude, destinationLongitude: driver.tripEndsAt.longitude },
+                }]
+              : [],
+          }))),
+        },
+        $queryRawUnsafe: jest.fn().mockResolvedValue(drivers.map((driver) => ({
+          userId: driver.id, availableForAssignments: true,
+          lastKnownLatitude: driver.gps.latitude, lastKnownLongitude: driver.gps.longitude, locationUpdatedAt: now,
+        }))),
+      } as unknown as PrismaService;
+      const service = new ShipmentsService(
+        prisma,
+        { create: jest.fn().mockResolvedValue(undefined) } as unknown as NotificationsService,
+        {} as MapsProviderService,
+      );
+      service.offerAssignment = jest.fn().mockResolvedValue({ id: 'assignment-new' }) as never;
+      return service;
+    }
+
+    it('offers a busy driver the load that starts where their trip ends, not the one near them now', async () => {
+      const service = buildDispatch([
+        // Near the Abuja pickup right now, but heading to Lagos.
+        { id: 'driver-leaving', gps: { latitude: 9.05, longitude: 7.42 }, tripEndsAt: LAGOS },
+        // In Lagos right now, but delivering 3 km from the Abuja pickup.
+        { id: 'driver-returning', gps: LAGOS, tripEndsAt: { latitude: 9.1, longitude: 7.41 } },
+      ]);
+
+      await service.autoDispatch('shipment-1');
+
+      expect(service.offerAssignment).toHaveBeenCalledWith(
+        'shipment-1',
+        { driverId: 'driver-returning', vehicleId: 'vehicle-driver-returning' },
+        'DISPATCHER',
+      );
+    });
+
+    it('still offers a free driver first, ahead of a return load', async () => {
+      const service = buildDispatch([
+        { id: 'driver-returning', gps: LAGOS, tripEndsAt: { latitude: 9.1, longitude: 7.41 } },
+        { id: 'driver-free', gps: LAGOS },
+      ]);
+
+      await service.autoDispatch('shipment-1');
+
+      expect(service.offerAssignment).toHaveBeenCalledWith(
+        'shipment-1',
+        { driverId: 'driver-free', vehicleId: 'vehicle-driver-free' },
+        'DISPATCHER',
+      );
+    });
+
+    it('falls back to the driver\'s live position when the current trip has no map position', async () => {
+      const service = buildDispatch([
+        // Trip ends in Lagos: far from the Abuja pickup.
+        { id: 'driver-to-lagos', gps: LAGOS, tripEndsAt: LAGOS },
+        // Trip end unknown (no coordinates), so their live position near Abuja counts.
+        { id: 'driver-unknown-end', gps: { latitude: 9.05, longitude: 7.42 }, tripEndsAt: { latitude: Number.NaN, longitude: Number.NaN } },
+      ]);
+
+      await service.autoDispatch('shipment-1');
+
+      expect(service.offerAssignment).toHaveBeenCalledWith(
+        'shipment-1',
+        { driverId: 'driver-unknown-end', vehicleId: 'vehicle-driver-unknown-end' },
+        'DISPATCHER',
+      );
+    });
+  });
+
   it('keeps a queued offer open while the driver is completing another trip', async () => {
     const { service, prisma } = buildService();
     (prisma.driverAssignment.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'active-assignment' });
