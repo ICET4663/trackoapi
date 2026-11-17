@@ -5,13 +5,14 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { TrackingModule } from '../tracking/tracking.module';
 import { CronController } from './cron.controller';
+import { DispatchSweepService } from './dispatch-sweep.service';
 import { ShipmentsController } from './shipments.controller';
 import { ShipmentsService } from './shipments.service';
 
 @Module({
   imports: [PrismaModule, RequestUserModule, NotificationsModule, IntegrationsModule, TrackingModule],
   controllers: [ShipmentsController, CronController],
-  providers: [ShipmentsService],
-  exports: [ShipmentsService],
+  providers: [ShipmentsService, DispatchSweepService],
+  exports: [ShipmentsService, DispatchSweepService],
 })
 export class ShipmentsModule {}

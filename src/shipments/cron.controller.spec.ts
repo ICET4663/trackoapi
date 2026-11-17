@@ -5,8 +5,10 @@ import type { TrackingService } from '../tracking/tracking.service';
 import type { ConfigService } from '@nestjs/config';
 import type { PaymentReconciliationService } from '../integrations/payment-reconciliation.service';
 import type { PaymentProviderService } from '../integrations/payment-provider.service';
+import type { PrismaService } from '../prisma/prisma.service';
+import { DispatchSweepService } from './dispatch-sweep.service';
 
-const noPayments = {} as PaymentProviderService;
+const noSweep = {} as DispatchSweepService;
 
 const idleReconciliation = () => ({ runScheduled: jest.fn().mockResolvedValue({ skipped: 'Runs on Mondays.' }) }) as unknown as PaymentReconciliationService;
 
@@ -25,7 +27,7 @@ describe('CronController.autoReleaseEscrow requires a real CRON_SECRET', () => {
     const config = { get: () => configuredSecret } as unknown as ConfigService;
     const runScheduled = jest.fn().mockResolvedValue({ skipped: 'Runs on Mondays.' });
     const reconciliation = { runScheduled } as unknown as PaymentReconciliationService;
-    return { controller: new CronController(shipments, tracking, config, reconciliation, noPayments), autoReleaseEligibleEscrows, expireStaleAssignmentOffers, matchWaitingShipments, purgeExpiredLocationHistory, runScheduled };
+    return { controller: new CronController(shipments, tracking, config, reconciliation, noSweep), autoReleaseEligibleEscrows, expireStaleAssignmentOffers, matchWaitingShipments, purgeExpiredLocationHistory, runScheduled };
   }
 
   it('refuses the request outright when CRON_SECRET is not configured at all', async () => {
@@ -111,7 +113,9 @@ describe('CronController.dispatchSweep', () => {
     const confirmRecentPendingPayments = jest.fn(async () => { calls.push('payments'); return { checked: 1, funded: ['s1'], failed: 0 }; });
     const payments = { confirmRecentPendingPayments } as unknown as PaymentProviderService;
     const config = { get: () => configuredSecret } as unknown as ConfigService;
-    return { controller: new CronController(shipments, {} as TrackingService, config, idleReconciliation(), payments), calls, expireStaleAssignmentOffers, matchWaitingShipments, confirmRecentPendingPayments };
+    const prisma = { $executeRawUnsafe: jest.fn().mockResolvedValue(1) } as unknown as PrismaService;
+    const sweep = new DispatchSweepService(shipments, payments, prisma);
+    return { controller: new CronController(shipments, {} as TrackingService, config, idleReconciliation(), sweep), calls, expireStaleAssignmentOffers, matchWaitingShipments, confirmRecentPendingPayments };
   }
 
   it('refuses a missing secret, a missing token and a wrong token', async () => {
@@ -165,7 +169,7 @@ describe('CronController daily run offers waiting shipments', () => {
       { purgeExpiredLocationHistory: jest.fn().mockResolvedValue({}) } as unknown as TrackingService,
       { get: () => 'the-real-secret' } as unknown as ConfigService,
       idleReconciliation(),
-      noPayments,
+      noSweep,
     );
 
     const result = await controller.autoReleaseEscrow('Bearer the-real-secret');

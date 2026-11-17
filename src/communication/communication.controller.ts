@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Optional, Param, Post } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
+import { DispatchSweepService } from '../shipments/dispatch-sweep.service';
 import { CommunicationService } from './communication.service';
 import { RegisterPushTokenDto } from './dto/register-push-token.dto';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -11,6 +12,8 @@ export class CommunicationController {
   constructor(
     private readonly communicationService: CommunicationService,
     private readonly requestUser: RequestUserService,
+    // Optional so tests and older wiring can build the controller without it.
+    @Optional() private readonly dispatchSweep?: DispatchSweepService,
   ) {}
 
   // Conversations are scoped to their two participants (customerId/driverId on the
@@ -21,7 +24,14 @@ export class CommunicationController {
   @Get('conversations')
   async listConversations(@Headers('authorization') authorization?: string) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization);
-    return this.communicationService.listConversations(user);
+    // Every open app asks for this every few seconds, so it is also what keeps the dispatch
+    // sweep running every 5 minutes (at most once across all servers; see DispatchSweepService).
+    // The inbox is a background poll, so nobody waits on the sweep, and it never fails the list.
+    const [conversations] = await Promise.all([
+      this.communicationService.listConversations(user),
+      this.dispatchSweep?.runIfDue() ?? Promise.resolve(false),
+    ]);
+    return conversations;
   }
 
   // Gets (or lazily creates) the single conversation thread for a shipment, scoped to

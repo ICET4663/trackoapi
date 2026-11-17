@@ -2,9 +2,9 @@ import { Controller, ForbiddenException, Get, Headers } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { Public } from '../common/decorators/public.decorator';
-import { PaymentProviderService } from '../integrations/payment-provider.service';
 import { PaymentReconciliationService } from '../integrations/payment-reconciliation.service';
 import { TrackingService } from '../tracking/tracking.service';
+import { DispatchSweepService } from './dispatch-sweep.service';
 import { ShipmentsService } from './shipments.service';
 
 // Scheduled/system endpoints - never called by any client, only by Vercel Cron (see
@@ -18,7 +18,7 @@ export class CronController {
     private readonly tracking: TrackingService,
     private readonly config: ConfigService,
     private readonly reconciliation: PaymentReconciliationService,
-    private readonly payments: PaymentProviderService,
+    private readonly sweep: DispatchSweepService,
   ) {}
 
   @Get('escrow-auto-release')
@@ -42,20 +42,14 @@ export class CronController {
     return { escrow, assignments, matching, locationRetention, paymentReconciliation, ranAt: new Date().toISOString() };
   }
 
-  // Every few minutes (GitHub Actions `dispatch-sweep.yml`; Vercel Hobby cron is daily only):
-  // expire unanswered offers so they pass to the next driver, then offer waiting shipments.
+  // Every few minutes (GitHub Actions `dispatch-sweep.yml`, the Supabase scheduler when set up;
+  // Vercel Hobby cron is daily only). App traffic also starts it: see DispatchSweepService.
   @Get('dispatch-sweep')
   @Public()
   async dispatchSweep(@Headers('authorization') authorization?: string) {
     this.assertScheduledJob(authorization);
 
-    // Fund paid checkouts whose customer never returned and whose webhook never arrived, before
-    // matching, so a shipment funded here is offered to drivers in this same run. Never breaks the sweep.
-    const pendingPayments = await this.payments.confirmRecentPendingPayments()
-      .catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
-    const assignments = await this.shipments.expireStaleAssignmentOffers();
-    const matching = await this.shipments.matchWaitingShipments();
-    return { pendingPayments, assignments, matching, ranAt: new Date().toISOString() };
+    return this.sweep.run();
   }
 
   private assertScheduledJob(authorization?: string) {

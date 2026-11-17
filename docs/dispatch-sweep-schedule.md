@@ -17,6 +17,18 @@ What that means in practice:
 | Fund a paid checkout whose customer never returned | The Paystack webhook, if its URL is set in the Paystack dashboard | About 10 hours |
 | Offer a waiting shipment to a driver who became free | A driver switching availability on | Hours |
 
+## Already in place: app traffic starts the sweep (17 Nov 2026)
+
+Every signed-in app asks for its conversation list (`GET /v1/conversations`) every few seconds while it is
+open. That request now also starts the sweep when nobody has run it for 5 minutes (`DispatchSweepService.runIfDue`):
+one database claim on the internal `PlatformSetting` row `dispatchSweepLastRunAt` makes sure only one server runs it
+per 5 minutes, each server checks that row at most once a minute, and the inbox answers even if the sweep fails.
+Only signed-in requests start it.
+
+So while anyone is using Trako, the sweep runs about every 5 minutes. When nobody has the app open (at night, say)
+it still depends on the schedulers below, which matters mostly for a paid checkout whose customer never came back
+and whose Paystack webhook did not arrive. The Supabase scheduler is still recommended.
+
 ## Fix: Supabase scheduler (pg_cron + pg_net)
 
 The production database is on Supabase, which can call a URL on a schedule. Two schedulers calling the
