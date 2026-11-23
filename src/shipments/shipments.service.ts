@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { AssignmentStatus, Prisma, ShipmentStatus, UserRole } from '@prisma/client';
+import { AssignmentStatus, Prisma, Shipment, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { PaymentProviderService } from '../integrations/payment-provider.service';
@@ -7,6 +7,7 @@ import { isStoreReviewerAccount } from '../common/store-reviewer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ensurePlatformFeeColumn, splitCarrierAmount } from '../integrations/platform-commission';
 import { PrismaService } from '../prisma/prisma.service';
+import { jobBoardMinutes, shipmentsAwaitingCustomerChoice } from './job-board-store';
 import { returnLoadDistanceKm } from './return-load';
 import { customerStatusAlert, DRIVER_TRIP_STEPS } from './trip-status-rules';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
@@ -122,6 +123,9 @@ export class ShipmentsService {
     // Optional so specs and scripts that build the service by hand keep working.
     @Optional() private readonly paymentProvider?: PaymentProviderService,
   ) {}
+
+  /** Set by JobBoardService: tells eligible free drivers that a load was posted to the job board. */
+  onLoadPosted?: (shipmentId: string) => Promise<unknown>;
 
   async create(customerId: string, dto: CreateShipmentDto) {
     await this.assertNotInMaintenanceMode();
@@ -667,7 +671,17 @@ export class ShipmentsService {
     await this.expireStaleAssignmentOffers(shipmentId);
     const driverId = body.driverId;
     if (!driverId) throw new BadRequestException('A driver must be selected for this assignment.');
+    const { shipment, vehicle } = await this.checkAssignmentEligibility(shipmentId, driverId, body.vehicleId);
+    return this.createAssignmentOffer(shipment, driverId, vehicle.id);
+  }
 
+  /**
+   * Every rule a driver and truck must meet before they can be given a shipment: admin approval,
+   * funded escrow, a verified active driver who is online, no other open offer on either side,
+   * and a truck with current documents and room for the cargo. Dispatch offers and the job
+   * board (a customer choosing a driver) both go through here, so the two can never disagree.
+   */
+  async checkAssignmentEligibility(shipmentId: string, driverId: string, vehicleId?: string) {
     let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows;
     try {
       [shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows] = await Promise.all([
@@ -708,7 +722,7 @@ export class ShipmentsService {
       // Used to fall back to a fabricated "OFFERED" assignment on ANY failure of these
       // reads - before even checking whether the driver/vehicle were eligible, dispatch
       // could see "Assignment offered!" when nothing was queried or written at all.
-      this.logger.error(`offerAssignment(${shipmentId}, driver ${driverId}) failed to load eligibility data: ${this.errorMessage(error)}`);
+      this.logger.error(`checkAssignmentEligibility(${shipmentId}, driver ${driverId}) failed to load eligibility data: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException('Could not check assignment eligibility. Please try again.');
     }
 
@@ -745,8 +759,8 @@ export class ShipmentsService {
       .filter((vehicle) => !cargoWeightKg || (vehicle.capacityKg ?? 0) >= cargoWeightKg)
       .filter((vehicle) => !cargoVolumeM3 || (vehicle.capacityM3 ?? 0) >= cargoVolumeM3)
       .sort((left, right) => (left.capacityKg ?? 0) - (right.capacityKg ?? 0));
-    const selectedVehicle = body.vehicleId
-      ? driver.driverVehicles.find((vehicle) => vehicle.id === body.vehicleId)
+    const selectedVehicle = vehicleId
+      ? driver.driverVehicles.find((vehicle) => vehicle.id === vehicleId)
       : eligibleVehicles[0];
     if (!selectedVehicle) {
       throw new BadRequestException('This driver has no active truck available for the shipment.');
@@ -760,12 +774,16 @@ export class ShipmentsService {
     if (!this.isVehicleAssignmentReady(selectedVehicle)) {
       throw new BadRequestException('The selected truck cannot receive loads until registration, insurance, and roadworthiness documents are verified and current.');
     }
+    return { shipment, vehicle: selectedVehicle };
+  }
 
+  private async createAssignmentOffer(shipment: Shipment, driverId: string, vehicleId: string) {
+    const shipmentId = shipment.id;
     const assignment = await this.prisma.driverAssignment.create({
       data: {
         shipmentId,
         driverId,
-        vehicleId: selectedVehicle.id,
+        vehicleId,
         status: 'OFFERED',
       },
       include: {
@@ -1439,7 +1457,7 @@ export class ShipmentsService {
     return 6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
   }
 
-  private isVehicleAssignmentReady(vehicle: { documents?: Array<{ type: string; state: string; expires: Date | string | null }> }) {
+  isVehicleAssignmentReady(vehicle: { documents?: Array<{ type: string; state: string; expires: Date | string | null }> }) {
     const required = ['REGISTRATION', 'INSURANCE', 'ROADWORTHINESS'];
     const now = Date.now();
     const documents = vehicle.documents ?? [];
@@ -1607,10 +1625,18 @@ export class ShipmentsService {
       preferenceKey: 'driverOffers',
     });
 
-    // Matching starts the moment the shipment is cleared; approval never fails because of it.
-    await this.autoDispatch(shipmentId).catch((error: unknown) => {
-      this.logger.error(`autoDispatch(${shipmentId}) after approval failed: ${this.errorMessage(error)}`);
-    });
+    // Job board first: free drivers are told and can ask for the load; the dispatch sweep offers
+    // it to the nearest driver once the board time has passed. With the board set to 0 minutes,
+    // matching starts the moment the shipment is cleared. Approval never fails because of either.
+    if (await jobBoardMinutes(this.prisma) > 0) {
+      await Promise.resolve(this.onLoadPosted?.(shipmentId)).catch((error: unknown) => {
+        this.logger.error(`Announcing ${shipmentId} on the job board failed: ${this.errorMessage(error)}`);
+      });
+    } else {
+      await this.autoDispatch(shipmentId).catch((error: unknown) => {
+        this.logger.error(`autoDispatch(${shipmentId}) after approval failed: ${this.errorMessage(error)}`);
+      });
+    }
 
     return this.toShipmentRecord(updated, { escrow: shipment.escrow });
   }
@@ -1634,7 +1660,7 @@ export class ShipmentsService {
         escrow: { is: { status: { in: ['FUNDED', 'HELD', 'RELEASE_READY'] } } },
         assignments: { none: { status: { in: ['OFFERED', 'ACCEPTED'] } } },
       },
-      select: { id: true },
+      select: { id: true, adminApprovedAt: true },
       orderBy: { adminApprovedAt: 'asc' },
       take: limit,
     }).catch((error: unknown) => {
@@ -1642,12 +1668,25 @@ export class ShipmentsService {
       return [];
     });
 
+    // Job board first (job-board-store.ts): a newly approved load waits on the board for
+    // its head start, and a load a driver has asked for waits for the customer's choice.
+    const boardCutoff = Date.now() - (await jobBoardMinutes(this.prisma)) * 60_000;
+    const pastBoard = waiting.filter((shipment) => !shipment.adminApprovedAt || shipment.adminApprovedAt.getTime() <= boardCutoff);
+    const awaitingCustomer = await shipmentsAwaitingCustomerChoice(this.prisma, pastBoard.map((shipment) => shipment.id))
+      .catch((error: unknown) => {
+        this.logger.warn(`Could not read job board requests: ${this.errorMessage(error)}`);
+        return new Set<string>();
+      });
+    const due = pastBoard.filter((shipment) => !awaitingCustomer.has(shipment.id));
+
     // One at a time: a driver with an open offer is skipped, so each driver gets one load.
     let offered = 0;
-    for (const shipment of waiting) {
+    for (const shipment of due) {
       if (await this.offerNextEligibleDriver(shipment.id)) offered += 1;
+      // Nobody on the board and no free driver: dispatch hears once (onceOnly), as at approval.
+      else if (shipment.adminApprovedAt) await this.notifyNoDriverAvailable(shipment.id);
     }
-    return { waiting: waiting.length, offered };
+    return { waiting: waiting.length, onJobBoard: waiting.length - due.length, offered };
   }
 
   // Driver availability pings arrive often; one sweep per instance every 30 seconds is enough.

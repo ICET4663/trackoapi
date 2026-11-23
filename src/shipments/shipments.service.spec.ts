@@ -1230,17 +1230,30 @@ describe('ShipmentsService automatic dispatch', () => {
     adminApproved: false, escrow: { id: 'escrow-1', amount: 500000, currency: 'NGN', status: 'FUNDED' }, timeline: [],
   };
 
-  function approvalService() {
+  function approvalService(boardMinutes = '0') {
     const prisma = {
       shipment: {
         findUnique: jest.fn().mockResolvedValue(approvable),
         update: jest.fn().mockResolvedValue({ ...approvable, adminApproved: true }),
       },
+      // Job board turned off (0 minutes): approval offers the load at once, as before the board.
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: boardMinutes }) },
     } as unknown as PrismaService;
     const create = jest.fn().mockResolvedValue({ id: 'notification-1' });
     const service = new ShipmentsService(prisma, { create } as unknown as NotificationsService, {} as MapsProviderService);
     return { service, create };
   }
+
+  it('posts the load to the job board instead of offering it when the board is on', async () => {
+    const { service } = approvalService('10');
+    const offer = jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue(null as never);
+    service.onLoadPosted = jest.fn().mockResolvedValue({ notified: 3 });
+
+    await expect(service.approveShipment('shipment-1', 'admin-1', 'ADMIN')).resolves.toMatchObject({ id: 'shipment-1' });
+
+    expect(service.onLoadPosted).toHaveBeenCalledWith('shipment-1');
+    expect(offer).not.toHaveBeenCalled();
+  });
 
   it('offers the shipment to the best driver as soon as an admin approves it', async () => {
     const { service } = approvalService();
@@ -1318,7 +1331,7 @@ describe('ShipmentsService automatic dispatch', () => {
       .mockResolvedValueOnce({ id: 'assignment-a' } as never)
       .mockResolvedValueOnce(null as never);
 
-    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 2, offered: 1 });
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 2, onJobBoard: 0, offered: 1 });
 
     expect(offer.mock.calls).toEqual([['shipment-a'], ['shipment-b']]);
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -1334,12 +1347,49 @@ describe('ShipmentsService automatic dispatch', () => {
     const findMany = jest.fn().mockRejectedValue(new Error('db busy'));
     const service = new ShipmentsService({ shipment: { findMany } } as unknown as PrismaService, {} as NotificationsService, {} as MapsProviderService);
 
-    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 0, offered: 0 });
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 0, onJobBoard: 0, offered: 0 });
+  });
+
+  it('leaves a newly approved load on the job board for its head start', async () => {
+    const now = Date.now();
+    const findMany = jest.fn().mockResolvedValue([
+      { id: 'old', adminApprovedAt: new Date(now - 30 * 60_000) },
+      { id: 'new', adminApprovedAt: new Date(now - 2 * 60_000) },
+    ]);
+    const prisma = {
+      shipment: { findMany },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    const offer = jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue({ id: 'a' } as never);
+
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 2, onJobBoard: 1, offered: 1 });
+    expect(offer.mock.calls).toEqual([['old']]);
+  });
+
+  it('holds automatic dispatch while a driver request waits for the customer', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      { id: 'asked', adminApprovedAt: new Date(Date.now() - 30 * 60_000) },
+      { id: 'quiet', adminApprovedAt: new Date(Date.now() - 30 * 60_000) },
+    ]);
+    const prisma = {
+      shipment: { findMany },
+      platformSetting: { findUnique: jest.fn().mockResolvedValue({ value: '10' }) },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ shipmentId: 'asked' }]),
+    } as unknown as PrismaService;
+    const service = new ShipmentsService(prisma, {} as NotificationsService, {} as MapsProviderService);
+    const offer = jest.spyOn(service as never, 'offerNextEligibleDriver' as never).mockResolvedValue({ id: 'a' } as never);
+
+    await expect(service.matchWaitingShipments()).resolves.toEqual({ waiting: 2, onJobBoard: 1, offered: 1 });
+    expect(offer.mock.calls).toEqual([['quiet']]);
   });
 
   it('runs the driver-online sweep at most once every 30 seconds', async () => {
     const service = new ShipmentsService({} as PrismaService, {} as NotificationsService, {} as MapsProviderService);
-    const sweep = jest.spyOn(service, 'matchWaitingShipments').mockResolvedValue({ waiting: 0, offered: 0 });
+    const sweep = jest.spyOn(service, 'matchWaitingShipments').mockResolvedValue({ waiting: 0, onJobBoard: 0, offered: 0 });
 
     await service.matchWaitingShipmentsSoon();
     await service.matchWaitingShipmentsSoon();
