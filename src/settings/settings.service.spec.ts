@@ -453,6 +453,21 @@ describe('SettingsService platform settings are actually persisted', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  it('lets an admin set the job board time, shown in minutes and Off at 0', async () => {
+    const defaults = await service.platformSettings();
+    expect(defaults.find((entry) => entry.key === 'jobBoardMinutes')).toMatchObject({ value: '10', displayValue: '10 minutes', type: 'number' });
+
+    await expect(service.updatePlatformSetting('jobBoardMinutes', '30', 'admin-1')).resolves.toMatchObject({ value: '30', displayValue: '30 minutes' });
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { key: 'jobBoardMinutes' }, update: { value: '30', updatedById: 'admin-1' } }));
+    await expect(service.updatePlatformSetting('jobBoardMinutes', '0', 'admin-1')).resolves.toMatchObject({ value: '0', displayValue: 'Off' });
+  });
+
+  it('refuses a job board time outside 0-120 minutes', async () => {
+    await expect(service.updatePlatformSetting('jobBoardMinutes', '121', 'admin-1')).rejects.toThrow('must not exceed 120');
+    await expect(service.updatePlatformSetting('jobBoardMinutes', '-5', 'admin-1')).rejects.toThrow('must be at least 0');
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
   it('throws a real error instead of a fake success when the write fails', async () => {
     upsert.mockRejectedValue(new Error('connection reset'));
 
