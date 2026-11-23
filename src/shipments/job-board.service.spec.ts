@@ -123,6 +123,49 @@ describe('JobBoardService', () => {
         where: expect.objectContaining({ assignments: { none: { status: { in: ['OFFERED', 'ACCEPTED'] } } } }),
       }));
     });
+
+    it('shows unpaid and awaiting-approval loads too, tagged, measured from the phone position', async () => {
+      const findMany = jest.fn().mockResolvedValue([
+        shipmentRow({ id: 'paid', reference: 'TRK-PAID', pickupLatitude: 9.0, pickupLongitude: 7.4 }),
+        shipmentRow({ id: 'unpaid', reference: 'TRK-UNPAID', status: 'PENDING_PAYMENT', adminApproved: false, adminApprovedAt: null, pickupLatitude: 9.06, pickupLongitude: 7.49 }),
+        shipmentRow({ id: 'checking', reference: 'TRK-CHECK', adminApproved: false, adminApprovedAt: null, pickupLatitude: 6.6, pickupLongitude: 3.35 }),
+      ]);
+      const { service } = build({
+        user: { findUnique: jest.fn().mockResolvedValue(verifiedDriver) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        shipment: { findMany },
+        $queryRawUnsafe: rawRouter([['from "SafetySettings"', [{ availableForAssignments: true }]]]),
+      });
+
+      // The phone is in Abuja; the driver has no stored trip position.
+      const result = await service.listForDriver('driver-1', { latitude: 9.07, longitude: 7.48 });
+
+      expect(result.position).toEqual({ latitude: 9.07, longitude: 7.48 });
+      expect(result.loads.map((load) => [load.shipmentId, load.boardStatus, load.paid])).toEqual([
+        ['TRK-UNPAID', 'AWAITING_PAYMENT', false],
+        ['TRK-PAID', 'READY', true],
+        ['TRK-CHECK', 'AWAITING_APPROVAL', true],
+      ]);
+      expect(result.loads[0].pickupKm).toBeLessThan(3);
+      const where = findMany.mock.calls[0][0].where;
+      expect(where.OR).toEqual([
+        { status: 'ESCROW_FUNDED', escrow: { is: { status: { in: ['FUNDED', 'HELD', 'RELEASE_READY'] } } } },
+        { status: { in: ['DRAFT', 'QUOTED', 'PENDING_PAYMENT'] }, createdAt: { gte: expect.any(Date) } },
+      ]);
+      expect(where.adminApproved).toBeUndefined();
+    });
+
+    it('ignores a nonsense phone position', async () => {
+      const { service } = build({
+        user: { findUnique: jest.fn().mockResolvedValue(verifiedDriver) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        shipment: { findMany: jest.fn().mockResolvedValue([shipmentRow()]) },
+      });
+
+      const result = await service.listForDriver('driver-1', { latitude: Number.NaN, longitude: 400 });
+      expect(result.position).toBeNull();
+      expect(result.loads[0].pickupKm).toBeNull();
+    });
   });
 
   describe('request', () => {
@@ -148,11 +191,42 @@ describe('JobBoardService', () => {
       });
 
       await expect(service.request('driver-1', 'TRK-1')).resolves.toEqual({ requestId: 'req-1', status: 'PENDING' });
-      expect(shipments.checkAssignmentEligibility).toHaveBeenCalledWith('ship-1', 'driver-1');
+      expect(shipments.checkAssignmentEligibility).toHaveBeenCalledWith('ship-1', 'driver-1', undefined, { beforePayment: false });
       expect(notify).toHaveBeenCalledWith(expect.objectContaining({
         userId: 'customer-1',
         body: expect.stringContaining('Musa B. asked to carry TRK-1'),
       }));
+    });
+
+    it('lets a driver ask for an unpaid load, checking the driver rules but not payment', async () => {
+      const { service, notify, shipments } = build({
+        shipment: { findFirst: jest.fn().mockResolvedValue(shipmentRow({ status: 'PENDING_PAYMENT', adminApproved: false })) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        user: {
+          findUnique: jest.fn()
+            .mockResolvedValueOnce({ id: 'driver-1', email: 'driver@example.com', profile: { fullName: 'Musa Bello' } })
+            .mockResolvedValueOnce({ email: 'customer@example.com' }),
+        },
+        $queryRawUnsafe: rawRouter([['insert into "JobRequest"', [{ id: 'req-2' }]]]),
+      });
+
+      await expect(service.request('driver-1', 'TRK-1')).resolves.toEqual({ requestId: 'req-2', status: 'PENDING' });
+      expect(shipments.checkAssignmentEligibility).toHaveBeenCalledWith('ship-1', 'driver-1', undefined, { beforePayment: true });
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({
+        userId: 'customer-1',
+        body: expect.stringContaining('Pay for the shipment, then choose your driver'),
+      }));
+    });
+
+    it('refuses a load that was cancelled or already has a driver', async () => {
+      const { service, shipments } = build({
+        shipment: { findFirst: jest.fn().mockResolvedValue(shipmentRow({ status: 'CANCELLED' })) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        user: { findUnique: jest.fn().mockResolvedValue({ id: 'driver-1', email: 'driver@example.com' }) },
+      });
+
+      await expect(service.request('driver-1', 'TRK-1')).rejects.toThrow('no longer on the job board');
+      expect(shipments.checkAssignmentEligibility).not.toHaveBeenCalled();
     });
 
     it('does not let a driver ask again after the customer declined', async () => {
@@ -227,6 +301,26 @@ describe('JobBoardService', () => {
 
       await expect(service.approve('req-1', 'customer-1', 'CUSTOMER')).rejects.toBeInstanceOf(ConflictException);
       expect(execute).toHaveBeenCalledWith(expect.stringContaining('"status" = \'PENDING\''), 'req-1');
+    });
+
+    it('makes the customer pay (and an admin approve) before any driver gets the load', async () => {
+      for (const [overrides, message] of [
+        [{ status: 'PENDING_PAYMENT', adminApproved: false }, 'Pay for this shipment first'],
+        [{ status: 'DRAFT', adminApproved: false }, 'Pay for this shipment first'],
+        [{ status: 'ESCROW_FUNDED', adminApproved: false }, 'as soon as it is approved'],
+      ] as const) {
+        const create = jest.fn();
+        const { service, shipments } = build({
+          shipment: { findFirst: jest.fn().mockResolvedValue(shipmentRow(overrides)) },
+          driverAssignment: { findFirst: jest.fn().mockResolvedValue(null), create },
+          $queryRawUnsafe: rawRouter([['from "JobRequest" where "id"', [pendingRequest]]]),
+        });
+
+        await expect(service.approve('req-1', 'customer-1', 'CUSTOMER')).rejects.toThrow(message);
+        await expect(service.approve('req-1', 'dispatch-1', 'DISPATCHER')).rejects.toThrow(message);
+        expect(create).not.toHaveBeenCalled();
+        expect(shipments.checkAssignmentEligibility).not.toHaveBeenCalled();
+      }
     });
 
     it('refuses a driver who has started another trip since asking', async () => {

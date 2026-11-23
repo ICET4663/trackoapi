@@ -680,8 +680,15 @@ export class ShipmentsService {
    * funded escrow, a verified active driver who is online, no other open offer on either side,
    * and a truck with current documents and room for the cargo. Dispatch offers and the job
    * board (a customer choosing a driver) both go through here, so the two can never disagree.
+   * `beforePayment` is only for a driver ASKING for a load on the job board: it skips the
+   * approval and escrow rules (the customer must still pay before choosing), never the driver ones.
    */
-  async checkAssignmentEligibility(shipmentId: string, driverId: string, vehicleId?: string) {
+  async checkAssignmentEligibility(
+    shipmentId: string,
+    driverId: string,
+    vehicleId?: string,
+    options: { beforePayment?: boolean } = {},
+  ) {
     let shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows;
     try {
       [shipment, escrowRows, driver, activeShipmentAssignment, activeDriverAssignment, availabilityRows] = await Promise.all([
@@ -730,12 +737,14 @@ export class ShipmentsService {
     // fake "assignment created" response (as this used to do) would tell dispatch an
     // assignment succeeded when nothing was actually written to the database.
     if (!shipment) throw new NotFoundException('Shipment not found.');
-    if (!shipment.adminApproved) {
-      throw new BadRequestException('This shipment has not been approved by an admin yet.');
-    }
-    const escrow = escrowRows[0];
-    if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
-      throw new BadRequestException('Escrow must be funded before assigning a driver.');
+    if (!options.beforePayment) {
+      if (!shipment.adminApproved) {
+        throw new BadRequestException('This shipment has not been approved by an admin yet.');
+      }
+      const escrow = escrowRows[0];
+      if (!escrow || !['FUNDED', 'HELD', 'RELEASE_READY'].includes(escrow.status)) {
+        throw new BadRequestException('Escrow must be funded before assigning a driver.');
+      }
     }
     if (!driver || driver.role !== 'DRIVER' || !driver.isActive || driver.verificationStatus !== 'VERIFIED') {
       throw new BadRequestException('Only KYC-approved active drivers can receive shipment assignments.');

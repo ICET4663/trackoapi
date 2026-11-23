@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, Param, Post } from '@nestjs/common';
+import { Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
 import { JobBoardService } from './job-board.service';
 
@@ -11,9 +11,18 @@ export class JobBoardController {
   ) {}
 
   @Get()
-  async list(@Headers('authorization') authorization?: string) {
+  async list(
+    @Headers('authorization') authorization?: string,
+    @Query('lat') lat?: string,
+    @Query('lng') lng?: string,
+  ) {
     const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
-    return this.jobBoard.listForDriver(user.sub);
+    // Optional: the phone's current position, so "km to pickup" works before any trip GPS exists.
+    // Only used to sort this driver's own board; it is not stored.
+    const near = lat !== undefined && lng !== undefined && lat !== '' && lng !== ''
+      ? { latitude: Number(lat), longitude: Number(lng) }
+      : null;
+    return this.jobBoard.listForDriver(user.sub, near);
   }
 
   @Post(':shipmentId/request')

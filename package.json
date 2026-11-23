@@ -28,6 +28,7 @@
     "smoke:settlement": "node scripts/smoke-settlement.js",
     "smoke:workflow": "node scripts/smoke-workflow.js",
     "simulate:trip": "node scripts/simulate-trip.js",
+    "simulate:job-board": "node scripts/simulate-job-board-trip.js",
     "check:journey": "node scripts/check-customer-journey.js",
     "reconcile:paystack": "node scripts/reconcile-paystack.js",
     "build": "tsc -p tsconfig.build.json",

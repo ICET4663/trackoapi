@@ -9,16 +9,32 @@ import { distanceKm } from './return-load';
 import { ShipmentsService } from './shipments.service';
 
 // The job board (see job-board-store.ts for the rule). Drivers with no undelivered trip see
-// every paid, approved load that has no driver yet and that one of their trucks can carry.
-// They ask for a load; the customer (or operations for them) picks one driver, which locks
-// the load to that driver as an accepted assignment and closes every other request.
+// every load with no driver yet that one of their trucks can carry, nearest pickup first:
+// paid and approved loads, paid loads still being checked by an admin, and (since 23 November
+// 2026) booked loads the customer has not paid for yet. Drivers may ask for any of them, but
+// the customer (or operations for them) can only choose a driver once the load is paid and
+// approved, which locks it to that driver as an accepted assignment and closes every other
+// request. So no truck moves before the money is held.
 
 const ON_TRIP_STATUSES = ['DELIVERED', 'COMPLETED', 'CANCELLED'] as const;
 const FUNDED_ESCROW = ['FUNDED', 'HELD', 'RELEASE_READY'] as const;
+/** Booked but not paid yet. */
+const UNPAID_STATUSES = ['DRAFT', 'QUOTED', 'PENDING_PAYMENT'] as const;
+/** An unpaid booking older than this is treated as abandoned and left off the board. */
+const UNPAID_BOARD_DAYS = 7;
 /** A driver position older than this is not used for "km to pickup". */
 const FRESH_POSITION_MS = 2 * 60 * 60 * 1000;
 
 export type DriverBoardState = 'OPEN' | 'ON_TRIP' | 'OFFLINE' | 'NOT_VERIFIED' | 'NO_TRUCK';
+/** READY: the customer can choose a driver now. The other two wait on the customer's payment or an admin. */
+export type BoardLoadStatus = 'READY' | 'AWAITING_PAYMENT' | 'AWAITING_APPROVAL';
+export type DriverPosition = { latitude: number; longitude: number };
+
+export function boardStatusOf(shipment: { status: string; adminApproved: boolean }): BoardLoadStatus | null {
+  if ((UNPAID_STATUSES as readonly string[]).includes(shipment.status)) return 'AWAITING_PAYMENT';
+  if (shipment.status !== 'ESCROW_FUNDED') return null;
+  return shipment.adminApproved ? 'READY' : 'AWAITING_APPROVAL';
+}
 
 @Injectable()
 export class JobBoardService {
@@ -82,8 +98,12 @@ export class JobBoardService {
     return { notified: eligible.length };
   }
 
-  /** The loads this driver can ask for, nearest first, and why the board is closed if it is. */
-  async listForDriver(driverId: string) {
+  /**
+   * The loads this driver can ask for, nearest first, and why the board is closed if it is.
+   * `near` is the phone's current position (sent by the Jobs screen); without it the driver's
+   * last trip position is used when it is recent.
+   */
+  async listForDriver(driverId: string, near?: DriverPosition | null) {
     await ensureJobRequestTable(this.prisma);
     const [driver, availability, activeTrip] = await Promise.all([
       this.prisma.user.findUnique({
@@ -109,14 +129,18 @@ export class JobBoardService {
 
     const shipments = await this.prisma.shipment.findMany({
       where: {
-        adminApproved: true,
-        status: 'ESCROW_FUNDED',
-        escrow: { is: { status: { in: [...FUNDED_ESCROW] } } },
         assignments: { none: { status: { in: ['OFFERED', 'ACCEPTED'] } } },
+        OR: [
+          { status: 'ESCROW_FUNDED', escrow: { is: { status: { in: [...FUNDED_ESCROW] } } } },
+          {
+            status: { in: [...UNPAID_STATUSES] },
+            createdAt: { gte: new Date(Date.now() - UNPAID_BOARD_DAYS * 24 * 60 * 60 * 1000) },
+          },
+        ],
       },
       include: { customer: { select: { email: true } } },
-      orderBy: { adminApprovedAt: 'asc' },
-      take: 50,
+      orderBy: { createdAt: 'desc' },
+      take: 100,
     });
     const sandboxDriver = isStoreReviewerAccount(driver.email);
     const fits = shipments.filter((shipment) =>
@@ -124,11 +148,12 @@ export class JobBoardService {
       && trucks.some((truck) => this.truckFits(truck, shipment)),
     );
     const requests = await this.requestsFor(driverId, fits.map((shipment) => shipment.id));
-    const position = this.freshPosition(availability);
+    const position = this.validPosition(near) ?? this.freshPosition(availability);
 
     const loads = fits
       .filter((shipment) => requests.get(shipment.id)?.status !== 'DECLINED')
       .map((shipment) => {
+        const boardStatus = boardStatusOf(shipment) ?? 'AWAITING_PAYMENT';
         const pickupKm = position
           ? distanceKm(position.latitude, position.longitude, shipment.pickupLatitude, shipment.pickupLongitude)
           : null;
@@ -148,12 +173,18 @@ export class JobBoardService {
           pickupKm: pickupKm === null ? null : Math.round(pickupKm * 10) / 10,
           postedAt: (shipment.adminApprovedAt ?? shipment.createdAt).toISOString(),
           requested: request?.status === 'PENDING',
+          boardStatus,
+          paid: boardStatus !== 'AWAITING_PAYMENT',
         };
       })
-      .sort((left, right) => (left.pickupKm ?? Number.POSITIVE_INFINITY) - (right.pickupKm ?? Number.POSITIVE_INFINITY));
+      .sort((left, right) =>
+        (left.pickupKm ?? Number.POSITIVE_INFINITY) - (right.pickupKm ?? Number.POSITIVE_INFINITY)
+        // Without a position, paid loads first, then the newest.
+        || Number(right.paid) - Number(left.paid)
+        || right.postedAt.localeCompare(left.postedAt));
 
     const state: DriverBoardState = availability?.availableForAssignments === false ? 'OFFLINE' : 'OPEN';
-    return { state, loads };
+    return { state, position, loads };
   }
 
   /** A driver asks for a load on the board. Asking again for the same load is harmless. */
@@ -171,8 +202,13 @@ export class JobBoardService {
     if (!driver || isStoreReviewerAccount(driver.email) !== isStoreReviewerAccount(customer?.email)) {
       throw new NotFoundException('This load is no longer on the job board.');
     }
-    // Same rules as a dispatch offer: approved, funded, no driver yet, driver online, truck fits.
-    const { vehicle } = await this.shipments.checkAssignmentEligibility(shipment.id, driverId);
+    const boardStatus = boardStatusOf(shipment);
+    if (!boardStatus) throw new BadRequestException('This load is no longer on the job board.');
+    // Same driver rules as a dispatch offer: no driver yet, driver verified and online, truck fits.
+    // Payment and approval are only required when the customer chooses (see approve()).
+    const { vehicle } = await this.shipments.checkAssignmentEligibility(shipment.id, driverId, undefined, {
+      beforePayment: boardStatus !== 'READY',
+    });
 
     const inserted = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
       `insert into "JobRequest" ("id", "shipmentId", "driverId", "vehicleId", "status")
@@ -200,7 +236,9 @@ export class JobBoardService {
       userId: shipment.customerId,
       role: 'CUSTOMER',
       title: 'A driver wants to carry your load',
-      body: `${driverName} asked to carry ${shipment.reference}. Open the shipment to see the driver and choose.`,
+      body: boardStatus === 'AWAITING_PAYMENT'
+        ? `${driverName} asked to carry ${shipment.reference}. Pay for the shipment, then choose your driver.`
+        : `${driverName} asked to carry ${shipment.reference}. Open the shipment to see the driver and choose.`,
       tone: 'INFO',
       entity: 'Shipment',
       entityId: shipment.id,
@@ -237,9 +275,10 @@ export class JobBoardService {
       where: { shipmentId: shipment.id, status: { in: ['OFFERED', 'ACCEPTED'] } },
       select: { id: true },
     });
-    const onBoard = !openAssignment && shipment.adminApproved && shipment.status === 'ESCROW_FUNDED';
+    const boardStatus = openAssignment ? null : boardStatusOf(shipment);
+    const onBoard = Boolean(boardStatus);
     const pending = rows.filter((row) => row.status === 'PENDING');
-    if (!pending.length) return { onBoard, requests: [] };
+    if (!pending.length) return { onBoard, boardStatus, requests: [] };
 
     const driverIds = pending.map((row) => row.driverId);
     const [drivers, busy, availability] = await Promise.all([
@@ -306,7 +345,7 @@ export class JobBoardService {
         available: !busyDrivers.has(driver.id) && !offline,
       }];
     });
-    return { onBoard, requests };
+    return { onBoard, boardStatus, requests };
   }
 
   /** The customer (or operations) picks a driver: the load becomes that driver's accepted job. */
@@ -316,6 +355,14 @@ export class JobBoardService {
     const shipment = await this.findShipment(request.shipmentId);
     this.assertCanChoose(shipment, userId, role);
     if (request.status !== 'PENDING') throw new BadRequestException('This driver request is no longer open.');
+    // Drivers may ask before payment, but nobody is given the load until the money is held.
+    const boardStatus = boardStatusOf(shipment);
+    if (boardStatus === 'AWAITING_PAYMENT') {
+      throw new BadRequestException('Pay for this shipment first, then choose your driver. Their request stays open.');
+    }
+    if (boardStatus === 'AWAITING_APPROVAL') {
+      throw new BadRequestException('Trako is checking this paid load. You can choose a driver as soon as it is approved.');
+    }
 
     const activeTrip = await this.activeTrip(request.driverId);
     if (activeTrip) throw new BadRequestException('This driver has started another trip and can no longer take this load.');
@@ -502,6 +549,14 @@ export class JobBoardService {
       driverId,
     ).catch(() => []);
     return rows[0] ?? null;
+  }
+
+  private validPosition(position?: DriverPosition | null) {
+    if (!position) return null;
+    const { latitude, longitude } = position;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+    return { latitude, longitude };
   }
 
   private freshPosition(row: {
