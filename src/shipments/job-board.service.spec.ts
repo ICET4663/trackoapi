@@ -242,6 +242,66 @@ describe('JobBoardService', () => {
 
       await expect(service.request('driver-1', 'TRK-1')).rejects.toThrow('chose not to take your request');
     });
+    it('stores the phone position the driver asked from', async () => {
+      const insert = jest.fn().mockResolvedValue([{ id: 'req-3' }]);
+      const { service } = build({
+        shipment: { findFirst: jest.fn().mockResolvedValue(shipmentRow()) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+        user: {
+          findUnique: jest.fn(({ where }: { where: { id: string } }) => Promise.resolve(where.id === 'driver-1'
+            ? { id: 'driver-1', email: 'driver@example.com', profile: null }
+            : { email: 'customer@example.com' })),
+        },
+        $queryRawUnsafe: insert,
+      });
+
+      await service.request('driver-1', 'TRK-1', { latitude: 6.59, longitude: 3.344 });
+      expect(insert).toHaveBeenCalledWith(expect.stringContaining('"requestLatitude"'), expect.any(String), 'ship-1', 'driver-1', 'truck-1', 6.59, 3.344);
+
+      insert.mockClear();
+      await service.request('driver-1', 'TRK-1', { latitude: 999, longitude: 3.3 });
+      expect(insert.mock.calls[0]?.slice(-2)).toEqual([null, null]);
+    });
+  });
+
+  describe('listForShipment', () => {
+    const askedAt = new Date('2026-11-24T08:00:00Z');
+    function setup(gpsUpdatedAt: Date) {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-24T08:30:00Z'));
+      return build({
+        shipment: { findFirst: jest.fn().mockResolvedValue(shipmentRow({ status: 'PENDING_PAYMENT', adminApproved: false })) },
+        driverAssignment: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
+        user: {
+          findMany: jest.fn().mockResolvedValue([{
+            id: 'driver-1', email: 'driver@example.com', profile: { fullName: 'Musa Bello' },
+            driverVehicles: [{ id: 'truck-1', type: 'BOX', capacityKg: 5000 }], driverReviews: [], driverAssignments: [],
+          }]),
+        },
+        $queryRawUnsafe: rawRouter([
+          ['from "JobRequest"', [{
+            id: 'req-1', shipmentId: 'ship-1', driverId: 'driver-1', vehicleId: 'truck-1', status: 'PENDING',
+            createdAt: askedAt, decidedAt: null, requestLatitude: 6.61, requestLongitude: 3.35,
+          }]],
+          // Old trip GPS about 18 km away from the pickup.
+          ['from "SafetySettings"', [{
+            userId: 'driver-1', availableForAssignments: true,
+            lastKnownLatitude: 6.44, lastKnownLongitude: 3.42, locationUpdatedAt: gpsUpdatedAt,
+          }]],
+        ]),
+      }).service;
+    }
+    afterEach(() => jest.useRealTimers());
+
+    it('measures from where the driver asked when that is newer than the trip GPS', async () => {
+      const result = await setup(new Date('2026-11-24T07:30:00Z')).listForShipment('TRK-1', 'customer-1', 'CUSTOMER');
+      expect(result.boardStatus).toBe('AWAITING_PAYMENT');
+      expect(result.requests[0].pickupKm).toBeLessThan(2);
+    });
+
+    it('uses the trip GPS once it is newer than the request', async () => {
+      const result = await setup(new Date('2026-11-24T08:20:00Z')).listForShipment('TRK-1', 'customer-1', 'CUSTOMER');
+      expect(result.requests[0].pickupKm).toBeGreaterThan(15);
+    });
   });
 
   describe('approve', () => {

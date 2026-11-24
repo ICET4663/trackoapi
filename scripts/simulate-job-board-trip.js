@@ -197,7 +197,9 @@ async function main() {
   check('the pickup distance is from the phone (under 5 km)', typeof load.pickupKm === 'number' && load.pickupKm < 5, `${load.pickupKm} km`);
   check('the pickup has map coordinates for the board map', Boolean(load.originCoordinates));
   if (!load.requested) {
-    const asked = await expectOk(`/v1/job-board/${shipmentId}/request`, { method: 'POST', accessToken: driver.accessToken });
+    const asked = await expectOk(`/v1/job-board/${shipmentId}/request`, {
+      method: 'POST', accessToken: driver.accessToken, body: DRIVER_PHONE_POSITION,
+    });
     check('the driver asks for the load', asked.status === 'PENDING');
   } else {
     check('the driver had already asked for the load', true);
@@ -207,6 +209,8 @@ async function main() {
   const ask = (requests.requests ?? [])[0];
   check('the customer sees the driver who asked', Boolean(ask), ask ? `${ask.driverName}, ${ask.pickupKm ?? '?'} km from pickup` : 'none');
   if (!ask) throw new Error('The customer cannot see the driver request.');
+  check('the customer sees the distance from where the driver asked (under 5 km)',
+    typeof ask.pickupKm === 'number' && ask.pickupKm < 5, `${ask.pickupKm} km`);
 
   // 3. Nobody gets an unpaid load.
   if (unpaidAtStart) {

@@ -187,8 +187,11 @@ export class JobBoardService {
     return { state, position, loads };
   }
 
-  /** A driver asks for a load on the board. Asking again for the same load is harmless. */
-  async request(driverId: string, shipmentRef: string) {
+  /**
+   * A driver asks for a load on the board. Asking again for the same load is harmless.
+   * `near` is the phone's position when they asked; the customer sees the pickup distance from it.
+   */
+  async request(driverId: string, shipmentRef: string, near?: DriverPosition | null) {
     await ensureJobRequestTable(this.prisma);
     const shipment = await this.findShipment(shipmentRef);
     const activeTrip = await this.activeTrip(driverId);
@@ -209,22 +212,37 @@ export class JobBoardService {
     const { vehicle } = await this.shipments.checkAssignmentEligibility(shipment.id, driverId, undefined, {
       beforePayment: boardStatus !== 'READY',
     });
+    const position = this.validPosition(near);
 
     const inserted = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
-      `insert into "JobRequest" ("id", "shipmentId", "driverId", "vehicleId", "status")
-       values ($1, $2, $3, $4, 'PENDING')
+      `insert into "JobRequest" ("id", "shipmentId", "driverId", "vehicleId", "status", "requestLatitude", "requestLongitude")
+       values ($1, $2, $3, $4, 'PENDING', $5, $6)
        on conflict ("shipmentId", "driverId") do update
-         set "status" = 'PENDING', "vehicleId" = excluded."vehicleId", "createdAt" = current_timestamp, "decidedAt" = null
+         set "status" = 'PENDING', "vehicleId" = excluded."vehicleId", "createdAt" = current_timestamp, "decidedAt" = null,
+             "requestLatitude" = excluded."requestLatitude", "requestLongitude" = excluded."requestLongitude"
          where "JobRequest"."status" in ('WITHDRAWN', 'CLOSED')
        returning "id"`,
       `jobreq_${randomUUID().replace(/-/g, '')}`,
       shipment.id,
       driverId,
       vehicle.id,
+      position?.latitude ?? null,
+      position?.longitude ?? null,
     );
     if (!inserted[0]) {
       const existing = (await this.requestsFor(driverId, [shipment.id])).get(shipment.id);
-      if (existing?.status === 'PENDING') return { requestId: existing.id, status: 'PENDING' as const };
+      if (existing?.status === 'PENDING') {
+        // Asking again from a new spot keeps the customer's distance current.
+        if (position) {
+          await this.prisma.$executeRawUnsafe(
+            `update "JobRequest" set "requestLatitude" = $2, "requestLongitude" = $3 where "id" = $1`,
+            existing.id,
+            position.latitude,
+            position.longitude,
+          );
+        }
+        return { requestId: existing.id, status: 'PENDING' as const };
+      }
       if (existing?.status === 'DECLINED') {
         throw new BadRequestException('The customer chose not to take your request for this load.');
       }
@@ -267,7 +285,8 @@ export class JobBoardService {
     this.assertCanChoose(shipment, userId, role);
 
     const rows = await this.prisma.$queryRawUnsafe<JobRequestRow[]>(
-      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt"
+      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt",
+         "requestLatitude", "requestLongitude"
        from "JobRequest" where "shipmentId" = $1 order by "createdAt" asc`,
       shipment.id,
     );
@@ -326,7 +345,7 @@ export class JobBoardService {
       const truck = driver.driverVehicles.find((vehicle) => vehicle.id === row.vehicleId) ?? driver.driverVehicles[0];
       const reviews = driver.driverReviews ?? [];
       const rating = reviews.length ? reviews.reduce((total, review) => total + review.rating, 0) / reviews.length : null;
-      const position = this.freshPosition(availabilityByDriver.get(driver.id));
+      const position = this.requestPosition(row, availabilityByDriver.get(driver.id));
       const pickupKm = position
         ? distanceKm(position.latitude, position.longitude, shipment.pickupLatitude, shipment.pickupLongitude)
         : null;
@@ -510,7 +529,8 @@ export class JobBoardService {
 
   private async findRequest(requestId: string) {
     const rows = await this.prisma.$queryRawUnsafe<JobRequestRow[]>(
-      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt"
+      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt",
+         "requestLatitude", "requestLongitude"
        from "JobRequest" where "id" = $1 limit 1`,
       requestId,
     );
@@ -521,7 +541,8 @@ export class JobBoardService {
   private async requestsFor(driverId: string, shipmentIds: string[]) {
     if (!shipmentIds.length) return new Map<string, JobRequestRow>();
     const rows = await this.prisma.$queryRawUnsafe<JobRequestRow[]>(
-      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt"
+      `select "id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt",
+         "requestLatitude", "requestLongitude"
        from "JobRequest" where "driverId" = $1 and "shipmentId" = any($2::text[])`,
       driverId,
       shipmentIds,
@@ -557,6 +578,25 @@ export class JobBoardService {
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
     if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
     return { latitude, longitude };
+  }
+
+  /**
+   * Where to measure a requesting driver from: the newer of the phone position sent with the
+   * request and the driver's last trip GPS (if still fresh). Before 24 Nov 2026 only the trip GPS
+   * was used, so a driver who asked from near the pickup could show as far away.
+   */
+  private requestPosition(
+    request: JobRequestRow,
+    gps: { lastKnownLatitude: number | null; lastKnownLongitude: number | null; locationUpdatedAt: Date | string | null } | undefined,
+  ) {
+    const asked = this.validPosition(
+      request.requestLatitude == null || request.requestLongitude == null
+        ? null
+        : { latitude: Number(request.requestLatitude), longitude: Number(request.requestLongitude) },
+    );
+    const tracked = this.freshPosition(gps);
+    if (!asked || !tracked || !gps?.locationUpdatedAt) return asked ?? tracked;
+    return new Date(gps.locationUpdatedAt).getTime() > new Date(request.createdAt).getTime() ? tracked : asked;
   }
 
   private freshPosition(row: {

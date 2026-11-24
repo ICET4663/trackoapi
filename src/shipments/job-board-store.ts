@@ -29,6 +29,9 @@ export type JobRequestRow = {
   status: JobRequestStatus;
   createdAt: Date;
   decidedAt: Date | null;
+  /** Where the driver's phone was when they asked (24 Nov 2026); null on older requests. */
+  requestLatitude?: number | null;
+  requestLongitude?: number | null;
 };
 
 let tableReady: Promise<void> | null = null;
@@ -51,6 +54,10 @@ export function ensureJobRequestTable(prisma: PrismaService) {
     );
     await prisma.$executeRawUnsafe(
       `create index if not exists "JobRequest_driver_status" on "JobRequest"("driverId", "status")`,
+    );
+    await prisma.$executeRawUnsafe(
+      `alter table "JobRequest" add column if not exists "requestLatitude" double precision,
+         add column if not exists "requestLongitude" double precision`,
     );
   })().catch((error: unknown) => {
     tableReady = null;

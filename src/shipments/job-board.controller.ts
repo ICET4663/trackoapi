@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { RequestUserService } from '../common/request-user.service';
 import { JobBoardService } from './job-board.service';
 
@@ -18,7 +18,7 @@ export class JobBoardController {
   ) {
     const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
     // Optional: the phone's current position, so "km to pickup" works before any trip GPS exists.
-    // Only used to sort this driver's own board; it is not stored.
+    // Only used to sort this driver's own board; it is not stored (asking for a load stores it).
     const near = lat !== undefined && lng !== undefined && lat !== '' && lng !== ''
       ? { latitude: Number(lat), longitude: Number(lng) }
       : null;
@@ -26,9 +26,18 @@ export class JobBoardController {
   }
 
   @Post(':shipmentId/request')
-  async request(@Param('shipmentId') shipmentId: string, @Headers('authorization') authorization?: string) {
+  async request(
+    @Param('shipmentId') shipmentId: string,
+    @Body() body?: { latitude?: unknown; longitude?: unknown } | null,
+    @Headers('authorization') authorization?: string,
+  ) {
     const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
-    return this.jobBoard.request(user.sub, shipmentId);
+    // Optional (24 Nov 2026): the phone's position when asking, so the customer sees how far the
+    // driver really is. Older apps send no body and the trip GPS is used as before.
+    const near = body && body.latitude != null && body.longitude != null
+      ? { latitude: Number(body.latitude), longitude: Number(body.longitude) }
+      : null;
+    return this.jobBoard.request(user.sub, shipmentId, near);
   }
 
   @Post(':shipmentId/withdraw')
