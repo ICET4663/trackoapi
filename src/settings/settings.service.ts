@@ -11,6 +11,7 @@ import { ensurePaymentModeColumns, paystackMode } from '../integrations/paystack
 import { ensurePlatformFeeColumn } from '../integrations/platform-commission';
 import { PRICING_SETTING_DEFAULTS, PRICING_SETTING_DEFINITIONS } from '../integrations/pricing-settings';
 import { DEFAULT_JOB_BOARD_MINUTES, JOB_BOARD_MINUTES_KEY } from '../shipments/job-board-store';
+import { DEFAULT_JOB_BOARD_PRICE_RANGE_PERCENT, JOB_BOARD_PRICE_RANGE_KEY, MAX_JOB_BOARD_PRICE_RANGE_PERCENT } from '../shipments/job-board-price';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
 type PreferenceKey =
@@ -2804,6 +2805,7 @@ export class SettingsService {
     { key: 'driverOwnerSharePercent', title: 'Driver settlement share', description: 'Percentage of released transport income paid to the driver when a separate truck owner supplies the vehicle.', label: 'Driver share (%)', defaultValue: '70', helper: 'Allowed range: 0-100%. The truck owner receives the remainder. Drivers using their own truck receive 100%.', type: 'number', min: 0, max: 100 },
     { key: 'trackingRetentionDays', title: 'Location history retention', description: 'How long the GPS trail of a completed or cancelled shipment is kept before it is deleted automatically.', label: 'Days', defaultValue: '30', helper: 'Allowed range: 7-365 days. Trails of shipments with an open or in-review dispute are kept until it is resolved. Runs with the daily scheduled job.', type: 'number', min: 7, max: 365 },
     { key: JOB_BOARD_MINUTES_KEY, title: 'Job board time', description: 'How long an approved load stays on the job board, for drivers to ask for it and the customer to choose, before Trako offers it to the nearest driver automatically.', label: 'Minutes', defaultValue: String(DEFAULT_JOB_BOARD_MINUTES), helper: 'Allowed range: 0-120 minutes. 0 turns the board off and offers every approved load to the nearest driver at once. Automatic offers also wait up to 60 minutes while a driver\'s request awaits the customer.', type: 'number', min: 0, max: 120 },
+    { key: JOB_BOARD_PRICE_RANGE_KEY, title: 'Driver price offers', description: "How far a driver's own price on the job board may move from the quoted trip pay. Only for loads not paid yet; the customer pays the driver's price plus Trako's commission.", label: 'Range (%)', defaultValue: String(DEFAULT_JOB_BOARD_PRICE_RANGE_PERCENT), helper: `Allowed range: 0-${MAX_JOB_BOARD_PRICE_RANGE_PERCENT}%. 0 turns price offers off. An offer is never below the trip's running cost (base fare, fuel, operating cost and tolls).`, type: 'number', min: 0, max: MAX_JOB_BOARD_PRICE_RANGE_PERCENT },
     { key: 'escrow', title: 'Escrow release window', description: 'Days after delivery before an undisputed payment is released automatically.', label: 'Days', defaultValue: '3', helper: 'A daily job releases the payment this many days after delivery when proof of delivery is uploaded and no dispute is open. A customer confirming delivery releases it sooner; before that, only an admin can release, with a reason.', type: 'number' },
     { key: 'manualDriverVerification', title: 'Manual driver verification', description: 'Require an admin to manually review every driver KYC submission.', label: 'Manual driver verification', defaultValue: 'true', helper: 'Recorded for reference - KYC review is currently always manual regardless of this flag.', type: 'boolean' },
     { key: 'staff2fa', title: 'Require staff 2FA', description: 'Require two-factor authentication for admin and dispatcher accounts.', label: 'Require staff 2FA', defaultValue: 'false', helper: 'Recorded for reference - login does not yet enforce 2FA regardless of this flag.', type: 'boolean' },
@@ -2888,9 +2890,9 @@ export class SettingsService {
   private toPlatformSetting(definition: (typeof this.platformSettingCatalog)[number], storedValue?: string) {
     const value = storedValue ?? definition.defaultValue;
     const displayValue = definition.type === 'boolean' ? (value === 'true' ? 'On' : 'Off')
+      : (definition.key === JOB_BOARD_MINUTES_KEY || definition.key === JOB_BOARD_PRICE_RANGE_KEY) && Number(value) === 0 ? 'Off'
       : definition.type === 'number' && (definition.key === 'fee' || definition.key.endsWith('Percent')) ? `${value}%`
       : definition.type === 'number' && definition.key.endsWith('Ngn') ? `NGN ${Number(value).toLocaleString('en-US')}`
-      : definition.key === JOB_BOARD_MINUTES_KEY && Number(value) === 0 ? 'Off'
       : definition.key === 'pricingQuoteValidityMinutes' || definition.key === JOB_BOARD_MINUTES_KEY ? `${value} minutes`
       : definition.key === 'payout' ? value.charAt(0).toUpperCase() + value.slice(1)
       : definition.multiline ? (value.length > 42 ? `${value.slice(0, 42).trimEnd()}…` : value)

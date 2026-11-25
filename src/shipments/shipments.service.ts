@@ -126,6 +126,11 @@ export class ShipmentsService {
 
   /** Set by JobBoardService: tells eligible free drivers that a load was posted to the job board. */
   onLoadPosted?: (shipmentId: string) => Promise<unknown>;
+  /**
+   * Set by JobBoardService: on approval, gives the load to the driver whose price the customer
+   * accepted before paying. True when it did, so the board and automatic offers are skipped.
+   */
+  assignReservedDriver?: (shipmentId: string) => Promise<boolean>;
 
   async create(customerId: string, dto: CreateShipmentDto) {
     await this.assertNotInMaintenanceMode();
@@ -1637,7 +1642,13 @@ export class ShipmentsService {
     // Job board first: free drivers are told and can ask for the load; the dispatch sweep offers
     // it to the nearest driver once the board time has passed. With the board set to 0 minutes,
     // matching starts the moment the shipment is cleared. Approval never fails because of either.
-    if (await jobBoardMinutes(this.prisma) > 0) {
+    const assignedHeldDriver = await Promise.resolve(this.assignReservedDriver?.(shipmentId)).catch((error: unknown) => {
+      this.logger.error(`Assigning the held driver for ${shipmentId} failed: ${this.errorMessage(error)}`);
+      return false;
+    });
+    if (assignedHeldDriver) {
+      // The customer agreed a price with a driver before paying; that driver now has the load.
+    } else if (await jobBoardMinutes(this.prisma) > 0) {
       await Promise.resolve(this.onLoadPosted?.(shipmentId)).catch((error: unknown) => {
         this.logger.error(`Announcing ${shipmentId} on the job board failed: ${this.errorMessage(error)}`);
       });

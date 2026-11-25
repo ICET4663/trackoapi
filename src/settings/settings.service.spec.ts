@@ -462,6 +462,13 @@ describe('SettingsService platform settings are actually persisted', () => {
     await expect(service.updatePlatformSetting('jobBoardMinutes', '0', 'admin-1')).resolves.toMatchObject({ value: '0', displayValue: 'Off' });
   });
 
+  it('lets an admin set the driver price offer range, shown in % and Off at 0', async () => {
+    const defaults = await service.platformSettings();
+    expect(defaults.find((entry) => entry.key === 'jobBoardPriceRangePercent')).toMatchObject({ value: '30', displayValue: '30%', type: 'number' });
+    await expect(service.updatePlatformSetting('jobBoardPriceRangePercent', '0', 'admin-1')).resolves.toMatchObject({ displayValue: 'Off' });
+    await expect(service.updatePlatformSetting('jobBoardPriceRangePercent', '101', 'admin-1')).rejects.toThrow('must not exceed 100');
+  });
+
   it('refuses a job board time outside 0-120 minutes', async () => {
     await expect(service.updatePlatformSetting('jobBoardMinutes', '121', 'admin-1')).rejects.toThrow('must not exceed 120');
     await expect(service.updatePlatformSetting('jobBoardMinutes', '-5', 'admin-1')).rejects.toThrow('must be at least 0');

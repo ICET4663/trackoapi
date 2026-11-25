@@ -1,4 +1,5 @@
 import { PrismaService } from '../prisma/prisma.service';
+import { JOB_BOARD_PRICE_RANGE_KEY, priceRangePercentFrom } from './job-board-price';
 
 // Job board (owner rule, 23 November 2026): a paid, approved load is first shown to every
 // eligible driver who is not on an undelivered trip. Drivers ask for it; the customer picks
@@ -32,7 +33,25 @@ export type JobRequestRow = {
   /** Where the driver's phone was when they asked (24 Nov 2026); null on older requests. */
   requestLatitude?: number | null;
   requestLongitude?: number | null;
+  /**
+   * The driver's own price (25 Nov 2026), unpaid loads only: their trip pay, and what the customer
+   * would pay for it with Trako's commission. Null when the driver asked at the quoted price.
+   */
+  proposedCarrierKobo?: number | null;
+  proposedPriceKobo?: number | null;
+  proposedCommissionKobo?: number | null;
+  /** Set when the customer accepted the price: the load is then held for this driver. */
+  priceAcceptedAt?: Date | null;
+  /** The shipment's money before the price was accepted, so it can be put back. */
+  quoteBeforeKobo?: number | null;
+  feeBeforeKobo?: number | null;
+  driverPayBeforeKobo?: number | null;
 };
+
+/** Every JobRequest column the service reads. */
+export const JOB_REQUEST_COLUMNS = `"id", "shipmentId", "driverId", "vehicleId", "status", "createdAt", "decidedAt",
+  "requestLatitude", "requestLongitude", "proposedCarrierKobo", "proposedPriceKobo", "proposedCommissionKobo",
+  "priceAcceptedAt", "quoteBeforeKobo", "feeBeforeKobo", "driverPayBeforeKobo"`;
 
 let tableReady: Promise<void> | null = null;
 
@@ -59,6 +78,15 @@ export function ensureJobRequestTable(prisma: PrismaService) {
       `alter table "JobRequest" add column if not exists "requestLatitude" double precision,
          add column if not exists "requestLongitude" double precision`,
     );
+    await prisma.$executeRawUnsafe(
+      `alter table "JobRequest" add column if not exists "proposedCarrierKobo" integer,
+         add column if not exists "proposedPriceKobo" integer,
+         add column if not exists "proposedCommissionKobo" integer,
+         add column if not exists "priceAcceptedAt" timestamp(3),
+         add column if not exists "quoteBeforeKobo" integer,
+         add column if not exists "feeBeforeKobo" integer,
+         add column if not exists "driverPayBeforeKobo" integer`,
+    );
   })().catch((error: unknown) => {
     tableReady = null;
     throw error;
@@ -80,6 +108,16 @@ export async function jobBoardMinutes(prisma: PrismaService) {
   }
   const value = Number(setting?.value ?? DEFAULT_JOB_BOARD_MINUTES);
   return Number.isFinite(value) && value >= 0 && value <= 120 ? Math.round(value) : DEFAULT_JOB_BOARD_MINUTES;
+}
+
+export async function jobBoardPriceRangePercent(prisma: PrismaService) {
+  let setting: { value: unknown } | null = null;
+  try {
+    setting = await prisma.platformSetting.findUnique({ where: { key: JOB_BOARD_PRICE_RANGE_KEY } });
+  } catch {
+    setting = null;
+  }
+  return priceRangePercentFrom(setting?.value);
 }
 
 /** Of these shipments, the ones with a driver's request the customer has not answered yet. */

@@ -256,11 +256,12 @@ describe('JobBoardService', () => {
       });
 
       await service.request('driver-1', 'TRK-1', { latitude: 6.59, longitude: 3.344 });
-      expect(insert).toHaveBeenCalledWith(expect.stringContaining('"requestLatitude"'), expect.any(String), 'ship-1', 'driver-1', 'truck-1', 6.59, 3.344);
+      expect(insert).toHaveBeenCalledWith(expect.stringContaining('"requestLatitude"'), expect.any(String), 'ship-1', 'driver-1', 'truck-1', 6.59, 3.344, null, null, null);
 
       insert.mockClear();
       await service.request('driver-1', 'TRK-1', { latitude: 999, longitude: 3.3 });
-      expect(insert.mock.calls[0]?.slice(-2)).toEqual([null, null]);
+      const insertCall = insert.mock.calls.find((call) => String(call[0]).includes('insert into "JobRequest"'));
+      expect(insertCall?.slice(5, 7)).toEqual([null, null]);
     });
   });
 

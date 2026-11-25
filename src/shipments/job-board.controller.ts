@@ -28,7 +28,7 @@ export class JobBoardController {
   @Post(':shipmentId/request')
   async request(
     @Param('shipmentId') shipmentId: string,
-    @Body() body?: { latitude?: unknown; longitude?: unknown } | null,
+    @Body() body?: { latitude?: unknown; longitude?: unknown; proposedCarrierKobo?: unknown } | null,
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.requireRole(authorization, ['DRIVER']);
@@ -37,7 +37,11 @@ export class JobBoardController {
     const near = body && body.latitude != null && body.longitude != null
       ? { latitude: Number(body.latitude), longitude: Number(body.longitude) }
       : null;
-    return this.jobBoard.request(user.sub, shipmentId, near);
+    // Optional (25 Nov 2026), unpaid loads only: the trip pay the driver wants instead of the
+    // quoted one; the customer pays it plus Trako's commission. Absent means the quoted price.
+    const proposed = body?.proposedCarrierKobo;
+    const proposedCarrierKobo = proposed === undefined ? undefined : proposed === null || proposed === '' ? null : Number(proposed);
+    return this.jobBoard.request(user.sub, shipmentId, near, proposedCarrierKobo);
   }
 
   @Post(':shipmentId/withdraw')
@@ -56,6 +60,12 @@ export class JobBoardController {
   async approve(@Param('requestId') requestId: string, @Headers('authorization') authorization?: string) {
     const user = await this.requestUser.requireRole(authorization, ['CUSTOMER', 'DISPATCHER', 'ADMIN']);
     return this.jobBoard.approve(requestId, user.sub, user.role);
+  }
+
+  @Post('requests/:requestId/accept-price')
+  async acceptPrice(@Param('requestId') requestId: string, @Headers('authorization') authorization?: string) {
+    const user = await this.requestUser.requireRole(authorization, ['CUSTOMER', 'DISPATCHER', 'ADMIN']);
+    return this.jobBoard.acceptPrice(requestId, user.sub, user.role);
   }
 
   @Post('requests/:requestId/decline')
