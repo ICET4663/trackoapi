@@ -179,6 +179,9 @@ async function main() {
     expectValue(Number(chargeCount.count) === 1, 'payment replay did not create a duplicate billing charge');
 
     // Approval starts automatic matching, which offers the load to the only free driver and truck.
+    // Since the job board (23 Nov 2026) approval first leaves the load on the board for
+    // jobBoardMinutes; 0 turns the board off, so this checks automatic matching on its own.
+    await prisma.platformSetting.upsert({ where: { key: 'jobBoardMinutes' }, create: { key: 'jobBoardMinutes', value: '0' }, update: { value: '0' } });
     await shipments.approveShipment(shipment.id, adminUser.id, 'ADMIN');
     const assignment = await prisma.driverAssignment.findFirst({ where: { shipmentId: shipment.id, status: 'OFFERED' } });
     expectValue(assignment, 'approval offered the shipment to a driver automatically');
