@@ -6,7 +6,7 @@ import { OtpPurpose, Prisma, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomInt, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { UsersService } from '../users/users.service';
+import { signupProfileFields, UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -210,6 +210,8 @@ export class AuthService {
     this.assertNotSandboxEmail(dto.email);
     await this.assertRegistrationsNotPaused();
 
+    // Checked before the code is used up, so a too-long address does not cost the user their code.
+    signupProfileFields(dto.profile);
     await this.verifyOtp(dto.email, dto.phone, dto.code, OtpPurpose.REGISTER);
     const passwordHash = await bcrypt.hash(dto.password, 12);
     const user = await this.users.create({

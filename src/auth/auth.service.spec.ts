@@ -81,6 +81,19 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
     expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
   });
 
+  it('register() refuses an address over 500 characters before the code is checked or used (28 Nov)', async () => {
+    const assertAllowed = jest.fn().mockResolvedValue(undefined);
+    const { service, prisma } = buildService({ assertAllowed });
+
+    await expect(service.register({
+      email: 'owner@tracko.ng', phone: '+2348030000000', fullName: 'Test Owner', password: 'password123', code: '123456', role: 'TRUCK_OWNER' as never,
+      profile: { address: 'x'.repeat(501) },
+    } as never)).rejects.toThrow('Address must be 500 characters or fewer.');
+
+    expect(assertAllowed).not.toHaveBeenCalled();
+    expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
+  });
+
   it('confirmPasswordReset() is blocked by the rate limiter before the account is even looked up', async () => {
     const assertAllowed = jest.fn().mockRejectedValue(new Error('rate limited'));
     const { service, prisma } = buildService({ assertAllowed });

@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { UserRole, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { optionalText } from '../common/input-rules';
 
 type CreateUserInput = {
   email: string;
@@ -16,8 +17,13 @@ type CreateUserInput = {
   verificationStatus?: VerificationStatus;
 };
 
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+/** The sign-up profile fields that are stored, checked so an over-long value is refused (28 Nov). */
+export function signupProfileFields(profile: Record<string, unknown> = {}) {
+  return {
+    address: optionalText(profile.address, { label: 'Address', max: 500 }) ?? undefined,
+    city: optionalText(profile.city, { label: 'City', max: 100 }) ?? undefined,
+    state: optionalText(profile.state, { label: 'State', max: 100 }) ?? undefined,
+  };
 }
 
 @Injectable()
@@ -42,9 +48,7 @@ export class UsersService {
         profile: {
           create: {
             fullName: input.fullName.trim(),
-            address: optionalString(profile.address),
-            city: optionalString(profile.city),
-            state: optionalString(profile.state),
+            ...signupProfileFields(profile),
           },
         },
       },
