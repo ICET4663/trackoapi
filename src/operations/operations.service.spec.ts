@@ -70,6 +70,16 @@ describe('OperationsService.progressTrip', () => {
     expect(prisma.shipment.update).not.toHaveBeenCalled();
   });
 
+  it('refuses a trip note over 1,000 characters and never touches the shipment row (28 Nov)', async () => {
+    prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
+    const actor: OperationActor = { sub: 'driver-assigned', role: 'DRIVER' };
+
+    await expect(service.progressTrip('shp-1', { status: 'ARRIVED_DESTINATION', note: 'x'.repeat(1001) }, actor)).rejects.toThrow(
+      'Note must be 1,000 characters or fewer.',
+    );
+    expect(prisma.shipment.update).not.toHaveBeenCalled();
+  });
+
   it('allows a DRIVER who holds an ACCEPTED assignment on this exact shipment', async () => {
     prisma.driverAssignment.findFirst.mockResolvedValue({ id: 'assign-1' });
     const actor: OperationActor = { sub: 'driver-assigned', role: 'DRIVER' };

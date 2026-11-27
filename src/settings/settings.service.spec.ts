@@ -627,6 +627,16 @@ describe('SettingsService driver document review is a real workflow, not a fake 
       'APPROVE or REJECT',
     );
   });
+
+  it('refuses a reviewer note over 500 characters before writing anything (28 Nov)', async () => {
+    const queryRawUnsafe = jest.fn();
+    const { service } = buildService(queryRawUnsafe);
+
+    await expect(service.reviewDriverDocument('doc-1', 'admin-1', { decision: 'REJECT', note: 'x'.repeat(501) })).rejects.toThrow(
+      'Reviewer note must be 500 characters or fewer.',
+    );
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
+  });
 });
 
 describe('SettingsService vehicle document review', () => {
@@ -666,6 +676,16 @@ describe('SettingsService vehicle document review', () => {
     const { service } = buildService();
 
     await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT' })).rejects.toThrow('reviewer note');
+    await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT', note: '   ' })).rejects.toThrow('reviewer note');
+  });
+
+  it('refuses a vehicle reviewer note over 500 characters before writing anything (28 Nov)', async () => {
+    const { service, queryRawUnsafe } = buildService();
+
+    await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT', note: 'x'.repeat(501) })).rejects.toThrow(
+      'Reviewer note must be 500 characters or fewer.',
+    );
+    expect(queryRawUnsafe).not.toHaveBeenCalled();
   });
 
   it('approves only a pending document and notifies its owner', async () => {

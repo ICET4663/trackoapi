@@ -1133,7 +1133,7 @@ export class ShipmentsService {
     // is on that truck, so a handover is an operational decision outside this action.
     const releasingAcceptedJob = assignment.status === 'ACCEPTED';
     const handover = releasingAcceptedJob && CARGO_ON_BOARD.includes(assignment.shipment.status);
-    const reason = (note ?? '').trim();
+    const reason = optionalText(note, { label: 'Reason', max: 1000 }) ?? '';
     if (releasingAcceptedJob && !RELEASABLE_BEFORE_PICKUP.includes(assignment.shipment.status) && !handover) {
       throw new BadRequestException('This trip has already been delivered, so the driver cannot be replaced.');
     }
@@ -1766,6 +1766,7 @@ export class ShipmentsService {
     if (actorRole !== 'ADMIN' && actorRole !== 'DISPATCHER') {
       throw new ForbiddenException('Only platform operations can release escrow.');
     }
+    const releaseNote = optionalText(note, { label: 'Reason', max: 1000 }) ?? undefined;
 
     const escrow = await this.findEscrowOrThrow(shipmentId);
     if (escrow.status === 'DISPUTED') throw new BadRequestException('Escrow is disputed and cannot be released.');
@@ -1787,7 +1788,7 @@ export class ShipmentsService {
         if (actorRole !== 'ADMIN') {
           throw new ForbiddenException('The customer has not confirmed delivery yet. Only an admin can release this payment now, with a reason.');
         }
-        if ((note ?? '').trim().length < 10) {
+        if ((releaseNote ?? '').length < 10) {
           throw new BadRequestException('Write the reason for releasing this payment before the customer has confirmed delivery.');
         }
       }
@@ -1823,7 +1824,7 @@ export class ShipmentsService {
 
     // Timeline note and driver notification are both already best-effort/non-throwing
     // internally - supplementary to the release itself, which already succeeded above.
-    await this.updateShipmentTimeline(shipmentId, 'COMPLETED', note ?? 'Escrow released by platform operations.');
+    await this.updateShipmentTimeline(shipmentId, 'COMPLETED', releaseNote ?? 'Escrow released by platform operations.');
     await this.notifySettlementOfEscrowRelease(shipmentId, releasedEscrow.amount, releasedEscrow.currency);
     await this.notifyShipmentParties(shipmentId, {
       customer: {
@@ -1905,6 +1906,7 @@ export class ShipmentsService {
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
       throw new BadRequestException('Rating must be a whole number from 1 to 5.');
     }
+    const comment = optionalText(input.comment, { label: 'Comment', max: 1000 });
 
     const shipment = await this.prisma.shipment.findUnique({
       where: { id: shipmentId },
@@ -1928,7 +1930,7 @@ export class ShipmentsService {
         customerId,
         driverId,
         rating,
-        comment: input.comment?.trim() || null,
+        comment,
       },
     });
 

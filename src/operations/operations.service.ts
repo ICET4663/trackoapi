@@ -1019,6 +1019,8 @@ export class OperationsService {
       if (!assignment) throw new ForbiddenException('You are not the assigned driver for this shipment.');
     }
     const status = body.status ?? 'IN_TRANSIT';
+    const note = optionalText(body.note, { label: 'Note', max: 1000 });
+    const location = optionalText(body.location, { label: 'Location', max: 200 });
 
     // This route used to write whatever status it was sent, so an assigned driver could
     // rewind a trip or jump it straight to COMPLETED or a payment state. Drivers may only
@@ -1049,7 +1051,7 @@ export class OperationsService {
           timeline: {
             create: {
               status,
-              note: body.note ?? this.statusNote(status),
+              note: note ?? this.statusNote(status),
             },
           },
         },
@@ -1068,15 +1070,15 @@ export class OperationsService {
     try {
       await this.audit(actor, 'SHIPMENT_PROGRESS_UPDATED', 'Shipment', shipmentId, {
         status,
-        note: body.note,
-        location: body.location,
+        note,
+        location,
       });
 
       const alert = customerStatusAlert(status, shipment.reference);
       await this.notifications.create({
         userId: shipment.customerId,
         title: alert?.title ?? 'Shipment status updated',
-        body: alert?.body ?? body.note ?? this.statusNote(status),
+        body: alert?.body ?? note ?? this.statusNote(status),
         tone: alert?.tone ?? (status === 'COMPLETED' ? 'SUCCESS' : 'INFO'),
         entity: 'Shipment',
         entityId: shipmentId,
@@ -1264,7 +1266,7 @@ export class OperationsService {
   async resolveDispute(id: string, body: Record<string, unknown>, actor: OperationActor) {
     this.assertCanOperate(actor.role);
     const decision = String(body.decision ?? '').toUpperCase();
-    const resolution = String(body.resolution ?? 'Resolved by operations.');
+    const resolution = optionalText(body.resolution, { label: 'Resolution', max: 1000 }) ?? 'Resolved by operations.';
     const shipmentIdentifier = body.shipmentId ? String(body.shipmentId) : undefined;
     const shipment = shipmentIdentifier
       ? await this.prisma.shipment.findFirst({

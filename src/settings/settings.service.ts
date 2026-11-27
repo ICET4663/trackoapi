@@ -413,9 +413,10 @@ export class SettingsService {
     if (decision !== 'APPROVE' && decision !== 'REJECT') {
       throw new BadRequestException('Use APPROVE or REJECT as the deletion decision.');
     }
+    const note = optionalText(input.note, { label: 'Note', max: 1000 });
 
     if (decision === 'APPROVE') {
-      const result = await this.auth.adminExecuteAccountDeletion(userId, reviewerId, input.note);
+      const result = await this.auth.adminExecuteAccountDeletion(userId, reviewerId, note ?? undefined);
       return { userId, decision: 'APPROVED', ...result };
     }
 
@@ -426,7 +427,7 @@ export class SettingsService {
           action: 'ACCOUNT_DELETION_REJECTED',
           entity: 'User',
           entityId: userId,
-          metadata: { note: input.note ?? null },
+          metadata: { note },
         },
       });
     } catch (error) {
@@ -436,8 +437,8 @@ export class SettingsService {
     await this.notifications.create({
       userId,
       title: 'Deletion request update',
-      body: input.note
-        ? `Trako reviewed your account deletion request: ${input.note}`
+      body: note
+        ? `Trako reviewed your account deletion request: ${note}`
         : 'Trako reviewed your account deletion request and your account was not deleted. Contact support for details.',
       tone: 'INFO',
       entity: 'User',
@@ -1665,6 +1666,7 @@ export class SettingsService {
       if (decision !== 'PAID') throw new BadRequestException('A bank transfer can only be recorded when marking a payout paid.');
       return this.recordBankTransferPayout(id, reviewerId, input.reference, input.note);
     }
+    const note = optionalText(input.note, { label: 'Note', max: 500 });
 
     const existing = await this.prisma.payout.findUnique({
       where: { id },
@@ -1734,7 +1736,7 @@ export class SettingsService {
         status: decision as PayoutStatus,
         reviewedAt: new Date(),
         reviewedById: reviewerId,
-        reviewNote: input.note ?? null,
+        reviewNote: note,
       },
     });
 
@@ -1756,7 +1758,7 @@ export class SettingsService {
         action: 'PAYOUT_WITHDRAWAL_REVIEWED',
         entity: 'Payout',
         entityId: updated.id,
-        metadata: this.toJson({ decision, note: input.note ?? null, amountKobo: updated.amountKobo, transfer }),
+        metadata: this.toJson({ decision, note, amountKobo: updated.amountKobo, transfer }),
       },
     }).catch(() => null);
 
@@ -2085,6 +2087,7 @@ export class SettingsService {
   }
 
   async reviewDriverDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const note = optionalText(input.note, { label: 'Reviewer note', max: 500 });
     const decision = String(input.decision ?? '').toUpperCase();
     if (decision !== 'APPROVE' && decision !== 'REJECT') {
       throw new BadRequestException('Use APPROVE or REJECT as the document decision.');
@@ -2106,7 +2109,7 @@ export class SettingsService {
          where "id" = $4 and "state" = 'PENDING_REVIEW'::"DriverDocumentState"
          returning "id", "userId", "title", lower("state"::text) as "state"`,
         nextState,
-        input.note ?? null,
+        note,
         reviewerId,
         documentId,
       );
@@ -2122,7 +2125,7 @@ export class SettingsService {
         action: decision === 'APPROVE' ? 'DRIVER_DOCUMENT_APPROVED' : 'DRIVER_DOCUMENT_REJECTED',
         entity: 'DriverDocument',
         entityId: documentId,
-        metadata: { note: input.note ?? null },
+        metadata: { note },
       },
     }).catch(() => null);
 
@@ -2131,8 +2134,8 @@ export class SettingsService {
       title: decision === 'APPROVE' ? `${updated.title} verified` : `${updated.title} needs attention`,
       body: decision === 'APPROVE'
         ? `Your ${updated.title.toLowerCase()} has been verified.`
-        : input.note
-          ? `Your ${updated.title.toLowerCase()} was not approved: ${input.note}`
+        : note
+          ? `Your ${updated.title.toLowerCase()} was not approved: ${note}`
           : `Your ${updated.title.toLowerCase()} was not approved. Please upload a clearer copy.`,
       tone: decision === 'APPROVE' ? 'SUCCESS' : 'DANGER',
       entity: 'DriverDocument',
@@ -2245,9 +2248,10 @@ export class SettingsService {
   }
 
   async reviewVehicleDocument(documentId: string, reviewerId: string, input: { decision?: string; note?: string }) {
+    const note = optionalText(input.note, { label: 'Reviewer note', max: 500 });
     const decision = String(input.decision ?? '').toUpperCase();
     if (!['APPROVE', 'REJECT'].includes(decision)) throw new BadRequestException('Use APPROVE or REJECT as the document decision.');
-    if (decision === 'REJECT' && !String(input.note ?? '').trim()) throw new BadRequestException('A reviewer note is required when rejecting a document.');
+    if (decision === 'REJECT' && !note) throw new BadRequestException('A reviewer note is required when rejecting a document.');
     const state = decision === 'APPROVE' ? 'VERIFIED' : 'REJECTED';
     const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; vehicleId: string; title: string; ownerId: string; plateNumber: string; state: string }>>(
       `update "VehicleDocument" d set "state" = $1::"DriverDocumentState", "reviewNote" = $2,
@@ -2255,7 +2259,7 @@ export class SettingsService {
        from "Vehicle" v where d."id" = $4 and d."vehicleId" = v."id"
          and d."state" = 'PENDING_REVIEW'::"DriverDocumentState"
        returning d."id", d."vehicleId", d."title", v."ownerId", v."plateNumber", lower(d."state"::text) as "state"`,
-      state, input.note ?? null, reviewerId, documentId,
+      state, note, reviewerId, documentId,
     ).catch((error) => {
       throw internalError(`Could not record this vehicle document decision.`, error);
     });
@@ -2266,7 +2270,7 @@ export class SettingsService {
       title: decision === 'APPROVE' ? `${updated.title} verified` : `${updated.title} needs attention`,
       body: decision === 'APPROVE'
         ? `${updated.title} for ${updated.plateNumber} is verified.`
-        : `${updated.title} for ${updated.plateNumber} was rejected: ${input.note}`,
+        : `${updated.title} for ${updated.plateNumber} was rejected: ${note}`,
       tone: decision === 'APPROVE' ? 'SUCCESS' : 'DANGER',
       entity: 'VehicleDocument', entityId: updated.id, actionUrl: `/owner/vehicle-documents/${updated.vehicleId}`,
     }).catch(() => null);
