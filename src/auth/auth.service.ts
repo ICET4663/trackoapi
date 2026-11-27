@@ -145,6 +145,10 @@ export class AuthService {
     if (!identifier || typeof body.code !== 'string' || !body.code || typeof body.password !== 'string' || body.password.length < 6) {
       throw new BadRequestException('Identifier, OTP code, and a new password are required.');
     }
+    // Same limit as sign-up (28 Nov); checked before the code is used.
+    if (body.password.length > 128) {
+      throw new BadRequestException('Use a password of 128 characters or fewer.');
+    }
 
     // Same brute-force gap as verifyOtp() - this path has its own inline verification
     // rather than sharing that method, so it needs the same guess-side rate limit

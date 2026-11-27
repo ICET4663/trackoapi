@@ -94,6 +94,18 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
     expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
   });
 
+  it('confirmPasswordReset() refuses a new password over 128 characters before the code is checked (28 Nov)', async () => {
+    const assertAllowed = jest.fn().mockResolvedValue(undefined);
+    const { service, prisma } = buildService({ assertAllowed });
+
+    await expect(service.confirmPasswordReset({
+      identifier: 'admin@tracko.ng', code: '123456', password: 'p'.repeat(129),
+    })).rejects.toThrow('Use a password of 128 characters or fewer.');
+
+    expect(assertAllowed).not.toHaveBeenCalled();
+    expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
+  });
+
   it('confirmPasswordReset() is blocked by the rate limiter before the account is even looked up', async () => {
     const assertAllowed = jest.fn().mockRejectedValue(new Error('rate limited'));
     const { service, prisma } = buildService({ assertAllowed });
