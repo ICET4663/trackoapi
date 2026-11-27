@@ -1,4 +1,4 @@
-import { IsEmail, IsEnum, IsObject, IsOptional, IsPhoneNumber, IsString, Length, MinLength } from 'class-validator';
+import { IsEmail, IsEnum, IsObject, IsOptional, IsPhoneNumber, IsString, Length, MaxLength, MinLength } from 'class-validator';
 import { UserRole } from '@prisma/client';
 
 export class RegisterDto {
@@ -9,10 +9,12 @@ export class RegisterDto {
   phone!: string;
 
   @IsString()
+  @Length(2, 120, { message: 'Full name must be 2 to 120 characters.' })
   fullName!: string;
 
   @IsString()
   @MinLength(6)
+  @MaxLength(128)
   password!: string;
 
   @IsString()

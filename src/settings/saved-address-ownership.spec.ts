@@ -24,7 +24,7 @@ describe('SettingsService saved addresses belong to one customer', () => {
     // The conflict update is skipped for another user's row, so no row comes back.
     const service = buildService(jest.fn().mockResolvedValue([]));
 
-    await expect(service.saveAddress({ label: 'Mine now' }, 'addr-of-someone-else', 'cust-1'))
+    await expect(service.saveAddress({ label: 'Mine now', line: '1 Allen Avenue' }, 'addr-of-someone-else', 'cust-1'))
       .rejects.toBeInstanceOf(NotFoundException);
   });
 

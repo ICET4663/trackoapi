@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { internalError, mediaLink, optionalText } from '../common/input-rules';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -122,7 +123,7 @@ export class TrackingService {
         shipmentId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load the planned route: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load the planned route.`, error);
     }
     if (!row) throw new NotFoundException('Shipment was not found.');
     if (row.plannedRoutePolyline) return { encodedPolyline: row.plannedRoutePolyline };
@@ -316,9 +317,11 @@ export class TrackingService {
         driverId.startsWith('preview-') ? null : driverId,
         latitude,
         longitude,
-        input.heading ?? null,
-        input.speedKph ?? null,
-        input.note ?? null,
+        // A non-number heading or speed used to fail the insert and lose the GPS point.
+        Number.isFinite(Number(input.heading)) && input.heading !== null && input.heading !== undefined ? Number(input.heading) : null,
+        Number.isFinite(Number(input.speedKph)) && input.speedKph !== null && input.speedKph !== undefined ? Number(input.speedKph) : null,
+        // Cut, never refused: a GPS point must not be lost over its note.
+        typeof input.note === 'string' && input.note.trim() ? input.note.trim().slice(0, 500) : null,
         recordedAt,
         accuracyM,
         clientPingId,
@@ -333,7 +336,7 @@ export class TrackingService {
         );
       }
     } catch (error) {
-      throw new InternalServerErrorException(`Could not record this location. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record this location.`, error);
     }
 
     if (!rows[0]) throw new ConflictException('Location sharing has ended for this shipment.');
@@ -491,6 +494,11 @@ export class TrackingService {
   }
 
   async submitDeliveryProof(shipmentId: string, user: AuthUser, input: DeliveryProofInput) {
+    // 27 Nov: links must be real http(s) or image data URLs, and the text fields are bounded.
+    const photoUrl = mediaLink(input.photoUrl, 'Delivery photo');
+    const signatureUrl = mediaLink(input.signatureUrl, 'Signature photo');
+    const recipientName = optionalText(input.recipientName, { label: 'Recipient name', max: 120 });
+    const note = optionalText(input.note, { label: 'Note', max: 1000 });
     shipmentId = await this.assertShipmentAccess(shipmentId, user);
     const driverId = user.sub;
 
@@ -526,10 +534,10 @@ export class TrackingService {
         `proof_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         driverId.startsWith('preview-') ? null : driverId,
-        input.photoUrl ?? null,
-        input.signatureUrl ?? null,
-        input.recipientName ?? null,
-        input.note ?? null,
+        photoUrl,
+        signatureUrl,
+        recipientName,
+        note,
       );
       if (!rows[0]) throw new Error('Delivery proof insert returned no row.');
 
@@ -565,7 +573,7 @@ export class TrackingService {
         shipmentId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not record proof of delivery. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record proof of delivery.`, error);
     }
 
     await Promise.all([
@@ -698,7 +706,7 @@ export class TrackingService {
         },
       };
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load shipment evidence. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load shipment evidence.`, error);
     }
   }
 

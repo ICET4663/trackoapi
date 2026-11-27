@@ -1025,8 +1025,19 @@ describe('SettingsService saved addresses never fake success', () => {
   it('saveAddress() throws instead of echoing back the submitted input as "saved" when the insert fails', async () => {
     const { service } = buildService(jest.fn().mockRejectedValue(new Error('connection reset')));
 
-    await expect(service.saveAddress({ label: 'Home', city: 'Lagos' }, undefined, 'customer-1'))
+    await expect(service.saveAddress({ label: 'Home', line: 'Lekki', city: 'Lagos' }, undefined, 'customer-1'))
       .rejects.toBeInstanceOf(InternalServerErrorException);
+  });
+
+  it('saveAddress() refuses an address with no street line or an over-long field before touching the database', async () => {
+    const query = jest.fn();
+    const { service } = buildService(query);
+
+    await expect(service.saveAddress({ label: 'Home', city: 'Lagos' }, undefined, 'customer-1'))
+      .rejects.toThrow('Address is required.');
+    await expect(service.saveAddress({ label: 'x'.repeat(61), line: 'Lekki', city: 'Lagos' }, undefined, 'customer-1'))
+      .rejects.toThrow('Label must be 60 characters or fewer.');
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('saveAddress() returns the real saved row on success', async () => {
@@ -1034,7 +1045,7 @@ describe('SettingsService saved addresses never fake success', () => {
       { id: 'addr-1', label: 'Home', line: 'Lekki', city: 'Lagos', address: null, icon: null, isDefaultPickup: false },
     ]));
 
-    const result = await service.saveAddress({ label: 'Home', city: 'Lagos' }, undefined, 'customer-1');
+    const result = await service.saveAddress({ label: 'Home', line: 'Lekki', city: 'Lagos' }, undefined, 'customer-1');
 
     expect(result).toMatchObject({ id: 'addr-1', label: 'Home' });
   });

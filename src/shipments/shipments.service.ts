@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, InternalServerErrorException, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { internalError, isUniqueClash, koboAmount, optionalText } from '../common/input-rules';
 import { AssignmentStatus, Prisma, Shipment, ShipmentStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { MapsProviderService } from '../integrations/maps-provider.service';
@@ -132,6 +133,21 @@ export class ShipmentsService {
    */
   assignReservedDriver?: (shipmentId: string) => Promise<boolean>;
 
+  /**
+   * TRK references are the booking time in milliseconds and must be unique, so two bookings in
+   * the same millisecond used to fail the second one with a 500. Retry with the next number.
+   */
+  private async createWithFreshReference<T>(create: (reference: string) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await create(`TRK-${Date.now() + attempt}`);
+      } catch (error) {
+        if (attempt < 3 && isUniqueClash(error, 'reference')) continue;
+        throw error;
+      }
+    }
+  }
+
   async create(customerId: string, dto: CreateShipmentDto) {
     await this.assertNotInMaintenanceMode();
     await this.assertCustomerCanCreateShipment(customerId);
@@ -177,9 +193,9 @@ export class ShipmentsService {
     // to nothing; dispatch would never see it because it doesn't exist. This is the
     // single most consequential flow in the app - a real failure must throw.
     try {
-      const shipment = await this.prisma.shipment.create({
+      const shipment = await this.createWithFreshReference((reference) => this.prisma.shipment.create({
         data: {
-          reference: `TRK-${Date.now()}`,
+          reference,
           customerId,
           pickupLabel: normalized.pickupLabel,
           pickupAddress: normalized.pickupAddress,
@@ -204,7 +220,7 @@ export class ShipmentsService {
           },
         },
         include: { timeline: true },
-      });
+      }));
 
       if (clientRequestId) {
         await this.prisma.$executeRawUnsafe(
@@ -258,7 +274,7 @@ export class ShipmentsService {
         ).catch(() => undefined);
       }
       this.logger.error(`create() failed to save shipment for customer ${customerId}: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not create this shipment. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not create this shipment.`, error);
     }
   }
 
@@ -373,7 +389,7 @@ export class ShipmentsService {
       // customer/driver/admin's shipment list would silently show fake content
       // instead of surfacing the outage.
       this.logger.error(`list(${userId}, ${role}) failed: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not load shipments. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load shipments.`, error);
     }
   }
 
@@ -392,7 +408,7 @@ export class ShipmentsService {
       // "in progress" timeline) for ANY id on a real infrastructure failure - viewing
       // shipment details during a DB hiccup would show made-up data instead of an error.
       this.logger.error(`get(${id}) failed: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not load this shipment. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load this shipment.`, error);
     }
 
     if (!shipment) throw new NotFoundException('Shipment not found.');
@@ -488,7 +504,7 @@ export class ShipmentsService {
       // (and, for DELIVERED specifically, never actually starting the escrow release
       // checklist). A real update failure must throw, not fabricate the new state.
       this.logger.error(`updateStatus(${id} -> ${dto.status}) failed: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not update this shipment's status.`, error);
     }
   }
 
@@ -986,10 +1002,10 @@ export class ShipmentsService {
   // remains a separate, explicit admin action via the existing escrow refund tool. A
   // counteroffer above the funded amount can never be accepted here - that needs a fresh
   // quote and a new customer payment, not a silent price bump on an already-paid escrow.
-  async proposeCounterOffer(assignmentId: string, driverId: string, amountKobo: number, note: string | undefined) {
-    if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
-      throw new BadRequestException('Enter a valid proposed amount.');
-    }
+  async proposeCounterOffer(assignmentId: string, driverId: string, proposedKobo: unknown, proposedNote: unknown) {
+    // Whole kobo within the Int column, and a bounded note (27 Nov).
+    const amountKobo = koboAmount(proposedKobo, 'proposed amount');
+    const note = optionalText(proposedNote, { label: 'Note', max: 500 }) ?? undefined;
     try {
       const assignment = await this.prisma.driverAssignment.findUnique({
         where: { id: assignmentId },
@@ -1542,7 +1558,7 @@ export class ShipmentsService {
         `tl_${randomUUID().replace(/-/g, '')}`,
         shipmentId,
         nextStatus,
-        event.note ? String(event.note) : String(event.label ?? 'Shipment updated'),
+        optionalText(event.note, { label: 'Note', max: 1000 }) ?? optionalText(event.label, { label: 'Label', max: 200 }) ?? 'Shipment updated',
       );
 
       await this.prisma.$executeRawUnsafe(
@@ -1560,7 +1576,7 @@ export class ShipmentsService {
         );
       }
     } catch (error) {
-      throw new InternalServerErrorException(`Could not update this shipment's status. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not update this shipment's status.`, error);
     }
 
     if (!rows[0]) throw new InternalServerErrorException('Could not update this shipment\'s status. Please try again.');
@@ -2076,7 +2092,7 @@ export class ShipmentsService {
         check,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not record this confirmation. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record this confirmation.`, error);
     }
 
     if (!rows[0]) throw new NotFoundException('Escrow record not found for this shipment.');

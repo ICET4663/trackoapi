@@ -241,6 +241,37 @@ describe('DataService never fakes success on a real failure', () => {
     ).rejects.toBeInstanceOf(InternalServerErrorException);
   });
 
+  it('create() tells the owner a plate is already registered instead of a 500', async () => {
+    const prisma = {
+      vehicle: { create: jest.fn().mockRejectedValue(Object.assign(new Error('Unique constraint'), { code: 'P2002', meta: { target: ['plateNumber'] } })) },
+    } as unknown as PrismaService;
+    const service = new DataService(prisma);
+
+    await expect(
+      service.create('owner-trucks', { reg: 'LAG-204-TK', type: 'Flatbed', capacity: '30 tons', volumeCapacity: '55' }, 'owner-1'),
+    ).rejects.toThrow('A truck with this plate number is already registered.');
+  });
+
+  it('create() refuses odd or over-long plate numbers before any write', async () => {
+    const create = jest.fn();
+    const service = new DataService({ vehicle: { create } } as unknown as PrismaService);
+    const truck = { type: 'Flatbed', capacity: '30 tons', volumeCapacity: '55' };
+
+    await expect(service.create('owner-trucks', { ...truck, reg: 'LAG<script>' }, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.create('owner-trucks', { ...truck, reg: 'A'.repeat(21) }, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.create('owner-trucks', { ...truck, reg: 'LAG-204-TK', type: 'x'.repeat(61) }, 'owner-1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('create() no longer saves an unpriced customer shipment (bookings go through POST /v1/shipments)', async () => {
+    const create = jest.fn();
+    const service = new DataService({ shipment: { create } } as unknown as PrismaService);
+
+    await expect(service.create('customer-shipments', { origin: 'Lagos', destination: 'Ibadan' }, 'cust-1', 'CUSTOMER'))
+      .rejects.toThrow('Book shipments through the booking form.');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('create() still rejects a missing plate number as a real BadRequestException', async () => {
     const prisma = {} as unknown as PrismaService;
     const service = new DataService(prisma);

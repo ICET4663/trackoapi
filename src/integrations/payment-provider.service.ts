@@ -1,4 +1,5 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { internalError } from '../common/input-rules';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -195,9 +196,7 @@ export class PaymentProviderService {
         },
       });
     } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not create the escrow record, so no payment was started: ${this.errorMessage(error)}`,
-      );
+      throw internalError(`Could not create the escrow record, so no payment was started.`, error);
     }
 
     if (status.provider === 'paystack' && status.realChargeEnabled) {

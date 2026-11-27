@@ -6,6 +6,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
 import { isReturnLoad, returnLoadBonus, returnLoadDistanceKm } from '../shipments/return-load';
 import { customerStatusAlert, isForwardTripStep } from '../shipments/trip-status-rules';
+import { optionalText, oneOf } from '../common/input-rules';
+import {
+  accessibleShipmentId,
+  shipmentRef,
+  supportChannel,
+  supportMessage,
+  supportTopic,
+  ticketId,
+  type ShipmentLookup,
+} from '../common/support-input';
 
 type OperationActor = {
   sub: string;
@@ -1133,8 +1143,11 @@ export class OperationsService {
   }
 
   async createDispute(body: Record<string, unknown>, actor: OperationActor) {
-    const id = `DSP-${Date.now()}`;
-    const shipmentIdentifier = body.shipmentId ? String(body.shipmentId) : undefined;
+    const id = ticketId('DSP');
+    const reason = optionalText(body.reason, { label: 'Reason', max: 200 }) ?? 'Shipment support dispute';
+    const description = optionalText(body.description, { label: 'Description', max: 4000 });
+    const priority = oneOf(body.priority, ['LOW', 'MEDIUM', 'HIGH'] as const, 'MEDIUM', 'Priority');
+    const shipmentIdentifier = shipmentRef(body.shipmentId) ?? undefined;
     const shipment = shipmentIdentifier
       ? await this.prisma.shipment.findFirst({
           where: { OR: [{ id: shipmentIdentifier }, { reference: shipmentIdentifier }] },
@@ -1182,9 +1195,9 @@ export class OperationsService {
         id,
         shipmentId ?? null,
         actor.sub.startsWith('preview-') ? null : actor.sub,
-        String(body.reason ?? 'Shipment support dispute'),
-        body.description ? String(body.description) : null,
-        String(body.priority ?? 'MEDIUM'),
+        reason,
+        description,
+        priority,
       );
     } catch (error) {
       this.logger.error(`createDispute() failed to persist dispute: ${this.errorMessage(error)}`);
@@ -1196,9 +1209,9 @@ export class OperationsService {
     try {
       await this.audit(actor, 'DISPUTE_CREATED', 'Dispute', id, {
         shipmentId,
-        reason: body.reason,
-        priority: body.priority ?? 'MEDIUM',
-        description: body.description,
+        reason,
+        priority,
+        description,
       });
 
       if (shipmentId) {
@@ -1210,7 +1223,7 @@ export class OperationsService {
               timeline: {
                 create: {
                   status: 'DISPUTED',
-                  note: String(body.description ?? body.reason ?? 'Dispute opened.'),
+                  note: description ?? reason,
                 },
               },
             },
@@ -1226,7 +1239,7 @@ export class OperationsService {
       await this.notifications.create({
         role: 'DISPATCHER',
         title: 'New dispute opened',
-        body: String(body.reason ?? 'A shipment dispute needs review.'),
+        body: reason,
         tone: 'WARNING',
         entity: 'Dispute',
         entityId: id,
@@ -1242,8 +1255,8 @@ export class OperationsService {
       id,
       shipmentId: shipment?.reference,
       status: 'OPEN',
-      priority: String(body.priority ?? 'MEDIUM'),
-      reason: String(body.reason ?? 'Shipment support dispute'),
+      priority,
+      reason,
       createdAt: new Date().toISOString(),
     };
   }
@@ -1372,7 +1385,15 @@ export class OperationsService {
   }
 
   async createSupportTicket(body: Record<string, unknown>, actor: OperationActor) {
-    const id = `SUP-${Date.now()}`;
+    // Same rules as /v1/support/contact (25 Nov): known channel, bounded message, and a linked
+    // shipment must be one this user can see (an unknown id used to fail the insert).
+    const channel = supportChannel(body.channel);
+    const topic = supportTopic(body.topic, 'General support');
+    const message = supportMessage(body.message);
+    const ref = shipmentRef(body.shipmentId);
+    const shipmentId = await accessibleShipmentId(this.prisma as unknown as ShipmentLookup, actor.sub, actor.role, ref);
+    if (ref && !shipmentId) throw new BadRequestException('That shipment was not found on your account.');
+    const id = ticketId('SUP');
 
     // The insert is the actual ticket: if it fails, the caller must see a real error
     // rather than a fabricated "OPEN" ticket that was never saved.
@@ -1381,11 +1402,11 @@ export class OperationsService {
         `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
          values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
-        body.shipmentId ? String(body.shipmentId) : null,
+        shipmentId,
         actor.sub.startsWith('preview-') ? null : actor.sub,
-        String(body.topic ?? 'General support'),
-        String(body.channel ?? 'CHAT'),
-        body.message ? String(body.message) : null,
+        topic,
+        channel,
+        message,
       );
     } catch (error) {
       this.logger.error(`createSupportTicket() failed to persist ticket: ${this.errorMessage(error)}`);
@@ -1394,16 +1415,16 @@ export class OperationsService {
 
     try {
       await this.audit(actor, 'SUPPORT_TICKET_CREATED', 'SupportTicket', id, {
-        topic: body.topic,
-        channel: body.channel,
-        message: body.message,
-        shipmentId: body.shipmentId,
+        topic,
+        channel,
+        message,
+        shipmentId,
       });
 
       await this.notifications.create({
         role: 'DISPATCHER',
         title: 'New support ticket',
-        body: String(body.topic ?? 'A user created a support ticket.'),
+        body: topic,
         tone: 'INFO',
         entity: 'SupportTicket',
         entityId: id,
@@ -1416,8 +1437,8 @@ export class OperationsService {
     return {
       id,
       status: 'OPEN',
-      topic: String(body.topic ?? 'General support'),
-      channel: String(body.channel ?? 'CHAT'),
+      topic,
+      channel,
       createdAt: new Date().toISOString(),
     };
   }

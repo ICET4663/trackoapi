@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { DATA_URL_MAX } from '../common/input-rules';
 import { ConfigService } from '@nestjs/config';
 import { UserRole, VerificationStatus } from '@prisma/client';
 import { KycProviderService } from '../integrations/kyc-provider.service';
@@ -119,7 +120,7 @@ export class KycService {
         this.optionalText(input.bvn),
         this.optionalText(input.licenceNumber),
         this.optionalDate(input.licenceExpiry),
-        this.optionalText(input.note),
+        this.optionalText(input.note, 1000),
       );
 
       for (const document of documents) {
@@ -182,7 +183,7 @@ export class KycService {
         throw new BadRequestException('KYC documents are only available for customer, driver, and truck owner accounts.');
       }
 
-      const url = this.requiredText(input.url, 'Document URL is required.');
+      const url = this.requiredText(input.url, 'Document URL is required.', DATA_URL_MAX);
       const type = this.optionalText(input.type) ?? 'DOCUMENT';
       const label = this.optionalText(input.label) ?? 'KYC document';
       const mediaId = this.optionalText(input.mediaId);
@@ -254,7 +255,7 @@ export class KycService {
           id: this.id('doc'),
           type: this.optionalText(input.type) ?? 'DOCUMENT',
           label: this.optionalText(input.label) ?? 'KYC document',
-          url: this.optionalText(input.url) ?? 'preview://kyc/document',
+          url: this.optionalText(input.url, DATA_URL_MAX) ?? 'preview://kyc/document',
           mediaId: this.optionalText(input.mediaId),
         },
         submission: this.previewSubmission(userId, userRole),
@@ -580,7 +581,7 @@ export class KycService {
         return {
           type: this.optionalText(item.type) ?? 'DOCUMENT',
           label: this.optionalText(item.label) ?? 'KYC document',
-          url: this.optionalText(item.url),
+          url: this.optionalText(item.url, DATA_URL_MAX),
           mediaId: this.optionalText(item.mediaId),
         };
       })
@@ -617,15 +618,17 @@ export class KycService {
     return 'ACTION_NEEDED';
   }
 
-  private requiredText(value: unknown, message: string) {
-    const text = this.optionalText(value);
+  private requiredText(value: unknown, message: string, max?: number) {
+    const text = this.optionalText(value, max);
     if (!text) throw new BadRequestException(message);
     return text;
   }
 
-  private optionalText(value: unknown) {
+  private optionalText(value: unknown, max = 200) {
     if (typeof value !== 'string') return null;
     const text = value.trim();
+    // 27 Nov: KYC text used to be saved at any length.
+    if (text.length > max) throw new BadRequestException(`Keep each KYC detail to ${max.toLocaleString('en-US')} characters or fewer.`);
     return text.length ? text : null;
   }
 

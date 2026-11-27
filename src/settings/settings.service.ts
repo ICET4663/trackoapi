@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { internalError, koboAmount, mediaLink, optionalText, requiredText } from '../common/input-rules';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, PayoutStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -242,7 +243,7 @@ export class SettingsService {
         };
       }
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load your dashboard. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load your dashboard.`, error);
     }
     // Every branch above returns; an unrecognized role falls through to here.
     throw new BadRequestException('Unsupported account role.');
@@ -260,7 +261,7 @@ export class SettingsService {
         include: { profile: true },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load your profile. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load your profile.`, error);
     }
     if (!user) throw new NotFoundException('Account not found.');
     return this.toProfileRecord(user);
@@ -275,13 +276,17 @@ export class SettingsService {
       where: { id: userId },
       include: { profile: true },
     }).catch((error) => {
-      throw new InternalServerErrorException(`Could not load your profile. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load your profile.`, error);
     });
     if (!current) throw new NotFoundException('Account not found.');
 
-    const fullName = String(input.fullName ?? current.profile?.fullName ?? current.email).trim();
-    const address = input.address === undefined ? current.profile?.address : input.address ? String(input.address) : null;
-    const avatarUrl = input.avatarUrl === undefined ? current.profile?.avatarUrl : input.avatarUrl ? String(input.avatarUrl) : null;
+    // 27 Nov: a blank or very long name, an endless address and a photo "link" that is not
+    // a link (javascript:, plain text) used to be saved as sent.
+    const fullName = input.fullName === undefined
+      ? String(current.profile?.fullName ?? current.email).trim()
+      : requiredText(input.fullName, { label: 'Full name', min: 2, max: 120 });
+    const address = input.address === undefined ? current.profile?.address : optionalText(input.address, { label: 'Address', max: 500 });
+    const avatarUrl = input.avatarUrl === undefined ? current.profile?.avatarUrl : mediaLink(input.avatarUrl, 'Profile photo');
 
     try {
       await this.prisma.profile.upsert({
@@ -299,7 +304,7 @@ export class SettingsService {
         },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not save your profile. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save your profile.`, error);
     }
 
     await this.prisma.auditLog.create({
@@ -316,8 +321,8 @@ export class SettingsService {
   }
 
   async requestAccountDeletion(userId: string, input: { reason?: string }) {
-    const id = `account-deletion-${Date.now()}`;
-    const reason = String(input.reason ?? 'User requested account deletion from app.');
+    const id = `account-deletion-${Date.now()}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    const reason = optionalText(input.reason, { label: 'Reason', max: 1000 }) ?? 'User requested account deletion from app.';
 
     // The audit log entry IS the request - it's what pendingAccountDeletionRequests()
     // below reads to build the admin review queue. If this insert fails, the request was
@@ -339,7 +344,7 @@ export class SettingsService {
         },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not submit your deletion request. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not submit your deletion request.`, error);
     }
 
     await this.notifications.create({
@@ -425,7 +430,7 @@ export class SettingsService {
         },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not record this decision. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record this decision.`, error);
     }
 
     await this.notifications.create({
@@ -482,7 +487,7 @@ export class SettingsService {
       // Used to silently return the default preference set on any read failure - a user
       // who had actually customized their preferences would see them apparently reset,
       // with no indication the real values just failed to load.
-      throw new InternalServerErrorException(`Could not load your notification preferences. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load your notification preferences.`, error);
     }
   }
 
@@ -518,7 +523,7 @@ export class SettingsService {
       // Used to echo back the requested value as if it had been saved on ANY failure of
       // the actual insert - the toggle would appear to flip in the UI while nothing was
       // written to the database, silently reverting on next real load.
-      throw new InternalServerErrorException(`Could not save this preference. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this preference.`, error);
     }
   }
 
@@ -535,7 +540,7 @@ export class SettingsService {
     try {
       await this.prisma.user.update({ where: { id: userId }, data: { preferredLanguage: language } });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not save this language preference. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this language preference.`, error);
     }
     return { preferredLanguage: language };
   }
@@ -791,7 +796,7 @@ export class SettingsService {
       // Used to fall back to a single fabricated "Trako Customer" support ticket on any
       // read failure - an admin/dispatcher's support queue would show a made-up ticket
       // instead of an error.
-      throw new InternalServerErrorException(`Could not load support tickets. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load support tickets.`, error);
     }
   }
 
@@ -843,7 +848,7 @@ export class SettingsService {
       // genuinely-missing ticket - an admin resolving a real support ticket during a DB
       // hiccup would see success while nothing was actually updated.
       if (error instanceof NotFoundException) throw error;
-      throw new InternalServerErrorException(`Could not resolve this support ticket. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not resolve this support ticket.`, error);
     }
   }
 
@@ -874,7 +879,7 @@ export class SettingsService {
         userId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load saved addresses: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load saved addresses.`, error);
     }
   }
 
@@ -887,7 +892,7 @@ export class SettingsService {
         userId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load this address: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load this address.`, error);
     }
     if (!rows[0]) throw new NotFoundException('Saved address not found.');
     return rows[0];
@@ -901,6 +906,12 @@ export class SettingsService {
   // now only applies to the caller's own row; anything else is "not found".
   async saveAddress(input: Record<string, unknown>, id: string | undefined, userId: string) {
     const addressId = id ?? `addr_${randomUUID().replace(/-/g, '')}`;
+    // 27 Nov: an address with no street line, or fields of any length, used to be saved as sent.
+    const label = optionalText(input.label, { label: 'Label', max: 60 }) ?? 'Saved address';
+    const line = requiredText(input.line ?? input.address, { label: 'Address', max: 300 });
+    const city = optionalText(input.city, { label: 'City', max: 100 }) ?? '';
+    const fullAddress = optionalText(input.address, { label: 'Address', max: 500 });
+    const icon = optionalText(input.icon, { label: 'Icon', max: 40 });
     let rows: SavedAddressRecord[];
     try {
       rows = await this.prisma.$queryRawUnsafe<SavedAddressRecord[]>(
@@ -918,15 +929,15 @@ export class SettingsService {
          returning "id", "label", "line", "city", "address", "icon", "isDefaultPickup"`,
         addressId,
         userId,
-        String(input.label ?? 'Saved address'),
-        String(input.line ?? input.address ?? ''),
-        String(input.city ?? ''),
-        input.address ? String(input.address) : null,
-        input.icon ? String(input.icon) : null,
-        Boolean(input.isDefaultPickup),
+        label,
+        line,
+        city,
+        fullAddress,
+        icon,
+        input.isDefaultPickup === true || input.isDefaultPickup === 'true',
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not save this address. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this address.`, error);
     }
     if (!rows[0]) throw new NotFoundException('Saved address not found.');
     return rows[0];
@@ -943,7 +954,7 @@ export class SettingsService {
         userId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not delete this address. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not delete this address.`, error);
     }
     if (!rows[0]) throw new NotFoundException('Saved address not found.');
     return { deleted: true };
@@ -960,7 +971,7 @@ export class SettingsService {
         userId,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load payment methods: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load payment methods.`, error);
     }
   }
 
@@ -1502,16 +1513,15 @@ export class SettingsService {
   }
 
   private async requestSettlementWithdrawal(userId: string, beneficiary: SettlementBeneficiary, input: { amountKobo?: number; amount?: number; note?: string }) {
-    const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
-    if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
-      throw new BadRequestException('Enter a valid withdrawal amount.');
-    }
+    // Whole kobo only and within the Int column: 1.5 kobo or a huge amount used to fail the insert.
+    const amountKobo = koboAmount(input.amountKobo ?? input.amount, 'withdrawal amount');
+    const note = optionalText(input.note, { label: 'Note', max: 500 });
 
     let earnings: Awaited<ReturnType<typeof this.settlementEarnings>>;
     try {
       earnings = await this.settlementEarnings(userId, beneficiary, { strict: true });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not verify your available balance. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not verify your available balance.`, error);
     }
     if (amountKobo > earnings.availableBalance) {
       throw new BadRequestException('Withdrawal amount is higher than available balance.');
@@ -1538,7 +1548,7 @@ export class SettingsService {
       data: {
         driverId: userId,
         amountKobo,
-        note: input.note ?? null,
+        note,
         bankLabel: [bank?.bankName, bank?.maskedNumber].filter(Boolean).join(' '),
       },
     });
@@ -1548,7 +1558,7 @@ export class SettingsService {
         await this.prisma.$executeRawUnsafe(`update "Payout" set "paymentMode" = 'live' where "id" = $1`, payout.id);
       } catch (error) {
         await this.prisma.payout.delete({ where: { id: payout.id } }).catch(() => null);
-        throw new InternalServerErrorException(`Could not record your withdrawal request. Please try again: ${this.errorMessage(error)}`);
+        throw internalError(`Could not record your withdrawal request.`, error);
       }
     }
 
@@ -1634,7 +1644,7 @@ export class SettingsService {
         };
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load payout requests. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load payout requests.`, error);
     }
   }
 
@@ -1932,7 +1942,7 @@ export class SettingsService {
       'select "id", "title", "meta", lower("state"::text) as "state", "issued", "expires", "number", "fileUrl", "reviewNote" from "DriverDocument" where "userId" = $1 order by "createdAt" desc',
       userId,
     ).catch((error) => {
-      throw new InternalServerErrorException(`Could not load driver documents: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load driver documents.`, error);
     });
 
     const byDbId = new Map(rows.map((row) => [row.id, row]));
@@ -1968,6 +1978,8 @@ export class SettingsService {
     const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
     if (!fileUrl) throw new BadRequestException('Document file URL is required.');
     this.assertTrakoUpload(fileUrl);
+    const documentNumber = optionalText(input.number, { label: 'Document number', max: 60 });
+    const meta = optionalText(input.meta, { label: 'Document note', max: 200 }) ?? 'Uploaded - pending review';
 
     const expires = input.expires ? new Date(input.expires) : null;
     const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
@@ -1994,9 +2006,9 @@ export class SettingsService {
         this.driverDocumentDbId(userId, id),
         userId,
         title,
-        input.meta ?? 'Uploaded - pending review',
+        meta,
         expiresValue,
-        input.number ?? null,
+        documentNumber,
         fileUrl,
       );
 
@@ -2006,7 +2018,7 @@ export class SettingsService {
           action: 'DRIVER_DOCUMENT_UPLOADED',
           entity: 'DriverDocument',
           entityId: this.driverDocumentDbId(userId, id),
-          metadata: { fileUrl, number: input.number ?? null, expires: input.expires ?? null },
+          metadata: { fileUrl, number: documentNumber, expires: input.expires ?? null },
         },
       }).catch(() => null);
 
@@ -2023,13 +2035,13 @@ export class SettingsService {
       return {
         uploaded: true,
         message: 'Driver document uploaded for review.',
-        document: { id, title, meta: input.meta ?? 'Uploaded - pending review', state: 'pending_review', fileUrl },
+        document: { id, title, meta, state: 'pending_review', fileUrl },
       };
     } catch (error) {
       // The insert IS the upload - a driver who believes their license photo was saved
       // when it never persisted has no real document on file, silently. Same
       // fake-success-on-failure pattern this session has repeatedly fixed elsewhere.
-      throw new InternalServerErrorException(`Could not save this document. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this document.`, error);
     }
   }
 
@@ -2068,7 +2080,7 @@ export class SettingsService {
     } catch (error) {
       // This used to have no error handling at all - a real failure surfaced only as
       // NestJS's generic, detail-free "Internal server error".
-      throw new InternalServerErrorException(`Could not load pending driver documents. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load pending driver documents.`, error);
     }
   }
 
@@ -2100,7 +2112,7 @@ export class SettingsService {
       );
       updated = rows[0];
     } catch (error) {
-      throw new InternalServerErrorException(`Could not record this decision. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record this decision.`, error);
     }
     if (!updated) throw new NotFoundException('No pending document found for this decision - it may have already been reviewed.');
 
@@ -2177,6 +2189,7 @@ export class SettingsService {
     const fileUrl = String(input.fileUrl ?? input.url ?? '').trim();
     if (!fileUrl) throw new BadRequestException('Document file URL is required.');
     this.assertTrakoUpload(fileUrl);
+    const documentNumber = optionalText(input.number, { label: 'Document number', max: 60 });
     const expires = input.expires ? new Date(input.expires) : null;
     const expiresValue = expires && !Number.isNaN(expires.getTime()) ? expires : null;
     const id = `${vehicleId}-${type.toLowerCase()}`;
@@ -2189,9 +2202,9 @@ export class SettingsService {
          "expires" = excluded."expires", "fileUrl" = excluded."fileUrl", "reviewNote" = null,
          "reviewedAt" = null, "reviewedById" = null, "updatedAt" = current_timestamp
        returning "id", lower("state"::text) as "state"`,
-      id, vehicleId, type, required.title, input.number ?? null, expiresValue, fileUrl,
+      id, vehicleId, type, required.title, documentNumber, expiresValue, fileUrl,
     ).catch((error) => {
-      throw new InternalServerErrorException(`Could not save this vehicle document: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this vehicle document.`, error);
     });
 
     await this.notifications.create({
@@ -2227,7 +2240,7 @@ export class SettingsService {
       // "PENDING_REVIEW" enum value or a review column missing on production, both real
       // schema-drift bugs found live) surfaced only as NestJS's generic, detail-free
       // "Internal server error", giving no clue what actually broke.
-      throw new InternalServerErrorException(`Could not load pending vehicle documents. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load pending vehicle documents.`, error);
     }
   }
 
@@ -2244,7 +2257,7 @@ export class SettingsService {
        returning d."id", d."vehicleId", d."title", v."ownerId", v."plateNumber", lower(d."state"::text) as "state"`,
       state, input.note ?? null, reviewerId, documentId,
     ).catch((error) => {
-      throw new InternalServerErrorException(`Could not record this vehicle document decision: ${this.errorMessage(error)}`);
+      throw internalError(`Could not record this vehicle document decision.`, error);
     });
     const updated = rows[0];
     if (!updated) throw new NotFoundException('No pending vehicle document found; it may already have been reviewed.');
@@ -2504,6 +2517,7 @@ export class SettingsService {
     if (!Number.isFinite(amountKobo) || amountKobo <= 0) throw new BadRequestException('Enter a valid expense amount.');
     // The column is a Postgres integer; a larger amount used to fail the insert with a 500.
     if (Math.round(amountKobo) > MAX_INT_KOBO) throw new BadRequestException('That expense amount is too large. Record it in smaller parts.');
+    const description = optionalText(input.description, { label: 'Description', max: 500 });
     const serviceDate = input.serviceDate ? new Date(input.serviceDate) : new Date();
     if (Number.isNaN(serviceDate.getTime())) throw new BadRequestException('Enter a valid expense date.');
     const nextServiceDate = input.nextServiceDate ? new Date(input.nextServiceDate) : null;
@@ -2515,7 +2529,7 @@ export class SettingsService {
       `insert into "VehicleExpense" ("id", "vehicleId", "ownerId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate")
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        returning "id", "category", "amountKobo", "serviceDate"`,
-      id, vehicleId, ownerId, category, Math.round(amountKobo), input.description?.trim() || null, serviceDate,
+      id, vehicleId, ownerId, category, Math.round(amountKobo), description, serviceDate,
       Number.isFinite(odometerKm) ? odometerKm : null, input.receiptUrl?.trim() || null, nextServiceDate,
     );
     await this.prisma.auditLog.create({
@@ -2597,7 +2611,7 @@ export class SettingsService {
         })),
       };
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load fleet assignments. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load fleet assignments.`, error);
     }
   }
 
@@ -2651,7 +2665,7 @@ export class SettingsService {
       }),
       this.prisma.vehicle.update({ where: { id: vehicleId }, data: { assignedDriverId: driverId } }),
     ]).catch((error) => {
-      throw new InternalServerErrorException(`Could not assign this driver: ${this.errorMessage(error)}`);
+      throw internalError(`Could not assign this driver.`, error);
     });
 
     await Promise.all([
@@ -2677,7 +2691,7 @@ export class SettingsService {
 
     const previousDriverId = vehicle.assignedDriverId;
     const updated = await this.prisma.vehicle.update({ where: { id: vehicleId }, data: { assignedDriverId: null } }).catch((error) => {
-      throw new InternalServerErrorException(`Could not unassign this driver: ${this.errorMessage(error)}`);
+      throw internalError(`Could not unassign this driver.`, error);
     });
 
     await this.notifications.create({
@@ -2713,7 +2727,7 @@ export class SettingsService {
       );
       if (rows[0]) return rows[0];
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load safety settings: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load safety settings.`, error);
     }
 
     return {
@@ -2761,7 +2775,7 @@ export class SettingsService {
         next.emergencyContact ? String(next.emergencyContact) : null,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not save this safety setting. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this safety setting.`, error);
     }
 
     return next;
@@ -2802,7 +2816,7 @@ export class SettingsService {
       );
       return rows[0];
     } catch (error) {
-      throw new InternalServerErrorException(`Could not update driver location: ${this.errorMessage(error)}`);
+      throw internalError(`Could not update driver location.`, error);
     }
   }
 
@@ -2897,7 +2911,7 @@ export class SettingsService {
         create: { key: definition.key, value, updatedById: actorId },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not save ${definition.title.toLowerCase()}. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save ${definition.title.toLowerCase()}.`, error);
     }
 
     await this.prisma.auditLog.create({
@@ -2970,7 +2984,7 @@ export class SettingsService {
       // incident during a DB hiccup would see fabricated audit history with nothing
       // distinguishing it from the real trail, which defeats the entire point of an
       // audit log.
-      throw new InternalServerErrorException(`Could not load audit logs. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load audit logs.`, error);
     }
   }
 
@@ -3059,7 +3073,7 @@ export class SettingsService {
       // ("System - Preview backend started") as if it were the record the admin asked
       // for - a serious integrity problem for a feature that exists for accountability.
       if (error instanceof NotFoundException) throw error;
-      throw new InternalServerErrorException(`Could not load this audit entry. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load this audit entry.`, error);
     }
   }
 

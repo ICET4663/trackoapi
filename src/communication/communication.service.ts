@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { internalError } from "../common/input-rules";
 import { randomBytes, randomUUID } from "crypto";
 import type { AuthUser } from "../common/types/auth-user";
 import { TranslationProviderService } from "../integrations/translation-provider.service";
@@ -109,9 +110,7 @@ export class CommunicationService {
       return existing!;
     } catch (error) {
       if (error instanceof NotFoundException) throw error;
-      throw new InternalServerErrorException(
-        `Could not open this conversation. Please try again: ${this.errorMessage(error)}`,
-      );
+      throw internalError(`Could not open this conversation.`, error);
     }
   }
 
@@ -250,9 +249,7 @@ export class CommunicationService {
         orderBy: { createdAt: "asc" },
       });
     } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not load messages. Please try again: ${this.errorMessage(error)}`,
-      );
+      throw internalError(`Could not load messages.`, error);
     }
 
     return {
@@ -305,9 +302,7 @@ export class CommunicationService {
         include: { sender: { include: { profile: true } } },
       });
     } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not send this message. Please try again: ${this.errorMessage(error)}`,
-      );
+      throw internalError(`Could not send this message.`, error);
     }
 
     await this.prisma.conversation
@@ -565,9 +560,7 @@ export class CommunicationService {
       this.logger.error(
         `uploadMedia() failed to save the MediaAsset record: ${this.errorMessage(error)}`,
       );
-      throw new InternalServerErrorException(
-        `Could not save this upload. Please try again: ${this.errorMessage(error)}`,
-      );
+      throw internalError(`Could not save this upload.`, error);
     }
   }
 
@@ -667,9 +660,7 @@ export class CommunicationService {
         this.logger.error(
           `prepareMedia() Supabase storage upload failed: ${this.errorMessage(error)}`,
         );
-        throw new InternalServerErrorException(
-          `Could not upload this file. Please try again: ${this.errorMessage(error)}`,
-        );
+        throw internalError(`Could not upload this file.`, error);
       }
     }
 

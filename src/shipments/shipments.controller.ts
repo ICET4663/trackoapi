@@ -61,7 +61,7 @@ export class ShipmentsController {
     @Headers('authorization') authorization?: string,
   ) {
     const user = await this.requestUser.fromAuthorizationHeader(authorization, 'DRIVER');
-    return this.shipmentsService.proposeCounterOffer(assignmentId, user.sub, Number(body?.amountKobo), body?.note);
+    return this.shipmentsService.proposeCounterOffer(assignmentId, user.sub, body?.amountKobo, body?.note);
   }
 
   @Post('assignments/:assignmentId/counter-offer/respond')

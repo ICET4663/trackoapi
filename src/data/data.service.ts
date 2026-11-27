@@ -1,4 +1,5 @@
-import { BadRequestException, ForbiddenException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { internalError, isUniqueClash, optionalText, requiredText } from '../common/input-rules';
 import { Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShipmentsService } from '../shipments/shipments.service';
@@ -256,7 +257,7 @@ export class DataService {
       // by this endpoint would silently render fake data instead of surfacing the outage.
       if (error instanceof BadRequestException || error instanceof ForbiddenException) throw error;
       this.logger.error(`list(${collection}) failed: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not load this data. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load this data.`, error);
     }
   }
 
@@ -278,25 +279,19 @@ export class DataService {
       switch (collection) {
         case 'customer-shipments':
           if (role && role !== 'CUSTOMER') throw new ForbiddenException('Only customers can create shipments.');
-          return await this.prisma.shipment.create({
-            data: {
-              reference: `TRK-${Date.now()}`,
-              customerId: userId,
-              pickupLabel: String(item.pickupLabel ?? item.origin ?? 'Pickup'),
-              pickupAddress: String(item.pickupAddress ?? item.origin ?? 'Pickup address'),
-              destinationLabel: String(item.destinationLabel ?? item.destination ?? 'Destination'),
-              destinationAddress: String(item.destinationAddress ?? item.destination ?? 'Destination address'),
-              cargoDescription: String(item.cargoDescription ?? item.commodity ?? 'Cargo'),
-            },
-          });
+          // 27 Nov: this used to save a shipment with no quote, escrow or input checks. Bookings
+          // go through POST /v1/shipments, which prices, validates and funds them.
+          throw new BadRequestException('Book shipments through the booking form.');
         case 'owner-trucks': {
           if (role && role !== 'TRUCK_OWNER') throw new ForbiddenException('Only truck owners can register trucks.');
           // register-truck.tsx tells the owner "saved to the backend fleet database" -
           // the default branch below only ever echoed the submitted form fields back
           // with a local id and never wrote a Vehicle row, so that message was false
           // and the truck vanished on reload.
-          const plateNumber = String(item.reg ?? item.plateNumber ?? '').trim().toUpperCase();
-          if (!plateNumber) throw new BadRequestException('A registration/plate number is required.');
+          const plateNumber = requiredText(item.reg ?? item.plateNumber, { label: 'Plate number', max: 20 }).toUpperCase();
+          if (!/^[A-Z0-9][A-Z0-9 -]*$/.test(plateNumber)) throw new BadRequestException('A plate number uses letters, numbers, spaces and dashes only.');
+          const truckType = optionalText(item.type, { label: 'Truck type', max: 60 }) ?? 'Flatbed';
+          const base = optionalText(item.base, { label: 'Base', max: 100 });
           // A truck with no parseable/plausible capacity would silently never match any
           // shipment (matching treats a null capacityKg as 0), leaving the owner with a
           // truck that looks registered but can never receive work and no error telling
@@ -309,10 +304,10 @@ export class DataService {
             data: {
               ownerId: userId,
               plateNumber,
-              type: String(item.type ?? 'Flatbed'),
+              type: truckType,
               capacityKg,
               capacityM3,
-              registrationState: item.base ? String(item.base) : null,
+              registrationState: base,
             },
           });
           await this.prisma.$executeRawUnsafe(
@@ -346,8 +341,10 @@ export class DataService {
       // (customer-shipments, owner-trucks) can actually throw here; the `default` echo
       // branch never touches the DB and returns before this catch is reachable.
       if (error instanceof BadRequestException || error instanceof ForbiddenException) throw error;
+      // A plate is unique across Trako; a second registration used to come back as a 500.
+      if (isUniqueClash(error, 'plateNumber')) throw new BadRequestException('A truck with this plate number is already registered.');
       this.logger.error(`create(${collection}) failed: ${this.errorMessage(error)}`);
-      throw new InternalServerErrorException(`Could not save this. Please try again: ${this.errorMessage(error)}`);
+      throw internalError(`Could not save this.`, error);
     }
   }
 

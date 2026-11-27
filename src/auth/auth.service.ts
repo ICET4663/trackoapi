@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { internalError } from '../common/input-rules';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OtpPurpose, Prisma, UserRole } from '@prisma/client';
@@ -61,7 +62,7 @@ export class AuthService {
         },
       });
     } catch (error) {
-      throw new InternalServerErrorException(`Could not start registration. Please try again: ${error instanceof Error ? error.message : String(error)}`);
+      throw internalError(`Could not start registration.`, error);
     }
     // audit() already never throws on its own failure - safe to await plainly.
     await this.audit('REGISTRATION_OTP_REQUESTED', 'OtpCode', undefined, {
@@ -96,7 +97,8 @@ export class AuthService {
 
   async requestPasswordReset(identifier: string) {
     const code = this.generateOtpCode();
-    const normalized = identifier.trim().toLowerCase();
+    const normalized = typeof identifier === 'string' ? identifier.trim().toLowerCase() : '';
+    if (!normalized || normalized.length > 254) throw new BadRequestException('Enter your email address or phone number.');
     await this.rateLimit.assertAllowed(`password-reset:${normalized}`, {
       limit: Number(this.config.get<string>('AUTH_OTP_RATE_LIMIT') ?? 5),
       label: 'Password reset OTP',
@@ -138,8 +140,9 @@ export class AuthService {
   }
 
   async confirmPasswordReset(body: { identifier?: string; code?: string; password?: string }) {
-    const identifier = body.identifier?.trim().toLowerCase();
-    if (!identifier || !body.code || !body.password || body.password.length < 6) {
+    // Non-text fields used to crash here with a 500 instead of a 400.
+    const identifier = typeof body.identifier === 'string' ? body.identifier.trim().toLowerCase() : '';
+    if (!identifier || typeof body.code !== 'string' || !body.code || typeof body.password !== 'string' || body.password.length < 6) {
       throw new BadRequestException('Identifier, OTP code, and a new password are required.');
     }
 

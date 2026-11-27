@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { internalError } from '../common/input-rules';
 import { UserRole } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -275,7 +276,7 @@ export class NotificationsService {
       );
       return rows.map((row) => this.toRecord(row));
     } catch (error) {
-      throw new InternalServerErrorException(`Could not load notifications: ${this.errorMessage(error)}`);
+      throw internalError(`Could not load notifications.`, error);
     }
   }
 
@@ -312,7 +313,7 @@ export class NotificationsService {
         role,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not mark this notification as read: ${this.errorMessage(error)}`);
+      throw internalError(`Could not mark this notification as read.`, error);
     }
     if (!rows[0]) throw new NotFoundException('Notification not found.');
     return this.toRecord(rows[0]);
@@ -328,7 +329,7 @@ export class NotificationsService {
         role,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not mark notifications as read: ${this.errorMessage(error)}`);
+      throw internalError(`Could not mark notifications as read.`, error);
     }
 
     return { markedRead: true, updatedAt: new Date().toISOString() };
@@ -360,7 +361,7 @@ export class NotificationsService {
       // A push token that silently failed to save meant this device would never receive
       // push notifications - the caller (registerPushToken screens) needs to know that
       // instead of being told "registered: true" for a token that isn't actually saved.
-      throw new InternalServerErrorException(`Could not register this device for push notifications: ${this.errorMessage(error)}`);
+      throw internalError(`Could not register this device for push notifications.`, error);
     }
 
     return {
@@ -381,7 +382,7 @@ export class NotificationsService {
         token,
       );
     } catch (error) {
-      throw new InternalServerErrorException(`Could not unregister this device from push notifications: ${this.errorMessage(error)}`);
+      throw internalError(`Could not unregister this device from push notifications.`, error);
     }
     return { unregistered: true };
   }
