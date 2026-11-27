@@ -16,7 +16,7 @@ describe('DeploymentConfigService.summary', () => {
     expect(withoutWebhook.summary().integrations).toContainEqual({
       name: 'fatalErrorAlerts',
       mode: 'mock',
-      missing: ['TELEMETRY_ALERT_WEBHOOK_URL'],
+      missing: ['TELEMETRY_ALERT_EMAIL or TELEMETRY_ALERT_WEBHOOK_URL'],
     });
     expect(withWebhook.summary().integrations).toContainEqual({
       name: 'fatalErrorAlerts',

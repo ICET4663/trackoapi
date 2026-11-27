@@ -319,7 +319,7 @@ describe('SettingsService truck-owner fleet reporting', () => {
     expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
 
-  it('refuses a receipt that is not a web link or image before writing a ledger row (28 Nov)', async () => {
+  it('refuses a receipt that is not a web link or image before writing a ledger row (27 Nov)', async () => {
     const { service, prisma } = buildOwnerService();
 
     await expect(service.createVehicleExpense('vehicle-1', 'owner-1', { category: 'fuel', amountKobo: 10_000, receiptUrl: 'javascript:alert(1)' }))
@@ -638,7 +638,7 @@ describe('SettingsService driver document review is a real workflow, not a fake 
     );
   });
 
-  it('refuses a reviewer note over 500 characters before writing anything (28 Nov)', async () => {
+  it('refuses a reviewer note over 500 characters before writing anything (27 Nov)', async () => {
     const queryRawUnsafe = jest.fn();
     const { service } = buildService(queryRawUnsafe);
 
@@ -689,7 +689,7 @@ describe('SettingsService vehicle document review', () => {
     await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT', note: '   ' })).rejects.toThrow('reviewer note');
   });
 
-  it('refuses a vehicle reviewer note over 500 characters before writing anything (28 Nov)', async () => {
+  it('refuses a vehicle reviewer note over 500 characters before writing anything (27 Nov)', async () => {
     const { service, queryRawUnsafe } = buildService();
 
     await expect(service.reviewVehicleDocument('doc-1', 'admin-1', { decision: 'REJECT', note: 'x'.repeat(501) })).rejects.toThrow(

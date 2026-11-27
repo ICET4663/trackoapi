@@ -17,7 +17,7 @@ type CreateUserInput = {
   verificationStatus?: VerificationStatus;
 };
 
-/** The sign-up profile fields that are stored, checked so an over-long value is refused (28 Nov). */
+/** The sign-up profile fields that are stored, checked so an over-long value is refused (27 Nov). */
 export function signupProfileFields(profile: Record<string, unknown> = {}) {
   return {
     address: optionalText(profile.address, { label: 'Address', max: 500 }) ?? undefined,

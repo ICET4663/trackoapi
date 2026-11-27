@@ -81,7 +81,7 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
     expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
   });
 
-  it('register() refuses an address over 500 characters before the code is checked or used (28 Nov)', async () => {
+  it('register() refuses an address over 500 characters before the code is checked or used (27 Nov)', async () => {
     const assertAllowed = jest.fn().mockResolvedValue(undefined);
     const { service, prisma } = buildService({ assertAllowed });
 
@@ -94,7 +94,7 @@ describe('AuthService OTP verification is rate-limited on the guess side, not ju
     expect((prisma.otpCode.findFirst as jest.Mock)).not.toHaveBeenCalled();
   });
 
-  it('confirmPasswordReset() refuses a new password over 128 characters before the code is checked (28 Nov)', async () => {
+  it('confirmPasswordReset() refuses a new password over 128 characters before the code is checked (27 Nov)', async () => {
     const assertAllowed = jest.fn().mockResolvedValue(undefined);
     const { service, prisma } = buildService({ assertAllowed });
 

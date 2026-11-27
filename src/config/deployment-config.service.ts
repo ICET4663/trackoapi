@@ -84,7 +84,7 @@ export class DeploymentConfigService {
       {
         name: 'fatalErrorAlerts',
         mode: fatalAlertConfig(this.config).configured ? 'configured' : 'mock',
-        missing: fatalAlertConfig(this.config).configured ? [] : ['TELEMETRY_ALERT_WEBHOOK_URL'],
+        missing: fatalAlertConfig(this.config).configured ? [] : ['TELEMETRY_ALERT_EMAIL or TELEMETRY_ALERT_WEBHOOK_URL'],
       },
     ];
   }

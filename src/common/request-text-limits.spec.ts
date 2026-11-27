@@ -11,7 +11,7 @@ async function errorsFor<T extends object>(cls: new () => T, body: Record<string
   return errors.map((error) => ({ property: error.property, messages: Object.values(error.constraints ?? {}) }));
 }
 
-describe('request text limits (28 Nov)', () => {
+describe('request text limits (27 Nov)', () => {
   const booking = {
     origin: '14 Admiralty Way, Lekki Phase 1, Lagos',
     destination: 'Kano Central Market, Kano',
