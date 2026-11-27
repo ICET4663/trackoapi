@@ -1,12 +1,15 @@
 import { IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
+import { DATA_URL_MAX } from '../../common/input-rules';
 
 export class CreateShipmentDto {
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   origin?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   destination?: string;
 
   @IsOptional()
@@ -17,10 +20,12 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(200, { message: 'Keep the commodity under 200 characters.' })
   cargoType?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(100, { message: 'Keep the quantity under 100 characters.' })
   quantity?: string;
 
   @IsOptional()
@@ -33,18 +38,22 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(100, { message: 'Keep the truck type under 100 characters.' })
   truckType?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(DATA_URL_MAX)
   cargoPhotoUri?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   pickupLabel?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   pickupAddress?: string;
 
   @IsOptional()
@@ -57,10 +66,12 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   destinationLabel?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   destinationAddress?: string;
 
   @IsOptional()
@@ -73,6 +84,7 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(1000)
   cargoDescription?: string;
 
   @IsOptional()
@@ -97,10 +109,12 @@ export class CreateShipmentDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(8192)
   quoteToken?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(30, { message: 'Enter a pickup contact phone number of up to 30 characters.' })
   pickupContactPhone?: string;
 
   // The same value on every retry of one booking attempt, so a retry after a lost
