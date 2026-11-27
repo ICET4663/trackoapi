@@ -319,6 +319,16 @@ describe('SettingsService truck-owner fleet reporting', () => {
     expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
 
+  it('refuses a receipt that is not a web link or image before writing a ledger row (28 Nov)', async () => {
+    const { service, prisma } = buildOwnerService();
+
+    await expect(service.createVehicleExpense('vehicle-1', 'owner-1', { category: 'fuel', amountKobo: 10_000, receiptUrl: 'javascript:alert(1)' }))
+      .rejects.toThrow('Receipt is not a valid link.');
+    await expect(service.createVehicleExpense('vehicle-1', 'owner-1', { category: 'fuel', amountKobo: 10_000, receiptUrl: { url: 'x' } as never }))
+      .rejects.toThrow('Receipt must be a link.');
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
+  });
+
   it('does not expose a load that is outside the owner fleet', async () => {
     const { service } = buildOwnerService();
     await expect(service.ownerLoadDetail('owner-1', 'shipment-elsewhere')).rejects.toBeInstanceOf(NotFoundException);

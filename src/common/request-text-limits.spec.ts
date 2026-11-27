@@ -3,6 +3,7 @@ import { validate } from 'class-validator';
 import { MessageKind } from '@prisma/client';
 import { CreateShipmentDto } from '../shipments/dto/create-shipment.dto';
 import { SendMessageDto } from '../communication/dto/send-message.dto';
+import { DeleteAccountDto } from '../auth/dto/delete-account.dto';
 
 // The global ValidationPipe runs these same decorators on every booking and chat message.
 async function errorsFor<T extends object>(cls: new () => T, body: Record<string, unknown>) {
@@ -80,6 +81,12 @@ describe('request text limits (28 Nov)', () => {
   it('explains the message limit in plain words', async () => {
     const errors = await errorsFor(SendMessageDto, { ...message, body: 'x'.repeat(4001) });
     expect(errors[0].messages).toEqual(['Keep the message under 4,000 characters.']);
+  });
+
+  it('limits the reason on a self-service account deletion to 1,000 characters', async () => {
+    expect(await errorsFor(DeleteAccountDto, { password: 'password123', reason: 'Moving abroad' })).toEqual([]);
+    const errors = await errorsFor(DeleteAccountDto, { password: 'password123', reason: 'x'.repeat(1001) });
+    expect(errors).toEqual([{ property: 'reason', messages: ['Keep the reason under 1,000 characters.'] }]);
   });
 
   it.each([-1, 3601])('refuses a voice note length of %i seconds', async (durationSeconds) => {

@@ -2528,13 +2528,14 @@ export class SettingsService {
     if (nextServiceDate && Number.isNaN(nextServiceDate.getTime())) throw new BadRequestException('Enter a valid next service date.');
     const odometerKm = input.odometerKm === undefined || input.odometerKm === null ? null : Math.max(0, Math.round(Number(input.odometerKm)));
     if (odometerKm !== null && odometerKm > 10_000_000) throw new BadRequestException('Enter a valid odometer reading.');
+    const receiptUrl = mediaLink(input.receiptUrl, 'Receipt');
     const id = `expense_${randomUUID().replace(/-/g, '')}`;
     const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; category: string; amountKobo: number; serviceDate: Date }>>(
       `insert into "VehicleExpense" ("id", "vehicleId", "ownerId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate")
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        returning "id", "category", "amountKobo", "serviceDate"`,
       id, vehicleId, ownerId, category, Math.round(amountKobo), description, serviceDate,
-      Number.isFinite(odometerKm) ? odometerKm : null, input.receiptUrl?.trim() || null, nextServiceDate,
+      Number.isFinite(odometerKm) ? odometerKm : null, receiptUrl, nextServiceDate,
     );
     await this.prisma.auditLog.create({
       data: { actorId: ownerId, action: 'VEHICLE_EXPENSE_RECORDED', entity: 'Vehicle', entityId: vehicleId, metadata: this.toJson({ expenseId: id, category, amountKobo: Math.round(amountKobo) }) },

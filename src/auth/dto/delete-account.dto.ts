@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class DeleteAccountDto {
   @IsString()
@@ -7,5 +7,6 @@ export class DeleteAccountDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(1000, { message: 'Keep the reason under 1,000 characters.' })
   reason?: string;
 }
