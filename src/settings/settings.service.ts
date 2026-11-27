@@ -11,6 +11,18 @@ import { ensurePaymentModeColumns, paystackMode } from '../integrations/paystack
 import { ensurePlatformFeeColumn } from '../integrations/platform-commission';
 import { PRICING_SETTING_DEFAULTS, PRICING_SETTING_DEFINITIONS } from '../integrations/pricing-settings';
 import { DEFAULT_JOB_BOARD_MINUTES, JOB_BOARD_MINUTES_KEY } from '../shipments/job-board-store';
+import {
+  accessibleShipmentId,
+  MAX_INT_KOBO,
+  safetyLocation,
+  safetyMessage,
+  shipmentRef,
+  supportChannel,
+  supportMessage,
+  supportTopic,
+  ticketId,
+  type ShipmentLookup,
+} from '../common/support-input';
 import { DEFAULT_JOB_BOARD_PRICE_RANGE_PERCENT, JOB_BOARD_PRICE_RANGE_KEY, MAX_JOB_BOARD_PRICE_RANGE_PERCENT } from '../shipments/job-board-price';
 
 type Role = 'CUSTOMER' | 'DRIVER' | 'TRUCK_OWNER' | 'DISPATCHER' | 'ADMIN';
@@ -562,11 +574,20 @@ export class SettingsService {
     };
   }
 
-  async createSupportContact(userId: string, input: { channel?: string; role?: string; topic?: string; message?: string; shipmentId?: string }) {
-    const channel = String(input.channel ?? 'CHAT').toUpperCase();
-    const topic = String(input.topic ?? input.role ?? 'General support');
-    const message = String(input.message ?? `${channel} support request from ${input.role ?? 'user'}.`);
-    const id = `support-${Date.now()}`;
+  async createSupportContact(
+    userId: string,
+    input: { channel?: string; role?: string; topic?: string; message?: string; shipmentId?: string },
+    role?: Role,
+  ) {
+    const channel = supportChannel(input.channel);
+    const roleLabel = typeof input.role === 'string' ? input.role.slice(0, 20) : 'user';
+    const topic = supportTopic(input.topic ?? input.role, 'General support');
+    const message = supportMessage(input.message) ?? `${channel} support request from ${roleLabel}.`;
+    // Only a shipment this user can see may be linked; an unknown one used to fail the insert.
+    const ref = shipmentRef(input.shipmentId);
+    const shipmentId = await accessibleShipmentId(this.prisma as unknown as ShipmentLookup, userId, role, ref);
+    if (ref && !shipmentId) throw new BadRequestException('That shipment was not found on your account.');
+    const id = ticketId('support');
 
     // Same reasoning as createSafetyTicket() below: the catch here used to swallow a failed
     // insert into a fake "request received" response, so a user's support request could be
@@ -578,16 +599,16 @@ export class SettingsService {
         `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
          values ($1, $2, $3, $4, $5, $6, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
-        input.shipmentId ?? null,
+        shipmentId,
         userId,
         topic,
         channel,
         message,
       );
     } catch (error) {
-      throw new InternalServerErrorException(
-        `Could not submit your support request. Please try again: ${this.errorMessage(error)}`,
-      );
+      // The database's own error text stays in the server log, never in the user's message.
+      console.error(`createSupportContact() failed to save ticket ${id}: ${this.errorMessage(error)}`);
+      throw new InternalServerErrorException('Could not submit your support request. Please try again.');
     }
 
     await this.notifications.create({
@@ -606,7 +627,7 @@ export class SettingsService {
         action: 'SUPPORT_TICKET_CREATED',
         entity: 'SupportTicket',
         entityId: id,
-        metadata: { channel, topic, role: input.role ?? null },
+        metadata: { channel, topic, role: role ?? roleLabel },
       },
     }).catch(() => null);
 
@@ -641,12 +662,13 @@ export class SettingsService {
     role: Role,
     input: SafetyAlertInput & { topic: string; action: string; userMessage: string },
   ) {
-    const id = `safety-${Date.now()}`;
-    const location =
-      Number.isFinite(input.latitude) && Number.isFinite(input.longitude)
-        ? ` Location: ${input.latitude}, ${input.longitude}.`
-        : '';
-    const message = `${input.message ?? `${input.topic} reported from the ${role.toLowerCase()} app.`}${location}`;
+    const id = ticketId('safety');
+    const point = safetyLocation(input.latitude, input.longitude);
+    const location = point ? ` Location: ${point.latitude}, ${point.longitude}.` : '';
+    const message = `${safetyMessage(input.message, `${input.topic} reported from the ${role.toLowerCase()} app.`)}${location}`;
+    // An alert is never refused over its shipment link: one that is unknown or not this user's
+    // is dropped (it used to fail the insert, so the alert never reached operations).
+    const shipmentId = await accessibleShipmentId(this.prisma as unknown as ShipmentLookup, userId, role, shipmentRef(input.shipmentId));
 
     // This is the single most safety-critical write path in the app - a driver or
     // customer using this believes operations has been alerted. The catch below used to
@@ -660,14 +682,15 @@ export class SettingsService {
         `insert into "SupportTicket" ("id", "shipmentId", "userId", "topic", "channel", "message", "status", "updatedAt")
          values ($1, $2, $3, $4, 'EMERGENCY', $5, 'OPEN'::"SupportTicketStatus", current_timestamp)`,
         id,
-        input.shipmentId ?? null,
+        shipmentId,
         userId,
         input.topic,
         message,
       );
     } catch (error) {
+      console.error(`createSafetyTicket() failed to save ticket ${id}: ${this.errorMessage(error)}`);
       throw new InternalServerErrorException(
-        `Could not report this ${input.topic.toLowerCase()}. Please try again immediately, or contact emergency services directly if you cannot wait: ${this.errorMessage(error)}`,
+        `Could not report this ${input.topic.toLowerCase()}. Please try again immediately, or contact emergency services directly if you cannot wait.`,
       );
     }
 
@@ -2479,11 +2502,14 @@ export class SettingsService {
     if (!allowedCategories.includes(category)) throw new BadRequestException(`Use one of: ${allowedCategories.join(', ')}.`);
     const amountKobo = Number(input.amountKobo ?? input.amount ?? 0);
     if (!Number.isFinite(amountKobo) || amountKobo <= 0) throw new BadRequestException('Enter a valid expense amount.');
+    // The column is a Postgres integer; a larger amount used to fail the insert with a 500.
+    if (Math.round(amountKobo) > MAX_INT_KOBO) throw new BadRequestException('That expense amount is too large. Record it in smaller parts.');
     const serviceDate = input.serviceDate ? new Date(input.serviceDate) : new Date();
     if (Number.isNaN(serviceDate.getTime())) throw new BadRequestException('Enter a valid expense date.');
     const nextServiceDate = input.nextServiceDate ? new Date(input.nextServiceDate) : null;
     if (nextServiceDate && Number.isNaN(nextServiceDate.getTime())) throw new BadRequestException('Enter a valid next service date.');
-    const odometerKm = input.odometerKm === undefined ? null : Math.max(0, Math.round(Number(input.odometerKm)));
+    const odometerKm = input.odometerKm === undefined || input.odometerKm === null ? null : Math.max(0, Math.round(Number(input.odometerKm)));
+    if (odometerKm !== null && odometerKm > 10_000_000) throw new BadRequestException('Enter a valid odometer reading.');
     const id = `expense_${randomUUID().replace(/-/g, '')}`;
     const rows = await this.prisma.$queryRawUnsafe<Array<{ id: string; category: string; amountKobo: number; serviceDate: Date }>>(
       `insert into "VehicleExpense" ("id", "vehicleId", "ownerId", "category", "amountKobo", "description", "serviceDate", "odometerKm", "receiptUrl", "nextServiceDate")
